@@ -177,11 +177,33 @@ impl ShelfScope {
     }
 }
 
+/// Who started a navigation of the tab's page. The browser's own
+/// `hiwave://` pages open only for the browser's UI, as Chrome's `chrome://`
+/// pages do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavInitiator {
+    /// The browser's UI: the address bar, a menu or shortcut, the tab strip,
+    /// the command palette, the shelf, settings, session restore.
+    Browser,
+    /// The document in the tab: a link (clicked by the user or by script),
+    /// a form submit, `location`, a meta refresh, a new-window request.
+    Page,
+}
+
+/// What [`navigate_content`] did with a navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavOutcome {
+    /// The tab's page was replaced (or the request was a no-op as before).
+    Followed,
+    /// Not followed: the tab keeps its page, as in Chrome.
+    Refused,
+}
+
 /// User events for cross-WebView communication
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum UserEvent {
-    Navigate(String),
+    Navigate(String, NavInitiator),
     GoBack,
     GoForward,
     Reload,
@@ -1188,7 +1210,7 @@ fn handle_chrome_ipc(
     match serde_json::from_str::<IpcMessage>(body) {
         Ok(msg) => match &msg {
             IpcMessage::Navigate { url } => {
-                let _ = chrome_proxy.send_event(UserEvent::Navigate(url.clone()));
+                let _ = chrome_proxy.send_event(UserEvent::Navigate(url.clone(), NavInitiator::Browser));
             }
             IpcMessage::GoBack => {
                 let _ = chrome_proxy.send_event(UserEvent::GoBack);
@@ -1220,7 +1242,7 @@ fn handle_chrome_ipc(
                 let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
                 let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
                 if let Some(u) = nav_url {
-                    let _ = chrome_proxy.send_event(UserEvent::Navigate(u));
+                    let _ = chrome_proxy.send_event(UserEvent::Navigate(u, NavInitiator::Browser));
                 } else {
                     let _ = chrome_proxy.send_event(UserEvent::NewTab);
                 }
@@ -1235,7 +1257,7 @@ fn handle_chrome_ipc(
                     if let Some(active_tab) = s.shell.get_active_tab() {
                         let url = active_tab.url.to_string();
                         info!("Navigating to new active tab after close: {}", crate::page_url_for_log(&url));
-                        let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
+                        let _ = chrome_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Browser));
                     }
                 }
             }
@@ -1255,7 +1277,7 @@ fn handle_chrome_ipc(
                         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
                             info!("Navigating to tab URL: {}", crate::page_url_for_log(&url));
                             let _ = chrome_proxy
-                                .send_event(UserEvent::Navigate(url.to_string()));
+                                .send_event(UserEvent::Navigate(url.to_string(), NavInitiator::Browser));
                         }
                     }
                     // Sync zoom level for the newly activated tab
@@ -1277,7 +1299,7 @@ fn handle_chrome_ipc(
                                         result.get("url").and_then(|u| u.as_str())
                                     {
                                         let _ = chrome_proxy.send_event(
-                                            UserEvent::Navigate(url.to_string()),
+                                            UserEvent::Navigate(url.to_string(), NavInitiator::Browser),
                                         );
                                     } else {
                                         let _ = chrome_proxy.send_event(UserEvent::NewTab);
@@ -1333,7 +1355,7 @@ fn handle_chrome_ipc(
                     .ok()
                     .and_then(|s| s.shell.get_active_tab().map(|tab| tab.url.to_string()));
                 if let Some(url) = active_url {
-                    let _ = chrome_proxy.send_event(UserEvent::Navigate(url));
+                    let _ = chrome_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Browser));
                 }
             }
             IpcMessage::DeleteWorkspace { .. } => {
@@ -1382,7 +1404,7 @@ fn handle_chrome_ipc(
                     if let Some(restored) = data.get("restored") {
                         if let Some(url) = restored.get("url").and_then(|v| v.as_str()) {
                             let _ = chrome_proxy
-                                .send_event(UserEvent::Navigate(url.to_string()));
+                                .send_event(UserEvent::Navigate(url.to_string(), NavInitiator::Browser));
                         }
                     }
                 }
@@ -1651,7 +1673,7 @@ fn handle_shelf_ipc(
                                             result.get("url").and_then(|u| u.as_str())
                                         {
                                             let _ = shelf_proxy.send_event(
-                                                UserEvent::Navigate(url.to_string()),
+                                                UserEvent::Navigate(url.to_string(), NavInitiator::Browser),
                                             );
                                         } else {
                                             let _ =
@@ -1680,7 +1702,7 @@ fn handle_shelf_ipc(
                     }
                 }
                 IpcMessage::Navigate { url } => {
-                    let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone()));
+                    let _ = shelf_proxy.send_event(UserEvent::Navigate(url.clone(), NavInitiator::Browser));
                     let _ = shelf_proxy.send_event(UserEvent::CollapseShelf);
                 }
                 _ => {}
@@ -2209,7 +2231,7 @@ fn dispatch_view_input(
             }
             if let Some(url) = outcome.navigate.filter(|_| target == InputTarget::Page) {
                 info!(url = %crate::page_url_for_log(&url), "Link clicked");
-                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                let _ = click_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Page));
             }
         }
         // The wheel, from the content view's own `scrollWheel:`.
@@ -2319,7 +2341,7 @@ fn dispatch_view_input(
             if vk == 0x0D && target == InputTarget::Page {
                 if let Some(url) = view.form_submit_url() {
                     info!(url = %crate::page_url_for_log(&url), "Form submitted");
-                    let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                    let _ = click_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Page));
                     return;
                 }
             }
@@ -2389,6 +2411,9 @@ mod idle_page_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod close_tab_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod internal_nav_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
@@ -2609,6 +2634,68 @@ fn is_about_url(url: &str) -> bool {
 
 fn is_report_url(url: &str) -> bool {
     url == REPORT_URL
+}
+
+/// The tab's page goes to `url` (the `UserEvent::Navigate` handler): the
+/// browser's own pages by name, anything else as a web URL, a host or a
+/// search.
+fn navigate_content(
+    url: String,
+    initiator: NavInitiator,
+    state: &Arc<Mutex<AppState>>,
+    content: &impl ContentWebViewOps,
+    chrome: &impl ChromeUi,
+) -> NavOutcome {
+    let _ = initiator;
+    info!("Navigating content to: {}", crate::page_url_for_log(&url));
+    if is_new_tab_url(&url) {
+        load_new_tab(content);
+        chrome_url(chrome, "");
+        sync_shield_to_chrome(state, chrome);
+    } else if is_about_url(&url) {
+        // Update tab URL BEFORE loading the about page
+        // This prevents the data URL from overwriting the tab URL
+        set_active_tab_url(state, ABOUT_URL);
+        load_about_page(content);
+        chrome_url(chrome, ABOUT_URL);
+    } else if is_report_url(&url) {
+        // Update tab URL BEFORE loading the report page
+        set_active_tab_url(state, REPORT_URL);
+        load_report_page(content);
+        chrome_url(chrome, REPORT_URL);
+    } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
+        // Skip about: URLs (about:blank, about:srcdoc, etc.)
+        // Skip hiwave:// protocol URLs (handled above if recognized, otherwise ignore)
+        let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url
+        } else if url.contains('.') {
+            format!("https://{}", url)
+        } else {
+            format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
+        };
+        // Update the tab model BEFORE loading, like the about/report
+        // branches above. Without this the URL bar showed the typed URL
+        // only until the next renderTabs, which rewrote it from the stale
+        // model (live run 2026-08-05: typed wikipedia, bar snapped back to
+        // the old eBay URL).
+        set_active_tab_url(state, &full_url);
+        if let Err(e) = content.load_url(&full_url) {
+            error!("Failed to navigate: {}", e);
+        }
+        chrome_url(chrome, &full_url);
+    }
+    NavOutcome::Followed
+}
+
+/// The active tab's model URL, when `url` parses.
+fn set_active_tab_url(state: &Arc<Mutex<AppState>>, url: &str) {
+    if let Ok(mut s) = state.lock() {
+        if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
+            if let Ok(parsed_url) = url::Url::parse(url) {
+                let _ = s.shell.update_tab_url(tab_id, parsed_url);
+            }
+        }
+    }
 }
 
 fn should_record_history_url(url: &str) -> bool {
@@ -3511,7 +3598,7 @@ fn main() {
             );
             info!("New window redirected to tab: {}", ipc_log_shape("", &response));
             let _ = content_proxy4.send_event(UserEvent::SyncTabs);
-            let _ = content_proxy4.send_event(UserEvent::Navigate(url));
+            let _ = content_proxy4.send_event(UserEvent::Navigate(url, NavInitiator::Page));
             false
         })
         .with_ipc_handler(move |message| {
@@ -3531,7 +3618,7 @@ fn main() {
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
                         let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
                         if let Some(u) = url {
-                            let _ = content_proxy_ipc.send_event(UserEvent::Navigate(u.clone()));
+                            let _ = content_proxy_ipc.send_event(UserEvent::Navigate(u.clone(), NavInitiator::Page));
                         }
                     }
                     IpcMessage::AddToShelf { tab_id } => {
@@ -3665,7 +3752,7 @@ fn main() {
             // refactor, a separate unit — but it now blocks behind a
             // painted, visibly-alive window instead of a void.
             info!(url = %crate::page_url_for_log(&initial_url), "Deferring restored-tab navigation until after first paint");
-            let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone()));
+            let _ = proxy.send_event(UserEvent::Navigate(initial_url.clone(), NavInitiator::Browser));
         }
         info!("Content WebView created (RustKit)");
     }
@@ -4048,7 +4135,7 @@ fn main() {
                             if let Some(url) = view.link_at_point(content_x as f32, content_y as f32)
                             {
                                 info!(url = %crate::page_url_for_log(&url), "Link clicked");
-                                let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                let _ = click_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Page));
                             }
                         }
                     }
@@ -4099,7 +4186,7 @@ fn main() {
                                     // visible at all.
                                     if let Some(url) = view.form_submit_url() {
                                         info!(url = %crate::page_url_for_log(&url), "Form submitted");
-                                        let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                                        let _ = click_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Page));
                                         return;
                                     }
                                     (0x0D, String::new())
@@ -4458,7 +4545,7 @@ fn main() {
                             } else {
                                 info!(url = %crate::page_url_for_log(&url), "Script navigation");
                             }
-                            let _ = click_proxy.send_event(UserEvent::Navigate(url));
+                            let _ = click_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Page));
                         }
                         // CH2.E9: what the page committed, as the WebKit
                         // content view's handlers report it off macOS. Until
@@ -4504,82 +4591,8 @@ fn main() {
             }
             Event::UserEvent(user_event) => {
                 match user_event {
-                    UserEvent::Navigate(url) => {
-                        info!("Navigating content to: {}", crate::page_url_for_log(&url));
-                        if is_new_tab_url(&url) {
-                            #[cfg(target_os = "macos")]
-                            load_new_tab(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_new_tab(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "");
-                            sync_shield_to_chrome(&state_for_events, &chrome_for_events);
-                        } else if is_about_url(&url) {
-                            // Update tab URL BEFORE loading the about page
-                            // This prevents the data URL from overwriting the tab URL
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(ABOUT_URL) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            load_about_page(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_about_page(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "hiwave://about");
-                        } else if is_report_url(&url) {
-                            // Update tab URL BEFORE loading the report page
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(REPORT_URL) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            load_report_page(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_report_page(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "hiwave://report");
-                        } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
-                            // Skip about: URLs (about:blank, about:srcdoc, etc.)
-                            // Skip hiwave:// protocol URLs (handled above if recognized, otherwise ignore)
-                            let full_url = if url.starts_with("http://") || url.starts_with("https://") {
-                                url
-                            } else if url.contains('.') {
-                                format!("https://{}", url)
-                            } else {
-                                format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
-                            };
-                            // Update the tab model BEFORE loading, like the
-                            // about/report branches above. Without this the
-                            // URL bar showed the typed URL only until the
-                            // next renderTabs, which rewrote it from the
-                            // stale model (live run 2026-08-05: typed
-                            // wikipedia, bar snapped back to the old eBay
-                            // URL).
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(&full_url) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                if let Err(e) = content_for_events.load_url(&full_url) {
-                                    error!("Failed to navigate: {}", e);
-                                }
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                if let Err(e) = content_for_events.load_url(&full_url) {
-                                    error!("Failed to navigate: {}", e);
-                                }
-                            }
-                            chrome_url(&*chrome_for_events, &full_url);
-                        }
+                    UserEvent::Navigate(url, initiator) => {
+                        navigate_content(url, initiator, &state_for_events, &*content_for_events, &*chrome_for_events);
                     }
                     UserEvent::GoBack => {
                         info!("Going back");
