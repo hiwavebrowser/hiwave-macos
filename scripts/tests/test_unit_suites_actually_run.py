@@ -28,6 +28,7 @@ Property 4 is static (there is nothing to execute); 1-3 are behavioural.
 Run: python3 scripts/tests/test_unit_suites_actually_run.py
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -105,9 +106,13 @@ def _execute(behaviour):
         summary = tmp / "summary.md"
         summary.touch()
         script = tmp / "step.sh"
-        script.write_text(stub + run)
+        # LF line ends on every OS: text mode writes \r\n on Windows, which bash reads as part
+        # of each command.
+        script.write_bytes((stub + run).encode("utf-8"))
         proc = subprocess.run(
-            ["bash", str(script)],
+            # bash as PATH finds it: on Windows, CreateProcess searches the system directory
+            # before PATH, so a bare "bash" is WSL's, which cannot open this Windows path.
+            [shutil.which("bash") or "bash", str(script)],
             capture_output=True,
             text=True,
             env={
