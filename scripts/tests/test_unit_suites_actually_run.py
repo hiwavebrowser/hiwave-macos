@@ -28,13 +28,19 @@ Property 4 is static (there is nothing to execute); 1-3 are behavioural.
 Run: python3 scripts/tests/test_unit_suites_actually_run.py
 """
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from posix_bash import posix_bash  # noqa: E402
+
+
+class NoBash(Exception):
+    """The lane's shell cannot run here: the behavioural cases are skipped, said so."""
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "parity.yml"
@@ -109,10 +115,11 @@ def _execute(behaviour):
         # LF line ends on every OS: text mode writes \r\n on Windows, which bash reads as part
         # of each command.
         script.write_bytes((stub + run).encode("utf-8"))
+        bash = posix_bash()
+        if bash is None:
+            raise NoBash("no POSIX bash on this host (set HIWAVE_BASH; see posix_bash.py)")
         proc = subprocess.run(
-            # bash as PATH finds it: on Windows, CreateProcess searches the system directory
-            # before PATH, so a bare "bash" is WSL's, which cannot open this Windows path.
-            [shutil.which("bash") or "bash", str(script)],
+            [bash, str(script)],
             capture_output=True,
             text=True,
             env={
@@ -226,6 +233,8 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"ok  {name}")
+            except NoBash as exc:
+                print(f"skip {name}: {exc}")
             except AssertionError as exc:
                 failed = 1
                 print(f"FAIL {name}: {exc}")

@@ -66,6 +66,7 @@ class DriverTests(unittest.TestCase):
         # script by its shebang) and the watchdog measures and stops the python process itself.
         # The base interpreter, not a venv's: on Windows a venv's python.exe is a launcher that
         # runs the real interpreter as a child, so the watchdog would measure and stop the launcher.
+        # The fake runner uses only the standard library, so it needs nothing from the venv.
         self.runner = [getattr(sys, "_base_executable", sys.executable), str(script)]
 
     def tearDown(self):

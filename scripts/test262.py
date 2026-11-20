@@ -133,7 +133,10 @@ def resident_mb(pid):
 
 
 def _resident_mb_windows(pid):
-    """The working set of `pid` in MiB (Windows has neither /proc nor ps), or None."""
+    """The private bytes (commit charge) of `pid` in MiB (Windows has neither /proc nor ps), or
+    None. Not the working set: Windows trims that under memory pressure, so a runaway runner can
+    read below its real footprint; commit charge tracks a growing heap and is what RLIMIT_AS caps
+    on Linux."""
     import ctypes
     from ctypes import wintypes
 
@@ -158,7 +161,7 @@ def _resident_mb_windows(pid):
         counters.cb = ctypes.sizeof(Counters)
         if not kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
             return None
-        return counters.WorkingSetSize / (1024.0 * 1024.0)
+        return counters.PagefileUsage / (1024.0 * 1024.0)
     finally:
         kernel32.CloseHandle(handle)
 

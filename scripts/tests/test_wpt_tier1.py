@@ -11,12 +11,14 @@ Run: python3 scripts/tests/test_wpt_tier1.py
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from posix_bash import posix_bash  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -953,9 +955,11 @@ class Manifest(unittest.TestCase):
         self.assertNotIn("NOT YET RUN", text)
 
     def test_sync_check_passes_or_names_what_is_missing(self):
+        bash = posix_bash()
+        if bash is None:
+            self.skipTest("no POSIX bash on this host (set HIWAVE_BASH; see posix_bash.py)")
         proc = subprocess.run(
-            # bash as PATH finds it: on Windows a bare "bash" is the system directory's (WSL's).
-            [shutil.which("bash") or "bash", str(REPO / "scripts/wpt_sync.sh"), "--dry-run"],
+            [bash, str(REPO / "scripts/wpt_sync.sh"), "--dry-run"],
             capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
