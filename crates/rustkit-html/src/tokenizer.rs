@@ -476,7 +476,16 @@ impl Tokenizer {
                 self.emit_current_tag();
                 self.state = State::Data;
             }
-            _ => {
+            // eof-in-tag: the solidus ends the tag. Rewinding here would read
+            // that solidus again, and the tag would never end.
+            None => {
+                self.self_closing = true;
+                self.emit_current_tag();
+                self.state = State::Data;
+            }
+            // A character after the solidus starts an attribute. Reconsume it.
+            Some(_) => {
+                self.pos -= 1;
                 self.state = State::BeforeAttributeName;
             }
         }
@@ -485,8 +494,13 @@ impl Tokenizer {
     fn state_before_attribute_name(&mut self) {
         match self.consume() {
             Some(ch) if ch.is_ascii_whitespace() => {}
-            Some('/') | Some('>') | None => {
+            Some('/') | Some('>') => {
                 self.pos -= 1;
+                self.state = State::AfterAttributeName;
+            }
+            // EOF was not consumed, so it is not rewound. After-attribute name
+            // emits the tag when it sees it.
+            None => {
                 self.state = State::AfterAttributeName;
             }
             Some('=') => {
