@@ -383,6 +383,9 @@ class RealWindowGate(unittest.TestCase):
         lock.release()
         self.assertFalse(self.lock_path.exists())
 
+    @unittest.skipIf(os.name == "nt", "#1357: the real-window lock is never taken on Windows (no HID idle "
+                     "probe, so the oracle is always headless); this stress race only measures Windows "
+                     "filesystem timing (a just-written stale dir held open, delete-pending names)")
     def test_two_concurrent_recoverers_one_holder(self):
         """Two processes race to recover the same dead lock, ten rounds: one holder each time."""
         script = (

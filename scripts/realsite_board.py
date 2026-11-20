@@ -241,6 +241,10 @@ def hid_idle_seconds():
 
 
 def _pid_alive(pid):
+    """Whether process `pid` is running. os.kill(pid, 0) is the POSIX probe; on
+    Windows signal 0 is CTRL_C_EVENT, not a probe, so ask the process handle."""
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -248,6 +252,26 @@ def _pid_alive(pid):
     except PermissionError:
         return True
     return True
+
+
+def _pid_alive_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE, ERROR_ACCESS_DENIED = 0x1000, 259, 5
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # No such process; a process we may not query exists, as PermissionError does above.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class OracleLockBusy(RuntimeError):

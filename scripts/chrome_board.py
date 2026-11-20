@@ -432,7 +432,7 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
     report = Path("trench/chrome/census") / census_path.with_suffix(".md").name
     return {
         "source": census_path.name,
-        "report": str(report) if (repo_root / report).exists() else None,
+        "report": report.as_posix() if (repo_root / report).exists() else None,  # committed: '/' on every OS
         "date": census.get("meta", {}).get("date"),
         "oracle": census.get("meta", {}).get("oracle"),
         "red_total": len(red),
