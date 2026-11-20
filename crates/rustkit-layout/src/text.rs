@@ -720,6 +720,35 @@ impl GlyphRun {
     }
 }
 
+/// A run's line extents united with those of the fallback faces it drew characters from, as Blink
+/// unites every used font into the line box under `line-height: normal`
+/// (`NGInlineBoxState::AccumulateUsedFonts`). Each argument is (ascent, descent, line gap) in px.
+///
+/// Each face carries ITS OWN half-leading (half its rounded line gap) before the max is taken, so a
+/// primary face's gap never rides on top of a taller fallback face, and the united run then carries
+/// no gap of its own. Shared by every platform shaper; each collects its fallback faces' extents
+/// its own way.
+///
+/// Several fallback faces fold one at a time: the united run has no gap, so
+/// `unite(unite(p, f1), f2)` is the max over every face of its ascent (and descent) plus its own
+/// half-gap. Folding the faces' raw extents together first (the max ascent with the max gap of
+/// any face) is not the same when their gaps differ: that pairs one face's ascent with another
+/// face's gap.
+pub fn unite_fallback_extents(
+    primary: (f32, f32, f32),
+    fallback: (f32, f32, f32),
+) -> (f32, f32, f32) {
+    let (ascent, descent, gap) = primary;
+    let (fb_ascent, fb_descent, fb_gap) = fallback;
+    let primary_half = gap.round() / 2.0;
+    let fallback_half = fb_gap.round() / 2.0;
+    (
+        (ascent + primary_half).max(fb_ascent + fallback_half),
+        (descent + primary_half).max(fb_descent + fallback_half),
+        0.0,
+    )
+}
+
 /// The word separators a justified line widens (`TextLine::is_word_separator`).
 fn is_justify_separator(c: char) -> bool {
     matches!(c, ' ' | '\u{a0}')
@@ -1888,18 +1917,11 @@ impl TextShaper {
             let mut ascent = rustkit_text::macos::blink_ascent(&ct_font);
             let mut descent = ct_font.descent() as f32;
             let mut leading = ct_font.leading() as f32;
-            if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
-                // Blink gives each face ITS OWN half-leading (half its rounded
-                // line gap) before uniting, so a primary face's gap never
-                // rides on top of a taller fallback face: Arial 16px
-                // (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0)
-                // is max(14.5, 20) + max(3.5, 6.25) = 26 in Chrome, not 27.
-                // The run then carries no gap of its own.
-                let primary_half = leading.round() / 2.0;
-                let fallback_half = fb_leading.round() / 2.0;
-                ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
-                descent = (descent + primary_half).max(fb_descent + fallback_half);
-                leading = 0.0;
+            if let Some(fallback) = used_fallback_extents {
+                // Blink's union, shared with the other platform shapers: each face its own
+                // half-leading, the run then no gap (see `unite_fallback_extents`).
+                (ascent, descent, leading) =
+                    unite_fallback_extents((ascent, descent, leading), fallback);
             }
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
@@ -3239,6 +3261,48 @@ impl Default for FontLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fallback_face_taller_than_the_line_sets_both_extents() {
+        // The arithmetic behind Chrome 148 on Linux's 24px line for Arial 14px with the shield
+        // drawn from Noto Sans Symbols2. The inputs are those faces' whole-pixel extents as
+        // RustKit's Linux backend rounds them (Liberation Sans 13 + 3, Symbols2 15 + 9), not raw
+        // font metrics.
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 0.0), (15.0, 9.0, 0.0)),
+            (15.0, 9.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn the_primary_faces_gap_does_not_ride_on_a_taller_fallback_face() {
+        // Chrome on macOS: Arial 16px (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0) is
+        // max(14.48 + 0.5, 20) + max(3.39 + 0.5, 6.25) = 26 rounded, not 27.
+        assert_eq!(
+            unite_fallback_extents((14.48, 3.39, 0.52), (20.0, 6.25, 0.0)),
+            (20.0, 6.25, 0.0)
+        );
+    }
+
+    #[test]
+    fn several_fallback_faces_fold_one_at_a_time_each_with_its_own_gap() {
+        // f1 is tall with no gap, f2 short with a gap of 4: the line is max(13, 16, 12 + 2) above
+        // and max(3, 3, 3 + 2) below. Folding the raw extents first, (16, 3, 4), would give 18 + 5.
+        let primary = (13.0, 3.0, 0.0);
+        let (f1, f2) = ((16.0, 3.0, 0.0), (12.0, 3.0, 4.0));
+        let folded = unite_fallback_extents(unite_fallback_extents(primary, f1), f2);
+        assert_eq!(folded, (16.0, 5.0, 0.0));
+        assert_eq!(folded, unite_fallback_extents(unite_fallback_extents(primary, f2), f1));
+    }
+
+    #[test]
+    fn a_shorter_fallback_face_leaves_the_primary_line_with_its_gap_split_into_the_extents() {
+        // The primary face's rounded gap 2 becomes 1 above and 1 below; the run keeps no gap.
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 2.0), (12.0, 3.0, 0.0)),
+            (14.0, 4.0, 0.0)
+        );
+    }
 
     #[test]
     fn test_font_family_chain() {
