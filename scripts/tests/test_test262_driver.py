@@ -59,9 +59,12 @@ class DriverTests(unittest.TestCase):
         for name in ("a_grow.js", "b_ok.js"):
             (self.suite / "test" / name).write_text("/*---\ndescription: x\n---*/\n")
         (self.suite / "test" / "c_strict.js").write_text("/*---\nflags: [onlyStrict]\n---*/\n")
-        self.runner = root / "runner"
-        self.runner.write_text(FAKE_RUNNER)
-        self.runner.chmod(self.runner.stat().st_mode | stat.S_IEXEC)
+        script = root / "runner"
+        script.write_text(FAKE_RUNNER)
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
+        # The runner as an argv prefix, so the fake starts on any OS (Windows does not run a
+        # script by its shebang) and the watchdog measures and stops the python process itself.
+        self.runner = [sys.executable, str(script)]
 
     def tearDown(self):
         self.dir.cleanup()
@@ -88,6 +91,13 @@ class DriverTests(unittest.TestCase):
             results = self.run_files()
         self.check_stopped(results)
         self.assertIn("memory", results[("test/a_grow.js", "sloppy")][1])
+
+    def test_the_resident_size_of_a_running_process_is_read(self):
+        # #1362: the watchdog holds the cap by the runner's resident size. Windows has neither
+        # /proc nor ps, so it read nothing and could never stop a runaway runner.
+        rss = test262.resident_mb(os.getpid())
+        self.assertIsNotNone(rss)
+        self.assertGreater(rss, 1.0)
 
     def test_modes_follow_the_flags(self):
         self.assertEqual(test262.modes_of("test/c_strict.js", self.suite), ["strict"])
