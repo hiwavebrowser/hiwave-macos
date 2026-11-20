@@ -23544,7 +23544,7 @@ impl layout_ctx::LayoutCtx {
         value: &str,
         css_vars: &dyn VarSource,
     ) -> Option<String> {
-        if !value.contains("var(") {
+        if !value.contains("var(") && !value.contains("env(") {
             return Some(resolve_light_dark(value.to_string()));
         }
         let mut stack: Vec<&str> = Vec::new();
@@ -23576,7 +23576,7 @@ impl layout_ctx::LayoutCtx {
     }
 
     fn resolve_css_variables(&self, value: &str, css_vars: &dyn VarSource) -> String {
-        if !value.contains("var(") {
+        if !value.contains("var(") && !value.contains("env(") {
             return resolve_light_dark(value.to_string());
         }
         let mut stack: Vec<&str> = Vec::new();
@@ -23633,7 +23633,7 @@ impl Engine {
         };
         let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(own.len());
         for (name, raw) in &own {
-            let value = if raw.contains("var(") {
+            let value = if raw.contains("var(") || raw.contains("env(") {
                 let mut stack: Vec<&str> = vec![name.as_str()];
                 let mut budget = VAR_EXPANSION_BUDGET;
                 let (mut cycle, mut invalid) = (false, false);
@@ -52989,7 +52989,7 @@ impl VarSource for MaskedVars<'_> {
     }
 }
 
-/// Left-to-right `var()` substitution. The text a substitution produces is
+/// Left-to-right `var()` and `env()` substitution. The text a substitution produces is
 /// already fully resolved, so it is appended and never re-scanned; `stack`
 /// holds the variables being resolved (cycle detection). Every byte written
 /// at every level is charged to `budget`; once it is spent, the expansion
@@ -53028,7 +53028,13 @@ fn substitute_css_vars<'a>(
     }
     let mut out = String::with_capacity(value.len().min(*budget));
     let mut rest = value;
-    while let Some(start) = rest.find("var(") {
+    while let Some((start, environment)) = rest
+        .find("var(")
+        .map(|i| (i, false))
+        .into_iter()
+        .chain(find_css_env(rest).map(|i| (i, true)))
+        .min()
+    {
         if *budget == 0 {
             return out;
         }
@@ -53044,21 +53050,39 @@ fn substitute_css_vars<'a>(
             Some(i) => (content[..i].trim(), Some(content[i + 1..].trim())),
             None => (content.trim(), None),
         };
-        let found = layers.iter().find_map(|l| l.var(name));
-        let resolved = match found {
-            Some((key, raw)) if !stack.contains(&key) => {
-                stack.push(key);
-                let mut raw_invalid = false;
-                let r = substitute_css_vars(raw, layers, stack, budget, cycle, &mut raw_invalid);
-                stack.pop();
-                // A variable whose own value is invalid counts as unset.
-                (!raw_invalid).then_some(r)
+        let resolved = if environment {
+            // RustKit presents rectangular viewports, with zero safe-area insets.
+            match name {
+                "safe-area-inset-top"
+                | "safe-area-inset-right"
+                | "safe-area-inset-bottom"
+                | "safe-area-inset-left"
+                | "safe-area-max-inset-top"
+                | "safe-area-max-inset-right"
+                | "safe-area-max-inset-bottom"
+                | "safe-area-max-inset-left" => {
+                    let mut value = String::new();
+                    push(&mut value, "0px", budget);
+                    Some(value)
+                }
+                _ => None,
             }
-            Some(_) => {
-                *cycle = true;
-                None
+        } else {
+            match layers.iter().find_map(|l| l.var(name)) {
+                Some((key, raw)) if !stack.contains(&key) => {
+                    stack.push(key);
+                    let mut raw_invalid = false;
+                    let r = substitute_css_vars(raw, layers, stack, budget, cycle, &mut raw_invalid);
+                    stack.pop();
+                    // A variable whose own value is invalid counts as unset.
+                    (!raw_invalid).then_some(r)
+                }
+                Some(_) => {
+                    *cycle = true;
+                    None
+                }
+                None => None,
             }
-            None => None,
         };
         // Unset, invalid or part of a cycle: the fallback applies. With no
         // fallback the value is invalid at computed-value time (CSS
@@ -53067,6 +53091,18 @@ fn substitute_css_vars<'a>(
         // substituting "" turned lyft's dark theme on.
         let piece = match (resolved, fallback) {
             (Some(r), _) => r,
+            (None, Some(f)) if environment && stack.len() < 128 => {
+                // An env() fallback can itself contain env() without adding
+                // bytes to the output budget. Bound that recursion too.
+                stack.push("");
+                let value = substitute_css_vars(f, layers, stack, budget, cycle, invalid);
+                stack.pop();
+                value
+            }
+            (None, Some(_)) if environment => {
+                *invalid = true;
+                String::new()
+            }
             (None, Some(f)) => substitute_css_vars(f, layers, stack, budget, cycle, invalid),
             (None, None) => {
                 *invalid = true;
@@ -53091,6 +53127,40 @@ fn substitute_css_vars<'a>(
     }
     push(&mut out, rest, budget);
     out
+}
+
+fn find_css_env(value: &str) -> Option<usize> {
+    if !value.contains("env(") {
+        return None;
+    }
+    let mut quote = None;
+    let mut escaped = false;
+    let mut follows_ident = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, ch) {
+            (_, '\\') => {
+                escaped = true;
+                follows_ident = true;
+            }
+            (Some(end), ch) if ch == end => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                follows_ident = false;
+            }
+            (None, 'e') if !follows_ident && value[index..].starts_with("env(") => {
+                return Some(index);
+            }
+            (None, ch) => {
+                follows_ident = ch.is_alphanumeric() || !ch.is_ascii() || matches!(ch, '-' | '_');
+            }
+        }
+    }
+    None
 }
 
 // ── url() in an external stylesheet resolves against THAT SHEET's URL
@@ -54480,6 +54550,27 @@ mod script_selector_tests {
                 return item.width >= title.width && item.width < 320 && title.height === 24;
             })()"#),
             "true"
+        );
+    }
+
+    #[test]
+    fn desktop_safe_area_environment_values_resolve_fixed_insets() {
+        let (mut engine, view) = loaded(
+            r#"<style>
+                :root { --safe-end: env(safe-area-inset-right, 80px) }
+                .card { position: fixed; width: 100px; height: 50px;
+                    inset-inline-end: max(3vw, var(--safe-end));
+                    bottom: max(3vw, env(safe-area-inset-bottom));
+                    padding-top: env(unknown-inset, 0px);
+                }
+                </style><div class="card"></div>"#,
+        );
+        assert_eq!(
+            eval(&mut engine, view, r#"(() => {
+                const card = document.querySelector('.card').getBoundingClientRect();
+                return [card.x, card.y].join(',');
+            })()"#),
+            "288,138"
         );
     }
 
