@@ -4986,19 +4986,14 @@ impl LayoutBox {
                 // its own two margins never collapse through it (Chromium 148:
                 // `float_margin_tests`, "video block h0"). `layout_image_in` placed it
                 // one own top margin below the cursor; the collapsed margin replaces it.
-                if !matches!(self.style.display, rustkit_css::Display::Inline) && !self.style.display.is_atomic_inline() {
-                    let top = self.dimensions.margin.top;
-                    if !std::mem::take(&mut margin_context.first_child_top_adjoined) {
-                        margin_context.add_margin(top);
-                    }
-                    let collapsed = margin_context.resolve();
-                    self.dimensions.content.y += collapsed - top;
-                    margin_context.reset();
-                    margin_context.add_margin(self.dimensions.margin.bottom);
-                }
+                self.collapse_block_level_atomic_margins(margin_context);
             }
             BoxType::FormControl(ref control) => {
                 self.layout_form_control(control.clone(), containing_block, percent_height_base);
+                // A block-level form control's margins collapse as a block-level
+                // replaced box's do (Chrome 148, row FORM-CONTROL-FLOAT-AVOID: an
+                // `input` with margin-top 12 after margin-bottom 30 sits 30 below).
+                self.collapse_block_level_atomic_margins(margin_context);
             }
             BoxType::LineBreak => {
                 self.dimensions.content = Rect::new(
@@ -5019,6 +5014,24 @@ impl LayoutBox {
         self.apply_position_offsets(containing_block);
         // This box is final: anchor its abspos children to its padding box.
         self.reanchor_absolute_children();
+    }
+
+    /// The top margin of a block-level box laid out in one piece (a replaced box or a
+    /// form control) collapses with the margins pending before it, and its bottom
+    /// margin stays pending for what follows. Its layout placed it one own top margin
+    /// below the cursor; the collapsed margin replaces that. An inline-level one is left.
+    fn collapse_block_level_atomic_margins(&mut self, margin_context: &mut MarginCollapseContext) {
+        if matches!(self.style.display, rustkit_css::Display::Inline) || self.style.display.is_atomic_inline() {
+            return;
+        }
+        let top = self.dimensions.margin.top;
+        if !std::mem::take(&mut margin_context.first_child_top_adjoined) {
+            margin_context.add_margin(top);
+        }
+        let collapsed = margin_context.resolve();
+        self.dimensions.content.y += collapsed - top;
+        margin_context.reset();
+        margin_context.add_margin(self.dimensions.margin.bottom);
     }
 
     /// Layout a block-level box with an explicit definite height for percentage resolution.
@@ -5433,7 +5446,7 @@ impl LayoutBox {
             }
             // A block-level replaced box (`<img style="display:block">`) adjoins its top
             // margin and ends the chain: nothing is inside it (Chromium 148).
-            if matches!(child.box_type, BoxType::Image { .. })
+            if matches!(child.box_type, BoxType::Image { .. } | BoxType::FormControl(_))
                 && !matches!(child.style.display, rustkit_css::Display::Inline)
                 && !child.style.display.is_atomic_inline()
             {
@@ -6557,18 +6570,24 @@ impl LayoutBox {
     /// box of a float in its formatting context: a block-level replaced element, a
     /// table, or a block that establishes a new block formatting context (including
     /// `display: flow-root`, which `establishes_bfc` leaves to collapse-through).
+    /// Block-level form controls and `fieldset` avoid floats too (row
+    /// FORM-CONTROL-FLOAT-AVOID): Chrome 148 lays them out as their own formatting
+    /// context, like replaced boxes.
     fn avoids_floats(child: &LayoutBox) -> bool {
         if child.float != Float::None || matches!(child.position, Position::Absolute | Position::Fixed) {
             return false;
         }
         match child.box_type {
-            BoxType::Image { .. } => {
+            BoxType::Image { .. } | BoxType::FormControl(_) => {
                 !matches!(child.style.display, rustkit_css::Display::Inline)
                     && !child.style.display.is_atomic_inline()
             }
             BoxType::Block => {
                 crate::margin_collapse::establishes_bfc(&child.style, child.float)
                     || child.style.display_modifier == rustkit_css::DisplayModifier::FlowRoot
+                    || child.identity.as_ref().is_some_and(|id| {
+                        matches!(id.tag.as_str(), "fieldset" | "input" | "select" | "textarea" | "button")
+                    })
             }
             _ => false,
         }
@@ -7926,12 +7945,14 @@ impl LayoutBox {
             // displayed inline: a block-level one (`<video style="display:block">`) is
             // a block box whose margins adjoin its siblings' (Chromium 148; a replaced
             // box is never empty, so they never collapse through it).
+            // A form control likewise (row FORM-CONTROL-FLOAT-AVOID: Chrome 148
+            // collapses a `display: block` input's top margin with the one before it).
             let is_inline_level = is_inline_block
                 || matches!(
                     child.box_type,
-                    BoxType::Inline | BoxType::Text(_) | BoxType::FormControl(_) | BoxType::LineBreak
+                    BoxType::Inline | BoxType::Text(_) | BoxType::LineBreak
                 )
-                || (matches!(child.box_type, BoxType::Image { .. })
+                || (matches!(child.box_type, BoxType::Image { .. } | BoxType::FormControl(_))
                     && matches!(child.style.display, rustkit_css::Display::Inline));
             if is_inline_level {
                 cursor_y += margin_context.resolve();
