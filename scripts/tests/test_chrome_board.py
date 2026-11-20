@@ -83,12 +83,13 @@ class TestChromeBoard(unittest.TestCase):
 
     # REPORT-CHART-0x0: a page whose script resizes from a ResizeObserver through an animation
     # frame (report.html's charts) needs RustKit's live loop after the load and after the actions,
-    # as the Chromium arm waits SETTLE_MS at both. A page's `live_ms` asks for it; a page without
-    # one turns none (no page has one yet: the oracle's frozen rAF leaves Chrome's charts blank).
+    # long enough for Chart.js's 1 s animation to finish. A page's `live_ms` asks for it; a page
+    # without one turns none. report.html's is 1500 (with #1365, Chrome's arm draws the charts).
     def test_a_page_with_live_ms_turns_the_live_loop_after_the_load_and_the_actions(self):
         from scripts import chrome_board
 
         board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(board["pages"]["report"].get("live_ms"), 1500)
         board["pages"]["report"]["live_ms"] = 100
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "board.json"
