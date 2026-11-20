@@ -1554,7 +1554,7 @@ const PAINT_STYLE_PROPERTIES: &[(&str, u8)] = &[
 /// An inline style's declarations as `name -> value` (names ASCII-lowercased, the last of a name
 /// wins), or `None` when the text holds anything a split on `;` and `:` could misread: a quote, an
 /// escape, a comment, a brace, or brackets left open across a `;`.
-fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
+pub(crate) fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
     if text.contains(['"', '\'', '\\', '{', '}']) || text.contains("/*") {
         return None;
     }
@@ -1578,7 +1578,7 @@ fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
 /// (`PAINT_STYLE_PROPERTIES`); `None` when one may move a box, or when the page has a rule that
 /// reads the attribute or a `:has()` (`DomHost::style_attr_rules`), through which the write can
 /// change which rules match.
-fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Option<u8> {
+pub(crate) fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Option<u8> {
     if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
         return None;
     }

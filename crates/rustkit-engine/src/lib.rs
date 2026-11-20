@@ -570,6 +570,10 @@ mod outline_apply_tests;
 #[cfg(test)]
 mod computed_read_unit_tests;
 #[cfg(test)]
+mod radius_computed_unit_tests;
+#[cfg(test)]
+mod turn_animation_clock_tests;
+#[cfg(test)]
 mod redirect_url_tests;
 #[cfg(test)]
 mod late_sheet_slot_tests;
@@ -2178,7 +2182,7 @@ fn turn_animation_clock(clock: f64, presampled: Option<f64>) -> f64 {
     }
 }
 
-#[cfg(all(test, feature = "headless"))]
+#[cfg(test)]
 pub(crate) fn turn_animation_clock_for_tests(clock: f64, presampled: Option<f64>) -> f64 {
     turn_animation_clock(clock, presampled)
 }
@@ -32386,7 +32390,7 @@ fn corner_radii_px(
 /// `calc(P% + Npx)` (em / rem folded to px), any other length is px.
 /// `min()` / `max()` / `clamp()` and viewport units still resolve against
 /// `size`, as before (computed reads have no viewport).
-fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
+pub(crate) fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
     use rustkit_css::Length;
     let resolved = || css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0));
     match length {
@@ -32416,7 +32420,7 @@ fn corner_longhand(horizontal: &str, vertical: &str) -> String {
 /// four horizontal radii, then ` / ` and the vertical radii when any corner
 /// is elliptical. Each side drops a value the 1–4 expansion would refill,
 /// so an unset radius is `0px` rather than four zeros.
-fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
+pub(crate) fn border_radius_shorthand(corners: &[(String, String); 4]) -> String {
     fn minimize(v: [&str; 4]) -> String {
         if v[0] == v[1] && v[1] == v[2] && v[2] == v[3] {
             v[0].to_string()
