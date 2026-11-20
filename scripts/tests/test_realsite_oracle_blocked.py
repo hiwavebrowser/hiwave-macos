@@ -38,7 +38,7 @@ def write_ppm(path, striped):
 
 
 def fake_chrome(result):
-    def capture(url, png, text_json, width, height, env):
+    def capture(url, png, text_json, width, height, env, har_path=None):
         Path(png).write_bytes(b"png")
         Path(text_json).write_text(json.dumps({"url": url, "text": "access denied"}))
         return dict(result)
@@ -113,7 +113,7 @@ class OracleBlocked(unittest.TestCase):
         caps = iter([dict(OK, http_status=403), OK])
         out = Path(tempfile.mkdtemp(prefix="t19_"))
         try:
-            def capture(url, png, text_json, width, height, env):
+            def capture(url, png, text_json, width, height, env, har_path=None):
                 Path(png).write_bytes(b"png")
                 Path(text_json).write_text(json.dumps({"url": url, "text": "access denied"}))
                 return dict(next(caps))
