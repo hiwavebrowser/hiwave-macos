@@ -7263,7 +7263,8 @@ impl Renderer {
                 rgba_data.len()
             )));
         }
-        // Red (step 3's tests first): nothing is written yet.
+        self.texture_cache
+            .update(&self.device, &self.queue, url, width, height, rgba_data);
         Ok(())
     }
 

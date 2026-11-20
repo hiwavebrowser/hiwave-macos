@@ -68,8 +68,11 @@ impl AvfHost {
 
 impl MediaBackend for AvfHost {
     fn send(&self, command: Command) {
-        // Red (step 3's tests first): the host runs nothing yet.
-        drop(command);
+        let outbox = self.outbox.clone();
+        DispatchQueue::main().exec_async(move || {
+            let mtm = MainThreadMarker::new().expect("the main queue runs on the main thread");
+            run(command, &outbox, mtm);
+        });
     }
 
     fn drain(&self, player: PlayerId) -> Vec<Snapshot> {

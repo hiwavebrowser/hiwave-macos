@@ -684,7 +684,7 @@ impl MediaElements {
                     // With a host, a player reads the same bytes (step 3); without
                     // one, the probe and its bytes go.
                     let stage = std::mem::replace(&mut e.stage, Stage::Done);
-                    if let (Some(backend), Stage::Loading { source, url, .. }) = (backend.filter(|_| false), stage) {
+                    if let (Some(backend), Stage::Loading { source, url, .. }) = (backend, stage) {
                         let id = rustkit_media::host::next_player_id();
                         let frames = VideoFrames::new();
                         let feed = rustkit_media::avf::Feed::new(source.clone());
