@@ -143,11 +143,13 @@ export async function createDeterministicContext(browser, width, height, options
 // rendering update (16.67 ms of page time each). A capture of a page that
 // animates through requestAnimationFrame (Chart.js) must wait for those frames
 // to finish, or it samples whichever frame the wall clock reached. Resolves
-// {frames, settled}: settled is false only if a page still asked for frames
-// at the timeout. A page that asks for none resolves within two frames.
-export async function settleAnimationFrames(page, timeoutMs = 10000) {
+// {frames, settled, capped}: settled is false only if callbacks were still
+// pending at the timeout; capped is true if the page asked for frames past
+// the freeze's budget (an endless loop, stopped at the same frame every run).
+// A page that asks for none resolves within two frames.
+export async function settleAnimationFrames(page, timeoutMs = 30000) {
   return page.evaluate(
-    (t) => (window.__parityFreeze ? window.__parityFreeze.settle(t) : { frames: null, settled: true }),
+    (t) => (window.__parityFreeze ? window.__parityFreeze.settle(t) : { frames: null, settled: true, capped: false }),
     timeoutMs,
   );
 }
