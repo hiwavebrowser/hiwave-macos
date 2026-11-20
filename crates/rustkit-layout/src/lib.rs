@@ -6594,15 +6594,23 @@ impl LayoutBox {
         let margin = child.dimensions.margin;
         let auto_start = matches!(child.style.margin_left, Length::Auto);
         let auto_end = matches!(child.style.margin_right, Length::Auto);
-        let x = if dy <= 0.001 && band >= content.width - 0.01 && left <= 0.01 {
+        // Whether a float narrows the band the box ends up in.
+        let narrowed = band < content.width - 0.01 || left > 0.01;
+        let x = if !narrowed && dy <= 0.001 {
             // No float beside it where it was laid out: where its own layout put it.
             bb.x - content.x
         } else if auto_start && auto_end {
             left + ((band - bb.width) / 2.0).max(0.0)
         } else if auto_start {
             left + (band - bb.width - margin.right.max(0.0)).max(0.0)
-        } else {
+        } else if narrowed {
+            // Beside a float a start margin may lie over it, never push the box
+            // before the band (Chrome 148: margin-left -20 beside a right float
+            // sits at 0).
             left.max(margin.left)
+        } else {
+            // Moved below every float: its own margin, negative too (Chrome: -20).
+            margin.left
         };
         let dx = content.x + x - bb.x;
         if dx.abs() > 0.001 || dy > 0.001 {
@@ -6629,8 +6637,21 @@ impl LayoutBox {
         let width = cb.content.width;
         let (left, right) = floats.available_width(cursor_y, width);
         if left > 0.0 || right < width {
-            cb.content.x += left;
-            cb.content.width = (right - left).max(0.0);
+            // The box's own margins may lie over the floats: only the part of a
+            // float that reaches past a margin narrows it (Chrome 148: margin-left
+            // 20 beside a 100px float is 100/300, margin-left 150 is 150/250). The
+            // containing block is the band widened by the margins the floats cover,
+            // so the margins laid out inside it put the border box at
+            // `max(band start, margin)`. An auto margin counts as 0 here.
+            let margin = |m: &Length| match m {
+                Length::Auto => 0.0,
+                m => child.length_to_px(m, width),
+            };
+            let (ml, mr) = (margin(&child.style.margin_left), margin(&child.style.margin_right));
+            let start = left.max(ml) - ml;
+            let end = right.min(width - mr) + mr;
+            cb.content.x += start;
+            cb.content.width = (end - start).max(0.0);
         }
     }
 
