@@ -74,8 +74,10 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs, ha
       // launches in a run came back dark).
       extraHTTPHeaders: { 'Sec-CH-Prefers-Color-Scheme': 'light' },
       // QB-ARCHIVE-INPUT: the load's requests and bodies, for an offline replay of the site
-      // (written when the context closes; realsite_har.py slims and compresses it).
-      ...(harPath ? { recordHar: { path: harPath, mode: 'full', content: 'embed' } } : {}),
+      // (written when the context closes; realsite_har.py strips secrets, slims and compresses
+      // it). Minimal mode keeps only what routing from a HAR uses: no cookie arrays, sizes,
+      // timings or page records.
+      ...(harPath ? { recordHar: { path: harPath, mode: 'minimal', content: 'embed' } } : {}),
     });
     harContext = context;
     const page = await context.newPage();
