@@ -17473,10 +17473,13 @@ impl layout_ctx::LayoutCtx {
                 style.display = rustkit_css::Display::Block;
                 style.margin_left = rustkit_css::Length::Px(2.0);
                 style.margin_right = rustkit_css::Length::Px(2.0);
-                style.padding_top = rustkit_css::Length::Px(8.0); // 0.35em
-                style.padding_bottom = rustkit_css::Length::Px(10.0); // 0.625em
-                style.padding_left = rustkit_css::Length::Px(12.0); // 0.75em
-                style.padding_right = rustkit_css::Length::Px(12.0);
+                // Chrome's html.css: 0.35em 0.75em 0.625em, of the fieldset's own
+                // font size (5.6px, not 8, at 16px: row FORM-CONTROL-FLOAT-AVOID's
+                // UA-style case).
+                style.padding_top = rustkit_css::Length::Em(0.35);
+                style.padding_bottom = rustkit_css::Length::Em(0.625);
+                style.padding_left = rustkit_css::Length::Em(0.75);
+                style.padding_right = rustkit_css::Length::Em(0.75);
                 style.border_top_width = rustkit_css::Length::Px(2.0);
                 style.border_right_width = rustkit_css::Length::Px(2.0);
                 style.border_bottom_width = rustkit_css::Length::Px(2.0);
