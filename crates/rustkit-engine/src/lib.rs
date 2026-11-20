@@ -734,6 +734,8 @@ mod media_load_tests;
 #[cfg(all(test, feature = "headless"))]
 mod media_fetch_tests;
 #[cfg(all(test, feature = "headless"))]
+mod media_host_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
@@ -3483,6 +3485,10 @@ pub struct Engine {
     presenter: Option<Presenter>,
     /// Commits a page engine publishes. A window engine stores them on its presenter.
     page_commits: HashMap<EngineViewId, FrameCommit>,
+    /// MEDIA-AVF step 3: the main-thread `MediaHost` that owns the players
+    /// (`docs/design/MEDIA_AVF.md` §3.2). `None` (the default until step 6): media
+    /// elements load their metadata and nothing more.
+    media_backend: Option<Arc<dyn rustkit_media::host::MediaBackend>>,
     /// One navigation sequence, shared with the window handle.
     nav_seq: Arc<AtomicU64>,
     /// `Some` replaces Boa's host re-entry cap for runtimes this engine creates.
@@ -3788,6 +3794,7 @@ impl Engine {
             config,
             presenter,
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq,
             host_reentry_override: None,
             clipboard: if system_clipboard {
@@ -7749,11 +7756,17 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
-        // MEDIA-AVF: media elements' loading (media.rs).
-        if self.settle_media(id).await {
+        // MEDIA-AVF: media elements' loading (media.rs), and their players' answers.
+        let media = self.settle_media(id).await;
+        if media.resized {
             match self.relayout_for(id, RelayoutCause::Other("media metadata")) {
                 Ok(()) => out.relaid_out = true,
                 Err(e) => debug!(?id, error = %e, "relayout after media metadata failed"),
+            }
+        } else if media.new_frames {
+            // A new video frame changes no box: present it with no build (§3.3).
+            if let Err(e) = self.present_video_frame(id) {
+                debug!(?id, error = %e, "video frame present failed");
             }
         }
         if let Some(view) = self.views.get(&id) {
@@ -12031,9 +12044,11 @@ impl Engine {
                     continue;
                 }
             }
-            // MEDIA-AVF M1.1: a media element's box paints nothing until its frames do.
+            // MEDIA-AVF M1.1: a media element's box with no metadata paints nothing. A
+            // video's (`rustkit-video:`) paints its newest frame once the presenter has
+            // one (step 3); until then the renderer finds no texture and skips it.
             if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
-                if rustkit_layout::key_has_no_ratio(url) || url.starts_with(media::VIDEO_KEY_PREFIX) {
+                if rustkit_layout::key_has_no_ratio(url) {
                     continue;
                 }
             }
@@ -15288,13 +15303,14 @@ impl layout_ctx::LayoutCtx {
                     }
                     // MEDIA-AVF M1.2: once a video's metadata is in, its box takes the
                     // video's size and ratio (Chrome 148: `width=100` on a 64x48 video
-                    // is 100x75), under its stable key `rustkit-video:<node>`.
+                    // is 100x75), under its key `rustkit-video:<node>@<player>` (step 3:
+                    // the player's frames paint under it).
                     let video_size = (tag_lower == "video")
-                        .then(|| self.with_building_lay(|lay| lay.media_sizes.borrow().get(&node.id.raw()).copied()))
+                        .then(|| self.with_building_lay(|lay| lay.media_sizes.borrow().get(&node.id.raw()).cloned()))
                         .flatten()
                         .flatten();
                     let (url, natural_width, natural_height) = match video_size {
-                        Some((w, h)) => (format!("{}{}", media::VIDEO_KEY_PREFIX, node.id.raw()), w as f32, h as f32),
+                        Some((w, h, key)) => (key, w as f32, h as f32),
                         None => (
                             format!("{}{}:{}", rustkit_layout::NO_RATIO_KEY_PREFIX, tag_lower, node.id.raw()),
                             300.0,
@@ -22384,12 +22400,15 @@ impl Engine {
     /// MEDIA-AVF M1.2: one live turn of view `id`'s media elements (media.rs): sync
     /// them with the document after a layout or a `load()`, start the fetches that
     /// asks for, take the fetches that landed, poll the AVFoundation probes, and fire
-    /// the events that queued, each with the element's state as of it. Returns whether
-    /// a video's size came in (its box is laid out again).
-    async fn settle_media(&mut self, id: EngineViewId) -> bool {
-        let Some(view) = self.views.get(&id) else { return false };
+    /// the events that queued, each with the element's state as of it. Step 3: drain
+    /// the players' snapshots and pull the videos' frames (`MediaElements::tick_host`).
+    /// Returns whether a video's size came in (its box is laid out again) and whether a
+    /// video has a new frame (presented with no build).
+    async fn settle_media(&mut self, id: EngineViewId) -> media::HostTick {
+        let none = media::HostTick::default();
+        let Some(view) = self.views.get(&id) else { return none };
         let (Some(document), Some(bindings)) = (view.document.clone(), view.bindings.as_ref()) else {
-            return false;
+            return none;
         };
         let reload = bindings.take_media_loads();
         let generation = view.frame_generation;
@@ -22440,14 +22459,16 @@ impl Engine {
         }
         let landed = match self.views.get_mut(&id) {
             Some(view) => media::settle_keyed(&mut view.live_media, LIVE_NETWORK_SLICE).await,
-            None => return false,
+            None => return none,
         };
-        let Some(view) = self.views.get_mut(&id) else { return false };
+        let backend = self.media_backend.clone();
+        let Some(view) = self.views.get_mut(&id) else { return none };
         for fetched in landed {
             view.media.fetched(fetched);
         }
-        let resized = view.media.poll();
-        if resized {
+        let mut tick = view.media.tick_host();
+        tick.resized |= view.media.poll(backend.as_ref());
+        if tick.resized {
             *view.lay.media_sizes.borrow_mut() = view.media.video_sizes();
         }
         let events = view.media.take_events();
@@ -22461,7 +22482,38 @@ impl Engine {
                 inspector_glue::drain_errors(bindings, &view.inspector, "media");
             }
         }
-        resized
+        tick
+    }
+
+    /// MEDIA-AVF §3.3: present view `id` again for a new video frame. The display list
+    /// is the one already built (the frame's key is stable): its generation moves so the
+    /// presenter takes it as a new frame, and the presenter uploads the frame under its
+    /// key. No build, no layout.
+    fn present_video_frame(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let Some(view) = self.views.get_mut(&id) else { return Ok(()) };
+        if view.display_list.is_none() {
+            return Ok(());
+        }
+        // What was done for this frame's boxes holds for the next generation too.
+        let generation = view.frame_generation;
+        view.frame_generation += 1;
+        if view.images_planned_for == generation {
+            view.images_planned_for = view.frame_generation;
+        }
+        if view.sheets_checked_for == Some(generation) {
+            view.sheets_checked_for = Some(view.frame_generation);
+        }
+        if view.media.synced_for == Some(generation) {
+            view.media.synced_for = Some(view.frame_generation);
+        }
+        view.relayout_stats.video_frames_presented = view.relayout_stats.video_frames_presented.saturating_add(1);
+        self.render(id)
+    }
+
+    /// MEDIA-AVF step 3: the main-thread host whose players media elements use
+    /// (`docs/design/MEDIA_AVF.md` §3.2), or `None` for none (metadata only).
+    pub fn set_media_backend(&mut self, backend: Option<Arc<dyn rustkit_media::host::MediaBackend>>) {
+        self.media_backend = backend;
     }
 
     fn start_planned_images(plan: ImagePlan) -> Vec<script_net::LiveFuture<FetchedImages>> {
@@ -27988,6 +28040,9 @@ fn ipc_cmd_shape(payload: &str) -> String {
 pub struct EngineBuilder {
     config: EngineConfig,
     interceptor: Option<rustkit_net::RequestInterceptor>,
+    /// MEDIA-AVF step 3 (`avfoundation_media`).
+    #[cfg(all(target_os = "macos", feature = "media-avf"))]
+    avf_media: bool,
 }
 
 impl EngineBuilder {
@@ -27996,6 +28051,8 @@ impl EngineBuilder {
         Self {
             config: EngineConfig::default(),
             interceptor: None,
+            #[cfg(all(target_os = "macos", feature = "media-avf"))]
+            avf_media: false,
         }
     }
 
@@ -28106,15 +28163,38 @@ impl EngineBuilder {
         self
     }
 
+    /// MEDIA-AVF step 3: media elements play through AVFoundation, on the main-thread
+    /// `MediaHost` (`rustkit_media::avf_host`). The main thread's queue has to drain
+    /// (AppKit's does in the app).
+    #[cfg(all(target_os = "macos", feature = "media-avf"))]
+    pub fn avfoundation_media(mut self, on: bool) -> Self {
+        self.avf_media = on;
+        self
+    }
+
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
-        Engine::with_interceptor(self.config, self.interceptor)
+        let media = self.media_backend();
+        let mut engine = Engine::with_interceptor(self.config, self.interceptor)?;
+        engine.media_backend = media;
+        Ok(engine)
     }
 
     /// Build a page engine on the caller. The content thread calls this on
     /// itself; the window does not.
     pub fn build_page(self, nav_seq: Arc<AtomicU64>) -> Result<Engine, EngineError> {
-        Engine::new_page(self.config, self.interceptor, nav_seq)
+        let media = self.media_backend();
+        let mut engine = Engine::new_page(self.config, self.interceptor, nav_seq)?;
+        engine.media_backend = media;
+        Ok(engine)
+    }
+
+    fn media_backend(&self) -> Option<Arc<dyn rustkit_media::host::MediaBackend>> {
+        #[cfg(all(target_os = "macos", feature = "media-avf"))]
+        if self.avf_media {
+            return Some(Arc::new(rustkit_media::avf_host::AvfHost::new()));
+        }
+        None
     }
 }
 
@@ -33405,6 +33485,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34190,6 +34271,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34262,6 +34344,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34351,6 +34434,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34566,6 +34650,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34661,6 +34746,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34776,6 +34862,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34855,6 +34942,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -34928,6 +35016,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35015,6 +35104,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35118,6 +35208,7 @@ mod tests {
                 views: HashMap::new(),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
+                media_backend: None,
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
                 clipboard: MemoryClipboard::shared(),
@@ -35222,6 +35313,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35305,6 +35397,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35392,6 +35485,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35476,6 +35570,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35551,6 +35646,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35604,6 +35700,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35797,6 +35894,7 @@ mod tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -35878,6 +35976,7 @@ mod tests {
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -38467,6 +38566,7 @@ mod web_font_tests {
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
