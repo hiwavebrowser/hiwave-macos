@@ -172,3 +172,25 @@ fn a_registered_value_that_reaches_width_falls_back_to_the_full_build() {
     assert!(fast.relayouts > 0);
     assert!(fast.hits < fast.relayouts, "a moving width is laid out, not patched");
 }
+
+/// R1 (#1382): custom properties inherit into a host's shadow tree, so the restyle under a root
+/// reaches a shadow-DOM descendant that reads an `inherits: true` moving value; a slotted light
+/// child reads it too.
+#[test]
+fn an_inherited_registered_transition_reaches_into_a_shadow_tree() {
+    let css = "@property --c{syntax:'<color>';inherits:true;initial-value:#000}\
+#t{--c:#0000ff;transition:--c 300ms linear}#t.on{--c:#ff0000}\
+#slotted{display:block;height:10px;background-color:var(--c)}";
+    let body = "<div id=t><div id=host><span id=slotted slot=s>x</span></div></div>\
+<script>var r=document.getElementById('host').attachShadow({mode:'open'});\
+r.innerHTML=\"<style>#s{height:20px;background-color:var(--c)}</style><div id=s></div><slot name=s></slot>\";</script>";
+    let html = page(css, body);
+    let (fast, _) = both(
+        &html,
+        Trigger::Script("document.getElementById('t').classList.add('on')"),
+        "getComputedStyle(document.getElementById('host').shadowRoot.getElementById('s')).backgroundColor\
++'|'+getComputedStyle(document.getElementById('slotted')).backgroundColor",
+    );
+    assert!(fast.relayouts > 0);
+    assert_eq!(fast.hits, fast.relayouts, "the restyle under the root reaches the shadow tree on the short path");
+}
