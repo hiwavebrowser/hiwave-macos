@@ -736,6 +736,8 @@ mod media_fetch_tests;
 #[cfg(all(test, feature = "headless"))]
 mod media_host_tests;
 #[cfg(all(test, feature = "headless"))]
+mod replaced_float_avoid_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
@@ -15229,15 +15231,12 @@ impl layout_ctx::LayoutCtx {
                     // because the flow pass has no containing-block height
                     // for it and nothing re-anchored it (HT27 R3).
                     //
-                    // Only a POSITIONED image takes the transfer: a static
-                    // one keeps the box exactly as before, float and clear
-                    // included (a floated `<img>` still rides the line; that
-                    // is a separate item, not touched here), so nothing
-                    // moves on a page without a positioned image.
+                    // REPLACED-FLOAT-AVOID: a static image takes its float and
+                    // clear too. A floated `<img>` rode the line as an inline
+                    // box, and a cleared block one sat beside the float it
+                    // clears (Chrome 148 pins in `replaced_float_avoid_tests`).
                     let positioning = Engine::positioning_of(&b.style);
-                    if positioning.position != Position::Static {
-                        Engine::apply_positioning(&mut b, positioning);
-                    }
+                    Engine::apply_positioning(&mut b, positioning);
                     Engine::attach_identity(
                         &mut b,
                         selector_path,
