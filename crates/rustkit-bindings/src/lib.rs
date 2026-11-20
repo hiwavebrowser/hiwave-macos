@@ -900,7 +900,14 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 // times every run. And a frame a task already read the timeline of (its grid
                 // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
                 // the task equals the frame's `t`.
-                var grid = !Q.det && Q.gridStamps;
+                // ANIM-READ-JUMP: a stepped turn (a test's or a capture's `pump_live`, not the
+                // app's real-time loop) moves virtual time the page has not lived through, and
+                // the engine's CSS animations run on that clock (`__rk.animationNow`). Its
+                // frames' timeline is the grid time on it too: stamped from the real clock, a
+                // frame (or a timeline read, `getAnimations()`) put the timeline the load's real
+                // time ahead of the CSS clock, and the CSS clock, which never runs behind the
+                // timeline, jumped there (a 100 ms transition ended at its first frame).
+                var grid = !Q.det && (Q.gridStamps || !Q.realTurn);
                 if (!Q.det && Q.aheadAt === Q.now) ts = at;
                 if (!grid && Q.tlAt === at) ts = Q.tlTs;
                 // At least the grid distance from the last frame, but at most one grid step from it
@@ -1208,7 +1215,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                     // timers' clock catching up would count it again (CLOCK-INFLATE). Read once
                     // per grid point, so a task reads one value.
                     Q.tlAt = g;
-                    var v = !Q.det && Q.gridStamps ? g : treeNow() - (turnNow() - g);
+                    var v = !Q.det && (Q.gridStamps || !Q.realTurn) ? g : treeNow() - (turnNow() - g);
                     Q.tlTs = Q.prevFrameTs >= 0 && v < Q.frameTl ? Q.frameTl : v;
                 }
                 ts = Q.tlTs;
