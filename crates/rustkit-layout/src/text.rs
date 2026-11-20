@@ -4128,6 +4128,41 @@ mod tests {
         assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
     }
 
+    /// A symbol WITHOUT Emoji_Presentation that the primary face lacks is drawn
+    /// from a TEXT face, as Chrome's DirectWrite fallback does (Segoe UI
+    /// Symbol), and only an Emoji_Presentation character (or one U+FE0F turns
+    /// into an emoji) takes Segoe UI Emoji. Chrome for Testing 148.0.7778.216
+    /// win64, the chrome board's icons at 14px (CSS.getPlatformFontsForNode +
+    /// the span's width): U+1F6E1 Segoe UI Symbol 14.00, U+2699 Segoe UI Symbol
+    /// 11.81, U+2B07 Segoe UI Symbol 7.66, U+1F50D Segoe UI Emoji 19.23.
+    /// RustKit gave all four Segoe UI Emoji's 19.22.
+    #[cfg(windows)]
+    #[test]
+    fn a_text_presentation_symbol_takes_a_text_face_not_segoe_ui_emoji() {
+        use rustkit_text::GlyphFace;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Arial");
+        let one = |t: &str| {
+            let run = shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 14.0)
+                .unwrap();
+            (run.metrics.width, run.glyphs[0].face)
+        };
+        for (text, chrome, emoji) in [
+            ("\u{1F6E1}", 14.00, false),
+            ("\u{2699}", 11.8125, false),
+            ("\u{2B07}", 7.65625, false),
+            ("\u{1F50D}", 19.234375, true),
+        ] {
+            let (width, face) = one(text);
+            assert!((width - chrome).abs() < 0.02, "{text:?}: RustKit {width}, Chrome {chrome}");
+            assert_eq!(face, GlyphFace::Fallback { emoji }, "{text:?}");
+        }
+        // U+FE0F asks for the emoji presentation of a character that has one.
+        let (_, gear_emoji) = one("\u{2699}\u{FE0F}");
+        assert_eq!(gear_emoji, GlyphFace::Fallback { emoji: true });
+    }
+
     #[test]
     fn test_wrap_text_multiple_lines() {
         let shaper = TextShaper::new();
