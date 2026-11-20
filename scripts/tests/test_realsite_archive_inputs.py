@@ -139,6 +139,18 @@ class ArchiveTest(unittest.TestCase):
             self.assertEqual(stats["skipped_media"], 1)
             self.assertEqual(stats["har"], "rustkit.har.gz")
 
+    def test_images_can_be_kept_but_video_and_audio_never(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"REALSITE_HAR_KEEP_IMAGES": "1"}):
+            d = Path(td)
+            raw = d / "rustkit.raw.har"
+            raw.write_text(json.dumps(har(entry("https://a.test/i.png", mime="image/png", b64=PNG),
+                                          entry("https://a.test/v.mp4", mime="video/mp4", b64=PNG))))
+            stats = realsite_har.archive_inputs(d, "rustkit", raw, cap_bytes=50 * 2**20)
+            self.assertEqual(stats["skipped_media"], 1)
+            with gzip.open(d / "rustkit.har.gz", "rt", encoding="utf-8") as f:
+                kept = ["text" in e["response"]["content"] for e in json.load(f)["log"]["entries"]]
+            self.assertEqual(kept, [True, False])
+
     def test_a_missing_or_broken_recording_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as td:
             d = Path(td)
