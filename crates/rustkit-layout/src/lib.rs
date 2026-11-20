@@ -48,6 +48,8 @@ mod flex_resolve_tests;
 #[cfg(test)]
 mod float_line_wrap_tests;
 #[cfg(test)]
+mod replaced_float_avoid_unit_tests;
+#[cfg(test)]
 mod text_memo_step_tests;
 #[cfg(test)]
 mod float_in_items_unit_tests;
