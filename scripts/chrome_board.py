@@ -112,11 +112,13 @@ NODE_ENV = _node_env()
 PINNED_CHROME_VERSION = "148.0.7778.216"
 
 
-def probe_chrome_version(path: Path) -> Optional[str]:
+def probe_chrome_version(path: Path, windows: bool = os.name == "nt") -> Optional[str]:
     """`<binary> --version` ("Google Chrome for Testing 148.0.7778.216") -> "148.0.7778.216".
 
     On Windows `chrome.exe --version` prints nothing; Chrome for Testing ships
     `<version>.manifest` beside chrome.exe, and that names the version instead.
+    The fallback is Windows-only, and two versioned manifests are ambiguous, so
+    they give None (the pin check then refuses rather than guesses).
     chrome_board.mjs checks browser.version() against the pin on every row either way."""
     try:
         proc = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=30)
@@ -125,11 +127,11 @@ def probe_chrome_version(path: Path) -> Optional[str]:
             return match.group(1)
     except (OSError, subprocess.TimeoutExpired):
         pass
-    for manifest in sorted(Path(path).parent.glob("*.manifest")):
-        match = re.fullmatch(r"(\d+\.\d+\.\d+\.\d+)\.manifest", manifest.name)
-        if match:
-            return match.group(1)
-    return None
+    if not windows:
+        return None
+    versions = [m.group(1) for m in (re.fullmatch(r"(\d+\.\d+\.\d+\.\d+)\.manifest", f.name)
+                                     for f in Path(path).parent.glob("*.manifest")) if m]
+    return versions[0] if len(versions) == 1 else None
 
 
 def home_relative(path: Path) -> str:
