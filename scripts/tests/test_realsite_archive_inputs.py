@@ -160,6 +160,109 @@ class ArchiveTest(unittest.TestCase):
             self.assertIn("error", realsite_har.archive_inputs(d, "chrome", bad, 1000))
 
 
+SECRET = "s3cr3t-value"
+
+
+def playwright_entry(url, method="GET", mime="text/html", text="<html>x</html>", post=None):
+    """An entry as Playwright's recordHar (mode full) writes it: cookies, auth and POST bodies."""
+    e = entry(url, mime=mime, text=text)
+    e["request"].update({
+        "method": method,
+        "headers": [
+            {"name": "Cookie", "value": "sid=" + SECRET},
+            {"name": "Authorization", "value": "Bearer " + SECRET},
+            {"name": "proxy-authorization", "value": "Basic " + SECRET},
+            {"name": "Accept", "value": "text/html"},
+        ],
+        "cookies": [{"name": "sid", "value": SECRET}],
+    })
+    if post is not None:
+        e["request"]["postData"] = {"mimeType": "application/json", "text": post,
+                                    "params": [{"name": "k", "value": SECRET}]}
+    e["response"]["headers"] += [
+        {"name": "Set-Cookie", "value": "sid=%s; Path=/" % SECRET},
+        {"name": "SET-COOKIE", "value": "other=%s" % SECRET},
+    ]
+    e["response"]["cookies"] = [{"name": "sid", "value": SECRET, "httpOnly": True}]
+    return e
+
+
+class SecretsTest(unittest.TestCase):
+    """Neither side's archived HAR keeps cookies, authorization or POST bodies, whatever wrote it."""
+
+    def test_no_cookie_authorization_or_post_body_survives_on_either_side(self):
+        for side in ("chrome", "rustkit"):
+            with self.subTest(side=side), tempfile.TemporaryDirectory() as td:
+                d = Path(td)
+                raw = d / ("%s.raw.har" % side)
+                raw.write_text(json.dumps(har(
+                    playwright_entry("https://a.test/"),
+                    playwright_entry("https://a.test/beacon", method="POST", mime="application/json",
+                                     text="{}", post='{"user":"%s"}' % SECRET),
+                )))
+                realsite_har.archive_inputs(d, side, raw, cap_bytes=50 * 2**20)
+                with gzip.open(d / ("%s.har.gz" % side), "rt", encoding="utf-8") as f:
+                    text = f.read()
+                self.assertNotIn(SECRET, text)
+                back = json.loads(text)["log"]["entries"]
+                for e in back:
+                    for part in ("request", "response"):
+                        names = {h["name"].lower() for h in e[part].get("headers", [])}
+                        self.assertFalse(names & {"cookie", "set-cookie", "authorization",
+                                                  "proxy-authorization"}, names)
+                        self.assertEqual(e[part].get("cookies"), [])
+                    self.assertIn("accept", {h["name"].lower() for h in e["request"]["headers"]})
+                post = back[1]["request"]
+                self.assertEqual(post["method"], "POST")
+                self.assertEqual(post["postData"], {"mimeType": "application/json"},
+                                 "the body goes, its type stays")
+                self.assertNotIn("postData", back[0]["request"])
+
+
+class CapOrderTest(unittest.TestCase):
+    def test_the_main_document_body_is_never_capped(self):
+        h = har(
+            entry("https://a.test/", status=302, mime="", location="https://a.test/home"),
+            entry("https://a.test/home", text="d" * 9000),
+            entry("https://a.test/a.js", mime="application/javascript", text="j" * 2000),
+            entry("https://a.test/b.css", mime="text/css", text="c" * 500),
+        )
+        slim, stats = realsite_har.slim_har(h, cap_bytes=2500)
+        kept = {e["request"]["url"]: "text" in e["response"]["content"] for e in slim["log"]["entries"]}
+        self.assertTrue(kept["https://a.test/home"], "the main document keeps its body")
+        self.assertEqual(realsite_har.main_document(slim), ("https://a.test/home", "d" * 9000))
+        # The rest of the budget is what the document left: both others go past it.
+        self.assertFalse(kept["https://a.test/a.js"])
+        self.assertFalse(kept["https://a.test/b.css"])
+        self.assertEqual(stats["skipped_cap"], 2)
+
+
+class SvgTest(unittest.TestCase):
+    def test_svg_bodies_are_kept_with_the_fonts(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"/>'
+        h = har(entry("https://a.test/i.svg", mime="image/svg+xml", text=svg),
+                entry("https://a.test/j.svg", mime="image/svg+xml; charset=utf-8",
+                      b64=base64.b64encode(svg.encode()).decode()),
+                entry("https://a.test/i.png", mime="image/png", b64=PNG))
+        slim, stats = realsite_har.slim_har(h, cap_bytes=10_000_000)
+        kept = ["text" in e["response"]["content"] for e in slim["log"]["entries"]]
+        self.assertEqual(kept, [True, True, False])
+        self.assertEqual(stats["skipped_media"], 1)
+
+
+class RawCleanupTest(unittest.TestCase):
+    def test_the_raw_recording_goes_when_writing_the_archive_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            raw = d / "chrome.raw.har"
+            raw.write_text(json.dumps(har(playwright_entry("https://a.test/"))))
+            with mock.patch.object(realsite_har.gzip, "open", side_effect=OSError("disk full")):
+                stats = realsite_har.archive_inputs(d, "chrome", raw, cap_bytes=50 * 2**20)
+            self.assertIn("disk full", stats["error"], "reported, not raised: the board goes on")
+            self.assertFalse(raw.exists(), "the unfiltered recording is not left behind")
+            self.assertFalse((d / "chrome.har.gz").exists())
+
+
 def write_ppm(path):
     w = h = 4
     px = bytearray()
