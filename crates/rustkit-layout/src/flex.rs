@@ -2196,6 +2196,11 @@ fn create_flex_item<'a>(
     };
     let explicit_cross_size = match explicit_cross_length {
         rustkit_css::Length::Auto => None,
+        Length::FitContent if main_axis == Axis::Vertical => {
+            let available = definite_inner_cross.unwrap_or(container_cross);
+            let available = (available - cross_margin_start - cross_margin_end).max(0.0);
+            Some(fit_content_cross_width(layout_box, available, cross_pb))
+        }
         // css-sizing-3 §5.1: a percentage resolves against the containing
         // block's corresponding size when that size is DEFINITE, and behaves
         // as `auto` when it is not. The containing block here is the flex

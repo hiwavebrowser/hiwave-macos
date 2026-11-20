@@ -54463,6 +54463,27 @@ mod script_selector_tests {
     }
 
     #[test]
+    fn fit_content_width_in_a_flex_column_uses_intrinsic_width() {
+        let (mut engine, view) = loaded(
+            r#"<style>
+                .outer { width: 320px }
+                .section { display: inline-flex; flex-direction: column; flex-wrap: wrap; width: 100% }
+                .item { display: inline-flex; flex-wrap: wrap; width: fit-content }
+                h2 { font: bold 20px/24px Arial; margin: 0 }
+                </style><div class="outer"><div class="section"><div class="item">
+                <h2>Frequently Asked Questions</h2></div></div></div>"#,
+        );
+        assert_eq!(
+            eval(&mut engine, view, r#"(() => {
+                const item = document.querySelector('.item').getBoundingClientRect();
+                const title = document.querySelector('h2').getBoundingClientRect();
+                return item.width >= title.width && item.width < 320 && title.height === 24;
+            })()"#),
+            "true"
+        );
+    }
+
+    #[test]
     fn matches_and_closest_use_the_cascade_matcher() {
         let (mut engine, view) = loaded(CARDS);
         let mut js = |s: &str| eval(&mut engine, view, s);
