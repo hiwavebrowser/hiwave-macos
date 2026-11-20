@@ -230,17 +230,32 @@ def compose_page(board: Dict[str, Any], page: str, repo_root: Path, work: Path) 
     return out
 
 
-def pages_not_shipped(board: Dict[str, Any], repo_root: Path) -> List[str]:
-    """Pages whose html this platform's app does not ship (hiwave-windows has no
-    Inspector page). They are left out of the plan, so not scored and not green,
-    and the board names them; a missing fixture is still a refusal."""
-    return [page for page, spec in board["pages"].items() if not (repo_root / spec["html"]).exists()]
+def current_platform() -> str:
+    """The board's platform name: "macos", "windows" or "linux"."""
+    if sys.platform == "darwin":
+        return "macos"
+    return "windows" if os.name == "nt" else "linux"
 
 
-def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None) -> List[Row]:
+def pages_not_shipped(board: Dict[str, Any], repo_root: Path, platform: Optional[str] = None) -> List[str]:
+    """Pages this platform's app does not ship: board.json lists the platform in the
+    page's `not_shipped_on` and its html is absent (hiwave-windows has no Inspector
+    page). They are left out of the plan, so not scored and not green, and the board
+    names them. Any other absent html, and any missing fixture, is still a refusal:
+    a renamed or typo'd path must not drop a page silently."""
+    platform = platform or current_platform()
+    return [page for page, spec in board["pages"].items()
+            if platform in (spec.get("not_shipped_on") or []) and not (repo_root / spec["html"]).exists()]
+
+
+def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None,
+         platform: Optional[str] = None) -> List[Row]:
     """Every row of the board's shipped pages, refused whole if any case cannot run."""
+    platform = platform or current_platform()
     fixtures_dir = Path(board["_dir"])
-    absent = set(pages_not_shipped(board, repo_root))
+    absent = set(pages_not_shipped(board, repo_root, platform))
+    if only and only in absent:
+        raise BoardError(f"--only {only}: the page is not shipped on {platform} ({board['pages'][only]['html']} absent)")
     problems = []
     if not (fixtures_dir / board["prelude"]).exists():
         problems.append(f"prelude {board['prelude']} missing")
@@ -249,6 +264,8 @@ def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str]
             problems.append(f"{page}: fixture {spec['fixture']} missing")
         if page in absent:
             continue
+        if not (repo_root / spec["html"]).exists():
+            problems.append(f"{page}: html {spec['html']} missing")
         for source in (spec.get("inject") or {}).values():
             if not (repo_root / source).exists():
                 problems.append(f"{page}: injection {source} missing")
@@ -419,7 +436,8 @@ def page_properties(html: str) -> List[str]:
     return sorted(names)
 
 
-def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path]) -> Dict[str, Any]:
+def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path],
+                     platform: Optional[str] = None) -> Dict[str, Any]:
     if not census_path or not census_path.exists():
         return {"source": None, "pages": {}}
     with open(census_path, encoding="utf-8") as handle:
@@ -427,7 +445,7 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
     red = set(census.get("red", []))
     by_name = {p["name"]: p for p in census.get("properties", [])}
     pages = {}
-    absent = set(pages_not_shipped(board, repo_root))
+    absent = set(pages_not_shipped(board, repo_root, platform))
     for page, spec in board["pages"].items():
         if page in absent:
             continue

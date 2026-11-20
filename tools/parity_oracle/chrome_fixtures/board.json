@@ -54,7 +54,7 @@
       "states": ["default", "shelf_search"]
     },
     "inspector": {
-      "html": "crates/hiwave-app/src/ui/inspector.html",
+      "html": "crates/hiwave-app/src/ui/inspector.html", "not_shipped_on": ["windows"],
       "fixture": "inspector.js",
       "states": ["default", "console_tab"]
     },
