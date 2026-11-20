@@ -1429,7 +1429,13 @@ impl TextShaper {
                             // Variation selectors, joiners and the like take
                             // no space; the primary face's .notdef would.
                             0.0
-                        } else if glyph_id == 0 && rustkit_text::is_emoji(c) {
+                        } else if glyph_id == 0
+                            && (rustkit_text::is_emoji(c) || rustkit_text::has_emoji_property(c))
+                        {
+                            // `is_emoji`'s ranges miss Emoji characters such as
+                            // U+23F1 (Miscellaneous Technical); the ICU Emoji
+                            // property catches them, so U+FE0F can still ask for
+                            // the colour face (the report page's U+23F1 U+FE0F).
                             let notdef = if i < glyph_metrics.len() {
                                 glyph_metrics[i].advance_width as f32 * scale
                             } else {
