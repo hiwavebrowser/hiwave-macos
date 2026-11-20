@@ -1290,6 +1290,44 @@ mod tests {
         ));
     }
 
+    /// A start tag that ends on `/` at EOF (`<div/`, a truncated response) must
+    /// finish. The solidus is the self-closing flag; the tag is emitted.
+    #[test]
+    fn a_solidus_at_eof_ends_the_start_tag() {
+        for (html, name) in [
+            ("<div/", "div"),
+            ("<div /", "div"),
+            ("<br/", "br"),
+            ("<img src=a /", "img"),
+        ] {
+            let tokens = tokenize(html).expect(html);
+            assert!(
+                matches!(
+                    tokens.first(),
+                    Some(Token::StartTag { name: n, self_closing: true, .. }) if n == name
+                ),
+                "{html}: {tokens:?}"
+            );
+            assert!(matches!(tokens.last(), Some(Token::Eof)), "{html}: {tokens:?}");
+        }
+        let tokens = tokenize("<img src=a /").unwrap();
+        let Token::StartTag { attrs, .. } = &tokens[0] else { panic!("{tokens:?}") };
+        assert_eq!(attrs.get("src").map(String::as_str), Some("a"));
+    }
+
+    /// An unexpected solidus is reconsumed, so the attribute that follows it
+    /// keeps its first character (`<div/id=1>` is `id`, not `d`).
+    #[test]
+    fn an_unexpected_solidus_is_reconsumed_as_an_attribute() {
+        let tokens = tokenize("<div/id=1>").unwrap();
+        let Token::StartTag { name, attrs, self_closing } = &tokens[0] else {
+            panic!("Expected StartTag, got {tokens:?}");
+        };
+        assert_eq!(name, "div");
+        assert!(!self_closing);
+        assert_eq!(attrs.get("id"), Some(&"1".to_string()), "{tokens:?}");
+    }
+
     #[test]
     fn test_attributes() {
         let tokens = tokenize("<div id=\"test\" class=\"foo\"></div>").unwrap();
