@@ -64,7 +64,9 @@ class DriverTests(unittest.TestCase):
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
         # The runner as an argv prefix, so the fake starts on any OS (Windows does not run a
         # script by its shebang) and the watchdog measures and stops the python process itself.
-        self.runner = [sys.executable, str(script)]
+        # The base interpreter, not a venv's: on Windows a venv's python.exe is a launcher that
+        # runs the real interpreter as a child, so the watchdog would measure and stop the launcher.
+        self.runner = [getattr(sys, "_base_executable", sys.executable), str(script)]
 
     def tearDown(self):
         self.dir.cleanup()
