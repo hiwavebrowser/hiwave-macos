@@ -242,17 +242,42 @@ def compose_page(board: Dict[str, Any], page: str, repo_root: Path, work: Path) 
     return out
 
 
-def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None) -> List[Row]:
-    """Every row of the board, refused whole if any case cannot run."""
+def current_platform() -> str:
+    """The board's platform name: "macos", "windows" or "linux"."""
+    if sys.platform == "darwin":
+        return "macos"
+    return "windows" if os.name == "nt" else "linux"
+
+
+def pages_not_shipped(board: Dict[str, Any], repo_root: Path, platform: Optional[str] = None) -> List[str]:
+    """Pages this platform's app does not ship: board.json lists the platform in the
+    page's `not_shipped_on` and its html is absent (hiwave-windows has no Inspector
+    page). They are left out of the plan, so not scored and not green, and the board
+    names them. Any other absent html, and any missing fixture, is still a refusal:
+    a renamed or typo'd path must not drop a page silently."""
+    platform = platform or current_platform()
+    return [page for page, spec in board["pages"].items()
+            if platform in (spec.get("not_shipped_on") or []) and not (repo_root / spec["html"]).exists()]
+
+
+def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None,
+         platform: Optional[str] = None) -> List[Row]:
+    """Every row of the board's shipped pages, refused whole if any case cannot run."""
+    platform = platform or current_platform()
     fixtures_dir = Path(board["_dir"])
+    absent = set(pages_not_shipped(board, repo_root, platform))
+    if only and only in absent:
+        raise BoardError(f"--only {only}: the page is not shipped on {platform} ({board['pages'][only]['html']} absent)")
     problems = []
     if not (fixtures_dir / board["prelude"]).exists():
         problems.append(f"prelude {board['prelude']} missing")
     for page, spec in board["pages"].items():
-        if not (repo_root / spec["html"]).exists():
-            problems.append(f"{page}: html {spec['html']} missing")
         if not (fixtures_dir / spec["fixture"]).exists():
             problems.append(f"{page}: fixture {spec['fixture']} missing")
+        if page in absent:
+            continue
+        if not (repo_root / spec["html"]).exists():
+            problems.append(f"{page}: html {spec['html']} missing")
         for source in (spec.get("inject") or {}).values():
             if not (repo_root / source).exists():
                 problems.append(f"{page}: injection {source} missing")
@@ -264,7 +289,7 @@ def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str]
 
     rows: List[Row] = []
     for page, spec in board["pages"].items():
-        if only and page != only:
+        if (only and page != only) or page in absent:
             continue
         html_path = compose_page(board, page, repo_root, work)
         for state in spec["states"]:
@@ -423,7 +448,8 @@ def page_properties(html: str) -> List[str]:
     return sorted(names)
 
 
-def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path]) -> Dict[str, Any]:
+def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path],
+                     platform: Optional[str] = None) -> Dict[str, Any]:
     if not census_path or not census_path.exists():
         return {"source": None, "pages": {}}
     with open(census_path, encoding="utf-8") as handle:
@@ -431,7 +457,10 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
     red = set(census.get("red", []))
     by_name = {p["name"]: p for p in census.get("properties", [])}
     pages = {}
+    absent = set(pages_not_shipped(board, repo_root, platform))
     for page, spec in board["pages"].items():
+        if page in absent:
+            continue
         declared = page_properties((repo_root / spec["html"]).read_text(encoding="utf-8"))
         hits = []
         for name in declared:
@@ -573,6 +602,16 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         f"**{len(green)}/{len(rows)} rows green**, {len(scored) - len(green)} over the gate, "
         f"{len(failed)} not scored (a capture failed).",
         "",
+    ]
+    not_shipped = board_json.get("not_shipped") or {}
+    if not_shipped:
+        lines += [
+            "**Not shipped here:** " + ", ".join(f"`{p}` (`{h}` absent)" for p, h in sorted(not_shipped.items()))
+            + ": this platform's app does not ship the page, so its rows are not scored, not green and "
+            "not in the count above.",
+            "",
+        ]
+    lines += [
         "Pixel diff % is pixelmatch over the whole viewport (compare_baseline.mjs). Geometry diffs is "
         "the count of (box, axis) pairs more than 0.5 px from Chrome's rect on the join selector "
         "(layout_oracle_gate.compare_case). Top 3 is the attribution of the diff pixels to elements "
@@ -600,6 +639,8 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         worst = max(ok, key=lambda r: r["pixel_diff_pct"]) if ok else None
         lines.append(f"| {page} | {len(mine)} | {len(g)} | {worst['state'] + ' ' + worst['size'] if worst else '—'} | "
                      f"{_fmt_pct(worst['pixel_diff_pct'] if worst else None)} |")
+    for page in sorted(not_shipped):
+        lines.append(f"| {page} | 0 | 0 | not shipped here | — |")
     census = board_json.get("census") or {}
     lines += ["", "## CSS census red list per page", ""]
     if census.get("source"):
@@ -749,6 +790,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         "sizes": board["sizes"],
         "states": {s: board["states"][s] for s in sorted({r.state for r in rows})},
         "rows": entries,
+        "not_shipped": {p: board["pages"][p]["html"] for p in pages_not_shipped(board, REPO_ROOT)},
         "census": census_red_lists(board, REPO_ROOT, census_path),
     }
     write_board(out, board_json)

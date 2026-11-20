@@ -57,6 +57,80 @@ class TestChromeBoard(unittest.TestCase):
             self.assertEqual(captured, [], "nothing is captured once a fixture is missing")
             self.assertFalse((Path(tmp) / "out" / "BOARD.md").exists(), "no board is written")
 
+    def test_a_page_this_platform_does_not_ship_is_named_not_refused(self):
+        # hiwave-windows ships no Inspector page: its absent html refused the
+        # whole board, even with --only. A page whose board.json entry lists this
+        # platform in `not_shipped_on` is now left out of the plan (not scored,
+        # not green) and named. Any OTHER absent html (a typo, a rename) is still
+        # a refusal (R1 nit), as is a missing fixture (test above).
+        from scripts import chrome_board
+
+        board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        board["pages"]["inspector"]["html"] = "crates/hiwave-app/src/ui/not-shipped-here.html"
+        board["pages"]["inspector"]["not_shipped_on"] = ["windows"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board.json"
+            path.write_text(json.dumps(board), encoding="utf-8")
+            loaded = chrome_board.load_board(path)
+            loaded["_dir"] = str(BOARD_PATH.parent)  # the real fixtures; only the html moved
+            work = Path(tmp) / "work"
+            self.assertEqual(chrome_board.pages_not_shipped(loaded, REPO, platform="windows"), ["inspector"])
+            rows = chrome_board.plan(loaded, REPO, work, platform="windows")
+            self.assertEqual(sorted({r.page for r in rows}), ["chrome", "report", "settings", "shelf"])
+            only = chrome_board.plan(loaded, REPO, work, only="settings", platform="windows")
+            self.assertEqual({r.page for r in only}, {"settings"})
+            census = Path(tmp) / "census.json"
+            census.write_text(json.dumps({"red": [], "properties": [], "meta": {}}), encoding="utf-8")
+            red = chrome_board.census_red_lists(loaded, REPO, census, platform="windows")
+            self.assertNotIn("inspector", red["pages"])
+            # --only on the page not shipped here is a clear refusal, not an empty board.
+            with self.assertRaises(chrome_board.BoardError) as ctx:
+                chrome_board.plan(loaded, REPO, work, only="inspector", platform="windows")
+            self.assertIn("not shipped on windows", str(ctx.exception))
+            # The same absence on a platform the page is NOT declared absent on is a refusal.
+            with self.assertRaises(chrome_board.BoardError) as ctx:
+                chrome_board.plan(loaded, REPO, work, platform="macos")
+            self.assertIn("inspector: html", str(ctx.exception))
+
+    def test_an_undeclared_absent_page_is_still_refused(self):
+        # R1 nit: a renamed or typo'd html path must not drop a page silently.
+        from scripts import chrome_board
+
+        board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        board["pages"]["settings"]["html"] = "crates/hiwave-app/src/ui/setings.html"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board.json"
+            path.write_text(json.dumps(board), encoding="utf-8")
+            loaded = chrome_board.load_board(path)
+            loaded["_dir"] = str(BOARD_PATH.parent)
+            for platform in ("macos", "windows", "linux"):
+                self.assertEqual(chrome_board.pages_not_shipped(loaded, REPO, platform=platform), [])
+                with self.assertRaises(chrome_board.BoardError) as ctx:
+                    chrome_board.plan(loaded, REPO, Path(tmp) / "work", platform=platform)
+                self.assertIn("settings: html crates/hiwave-app/src/ui/setings.html missing", str(ctx.exception))
+
+    def test_the_board_declares_the_inspector_not_shipped_on_windows(self):
+        board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(board["pages"]["inspector"].get("not_shipped_on"), ["windows"])
+        others = {p: s.get("not_shipped_on") for p, s in board["pages"].items() if p != "inspector"}
+        self.assertEqual(others, {p: None for p in others})
+
+    def test_the_board_names_a_page_not_shipped_here(self):
+        from scripts import chrome_board
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            chrome_board.write_board(out, {
+                "run": {"at": "now", "sha": "f", "base": "b", "chromium": "148.0.7778.216",
+                        "chromium_path": "~/c", "chromium_pinned": "148.0.7778.216", "parity_capture": "pc", "gate_pct": 0.5},
+                "sizes": [], "states": {}, "rows": [], "census": {},
+                "not_shipped": {"inspector": "crates/hiwave-app/src/ui/inspector.html"},
+            })
+            md = (out / "BOARD.md").read_text(encoding="utf-8")
+            self.assertIn("Not shipped here", md)
+            self.assertIn("inspector", md)
+            self.assertIn("| inspector | 0 | 0 | not shipped here |", md)
+
     def test_chromium_and_rustkit_run_the_same_action_list(self):
         from scripts import chrome_board
 
