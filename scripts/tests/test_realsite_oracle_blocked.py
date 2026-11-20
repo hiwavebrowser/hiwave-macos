@@ -307,6 +307,10 @@ class RealWindowGate(unittest.TestCase):
             live.kill()
             live.wait()
         self.assertFalse(realsite_board._pid_alive(self._dead_pid()))
+        # R1 nit: an exit code equal to STILL_ACTIVE (259) is still a dead process.
+        dead259 = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(259)"])
+        dead259.wait()
+        self.assertFalse(realsite_board._pid_alive(dead259.pid))
 
     def test_dead_lock_recovery_loses_to_a_runner_that_recovered_first(self):
         """R1 (#960): two runners both read the same dead pid; exactly one may hold.
