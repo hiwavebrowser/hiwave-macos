@@ -18687,6 +18687,67 @@ mod tests {
     }
 
     #[test]
+    fn a_percentage_select_is_never_narrower_than_its_padding_and_border() {
+        // chrome.html's collapsed sidebar is `width: 0`; its mode selector is `width: 100%`.
+        // Chrome for Testing 148.0.7778.216 (win64, Arial 13px): a select is `box-sizing:
+        // border-box`, so its border box is the percentage, floored at its horizontal padding +
+        // border, never its intrinsic width -- styled (padding 8px 12px, border none) 24 at 100%
+        // or 50% of 0 and at 100% of 10px; padding 8px 4px 8; a bare UA select (1px border) 2.
+        // RustKit fell back to the intrinsic width when the percentage resolved to 0 (47, 45, 31)
+        // and did not floor a small one (10).
+        let select = |pad_h: Option<f32>, pct: f32| {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineBlock;
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(13.0);
+            s.width = Length::Percent(pct);
+            if let Some(h) = pad_h {
+                s.appearance = rustkit_css::Appearance::None;
+                s.padding_top = Length::Px(8.0);
+                s.padding_bottom = Length::Px(8.0);
+                s.padding_left = Length::Px(h);
+                s.padding_right = Length::Px(h);
+                s.padding_v_declared = true;
+                s.padding_declared = [true; 4];
+                s.border_top_style = BorderStyle::None;
+                s.border_right_style = BorderStyle::None;
+                s.border_bottom_style = BorderStyle::None;
+                s.border_left_style = BorderStyle::None;
+                s.border_v_declared = true;
+                s.border_declared = [true; 4];
+            }
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::Select {
+                    options: vec!["Zen".to_string()],
+                    selected_index: Some(0),
+                    size: 0,
+                    selected: vec![0],
+                }),
+                s,
+            )
+        };
+        // (container width, side padding (None = the bare UA select), width %, Chrome's width)
+        for (container, pad_h, pct, chrome) in [
+            (0.0, Some(12.0), 100.0, 24.0),
+            (0.0, None, 100.0, 2.0),
+            (0.0, Some(4.0), 100.0, 8.0),
+            (10.0, Some(12.0), 100.0, 24.0),
+            (0.0, Some(12.0), 50.0, 24.0),
+        ] {
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, container, 0.0);
+            let mut block = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            block.children.push(select(pad_h, pct));
+            block.layout(&cb);
+            let got = block.children[0].dimensions.content.width;
+            assert!(
+                (got - chrome).abs() <= 0.05,
+                "{pct}% of {container}px, side padding {pad_h:?}: Chrome {chrome}, RustKit {got}"
+            );
+        }
+    }
+
+    #[test]
     fn a_text_only_line_is_exactly_one_line_height() {
         // The strut and a text member of the container's own font split the
         // SAME line-height about the baseline: summing them must not grow a
