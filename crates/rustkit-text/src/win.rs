@@ -554,7 +554,8 @@ pub fn text_fallback_face(ch: char, family: &str) -> Option<(FontFace, String)> 
 }
 
 fn find_text_fallback(ch: char, family: &str) -> Option<(FontFace, String)> {
-    let candidates: &[&str] = if crate::is_emoji(ch) { &["Segoe UI Symbol"] } else { blink_block_fallback(ch) };
+    let emoji = crate::is_emoji(ch) || has_emoji_property(ch);
+    let candidates: &[&str] = if emoji { &["Segoe UI Symbol"] } else { blink_block_fallback(ch) };
     let collection = FontCollection::system().ok()?;
     for name in candidates {
         let Some(fam) = collection.font_family_by_name(name).ok().flatten() else {
@@ -571,7 +572,7 @@ fn find_text_fallback(ch: char, family: &str) -> Option<(FontFace, String)> {
             return Some((face, name.to_string()));
         }
     }
-    if crate::is_emoji(ch) {
+    if emoji {
         return None; // the emoji path takes it
     }
     map_characters(ch, family, 400, false)
@@ -704,6 +705,9 @@ mod system_fallback_tests {
             assert_ne!(face.glyph_indices(&[ch as u32]).unwrap()[0], 0, "{ch:?}");
         }
         assert_eq!(text_fallback_face('\u{2699}', "Segoe UI").map(|f| f.1).as_deref(), Some("Segoe UI Symbol"));
+        // U+23F1 (Miscellaneous Technical, Emoji property): Blink's text-presentation
+        // emoji font, not its math font.
+        assert_eq!(text_fallback_face('\u{23F1}', "Segoe UI").map(|f| f.1).as_deref(), Some("Segoe UI Symbol"));
         assert_eq!(blink_block_fallback('A'), &[] as &[&str]);
     }
 
