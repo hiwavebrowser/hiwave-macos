@@ -10996,6 +10996,31 @@ impl Engine {
         html: &str,
         preset_nav: Option<u64>,
     ) -> Result<(), EngineError> {
+        self.load_html_doc(id, html, preset_nav, false)
+    }
+
+    /// [`Engine::load_html_as`] for one of the app's own pages shown in a
+    /// web content view (the report page). That document, and no later
+    /// one, gets the internal page's `window.ipc`
+    /// ([`DomBindings::new_internal_page`]); what it posts is read with
+    /// [`Self::drain_view_internal_reads`] and answered with
+    /// [`Self::answer_view_internal_read`]. A URL load never gets it.
+    pub fn load_internal_page_as(
+        &mut self,
+        id: EngineViewId,
+        html: &str,
+        preset_nav: Option<u64>,
+    ) -> Result<(), EngineError> {
+        self.load_html_doc(id, html, preset_nav, true)
+    }
+
+    fn load_html_doc(
+        &mut self,
+        id: EngineViewId,
+        html: &str,
+        preset_nav: Option<u64>,
+        internal_page: bool,
+    ) -> Result<(), EngineError> {
         self.begin_view_visit(id, None);
         let _hold = wgate::hold("load_html");
         // A navigation of its own (M3b). Nothing in it awaits, so the only
@@ -11104,6 +11129,8 @@ impl Engine {
             let app_owned = self.views.get(&id).is_some_and(|view| view.app_owned);
             let bindings = if app_owned {
                 DomBindings::new_app_owned(js_runtime)
+            } else if internal_page {
+                DomBindings::new_internal_page(js_runtime)
             } else {
                 DomBindings::new(js_runtime)
             }
@@ -27938,6 +27965,48 @@ impl Engine {
             return Vec::new();
         }
         drained
+    }
+
+    /// What the internal page in view `id` ([`Self::load_internal_page_as`])
+    /// posted since the last drain, with the navigation id of that
+    /// document. Empty for any other document.
+    pub fn drain_view_internal_reads(&self, id: EngineViewId) -> (u64, Vec<String>) {
+        let Some(view) = self.views.get(&id) else {
+            return (0, Vec::new());
+        };
+        let reads = view
+            .bindings
+            .as_ref()
+            .filter(|bindings| bindings.is_internal_page())
+            .map(|bindings| bindings.drain_internal_reads())
+            .unwrap_or_default();
+        (view.nav_id, reads)
+    }
+
+    /// Hand `response_json` (a JSON value) to the internal page that asked,
+    /// as a `hiwave-response` event at its window. Only while view `id`
+    /// still shows that document: navigation `nav_id`, built as an internal
+    /// page. Returns whether it was delivered.
+    pub fn answer_view_internal_read(
+        &mut self,
+        id: EngineViewId,
+        nav_id: u64,
+        response_json: &str,
+    ) -> bool {
+        let same_document = self.views.get(&id).is_some_and(|view| {
+            view.nav_id == nav_id
+                && view.bindings.as_ref().is_some_and(|bindings| bindings.is_internal_page())
+        });
+        if !same_document {
+            return false;
+        }
+        // The answer is data: parsed from a string literal, never spliced in
+        // as script.
+        let literal = serde_json::to_string(response_json).unwrap_or_else(|_| "\"null\"".to_string());
+        let script = format!(
+            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: JSON.parse({literal}) }})); 0"
+        );
+        self.execute_script(id, &script).is_ok()
     }
 
     /// Check if any view has pending IPC messages.

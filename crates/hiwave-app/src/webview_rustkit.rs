@@ -106,6 +106,9 @@ pub struct RustKitView {
     chrome_updates: RefCell<ChromeUpdates>,
     /// What the page posted on `window.ipc`, in order (CH2.E9).
     ipc_inbox: RefCell<Vec<String>>,
+    /// What an internal page ([`Self::load_internal_page`]) posted, with
+    /// its navigation id, in order.
+    internal_reads: RefCell<Vec<(u64, String)>>,
     /// CH3.A7: the app owns this view (its chrome, a panel), so the
     /// documents it loads with `load_html_internal` get the app bridge.
     /// A content view never does.
@@ -432,6 +435,7 @@ impl RustKitView {
             current_title: RefCell::new(None),
             chrome_updates: RefCell::new(ChromeUpdates::default()),
             ipc_inbox: RefCell::new(Vec::new()),
+            internal_reads: RefCell::new(Vec::new()),
             app_owned: Cell::new(false),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
@@ -995,9 +999,62 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
+        self.load_html_doc(html, false)
+    }
+
+    /// Load one of the app's own pages (the report page) into this web
+    /// content view. That document gets a `window.ipc` whose messages come
+    /// back from [`Self::take_internal_reads`]; the app answers the ones it
+    /// serves with [`Self::answer_internal_read`]. Only the app calls this,
+    /// with a document it built itself.
+    pub fn load_internal_page(&self, html: &str) -> HiWaveResult<()> {
+        self.load_html_doc(html, true)
+    }
+
+    /// What the internal page posted since the last call, oldest first,
+    /// each with the navigation id of the document that posted it.
+    pub fn take_internal_reads(&self) -> Vec<(u64, String)> {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.internal_reads.borrow_mut())
+    }
+
+    /// Answer a read of navigation `nav_id`. The page drops it unless it
+    /// still shows that internal page.
+    pub fn answer_internal_read(&self, nav_id: u64, response_json: String) {
+        if let Some(thread) = &self.content {
+            thread.answer_internal_read(nav_id, response_json);
+        } else {
+            self.submit(PageCmd::AnswerInternalRead { nav_id, response_json });
+        }
+    }
+
+    /// The page's answer to `script`, waiting for it on either path. Tests only.
+    #[cfg(test)]
+    pub(crate) fn read_for_test(&self, script: &str) -> String {
+        let Some(thread) = &self.content else {
+            return self.execute_script_sync(script).unwrap_or_default();
+        };
+        let mut rx = thread.eval(script);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(answer) = rx.try_recv() {
+                return answer.unwrap_or_default();
+            }
+            assert!(Instant::now() < deadline, "the page did not answer {script}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn load_html_doc(&self, html: &str, internal_page: bool) -> HiWaveResult<()> {
         self.cancel_load();
         if let Some(thread) = &self.content {
-            let _rx = thread.load_html(html);
+            let _rx = if internal_page {
+                thread.load_internal_page(html)
+            } else {
+                thread.load_html(html)
+            };
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
             // Drop one harvest already copied out of the queue; `stale`
@@ -1014,6 +1071,7 @@ impl RustKitView {
             match self.ask(|reply| PageCmd::LoadHtml {
                 html: html.to_string(),
                 nav_id: 0,
+                internal_page,
                 reply,
             }) {
                 Some(Ok(())) => {}
@@ -1481,6 +1539,9 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::InternalRead { payload, nav_id } => {
+                    self.internal_reads.borrow_mut().push((nav_id, payload))
+                }
                 PageEvent::KeyEquivalentDone { token, claimed } => {
                     rustkit_viewhost::finish_key_equivalent(token, claimed);
                 }
@@ -1661,7 +1722,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
         | PageEvent::NavigateRequested { nav_id, .. }
-        | PageEvent::Ipc { nav_id, .. } => *nav_id,
+        | PageEvent::Ipc { nav_id, .. }
+        | PageEvent::InternalRead { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
         | PageEvent::TextFocused(_)
