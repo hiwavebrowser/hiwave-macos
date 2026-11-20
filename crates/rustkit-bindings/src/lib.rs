@@ -1927,7 +1927,7 @@ impl DomBindings {
     /// decides which of them it answers. No `window.hiwaveChrome`, no
     /// `__rk_ipc_post`, and nothing reaches [`Self::drain_ipc_queue`].
     pub fn new_internal_page(runtime: JsRuntime) -> Result<Self, BindingError> {
-        Self::build(runtime, false, false)
+        Self::build(runtime, false, true)
     }
 
     fn build(runtime: JsRuntime, app_bridge: bool, internal_reads: bool) -> Result<Self, BindingError> {
