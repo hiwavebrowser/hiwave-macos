@@ -17,6 +17,9 @@ default = ["rustkit"]
 # compiled into debug builds, and into a release build only with this
 # feature. Never in a shipped build.
 test-hooks = []
+# MEDIA-AVF step 3 (docs/design/MEDIA_AVF.md §3.2): <video>/<audio> players on the
+# main-thread MediaHost (AVPlayer). Off until Milestone 1 step 6 turns it on by default.
+media-avf = ["rustkit", "rustkit-engine/media-avf"]
 # RustKit: Pure Rust browser engine for content rendering (hybrid mode)
 # WRY is still used for Chrome UI and Shelf components
 rustkit = [
