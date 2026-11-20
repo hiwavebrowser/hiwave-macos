@@ -110,6 +110,8 @@ const SETTINGS_HTML: &str = include_str!("ui/settings.html");
 /// The HTML content for the analytics report page
 const REPORT_HTML: &str = include_str!("ui/report.html");
 const REPORT_URL: &str = "hiwave://report";
+/// The document an `about:blank` navigation shows.
+const BLANK_HTML: &str = "<html><head></head><body></body></html>";
 const FIND_IN_PAGE_HELPER: &str = include_str!("ui/find_in_page.js");
 const CONTEXT_MENU_HELPER: &str = include_str!("ui/context_menu.js");
 const AUDIO_DETECTOR: &str = include_str!("ui/audio_detector.js");
@@ -2448,6 +2450,9 @@ mod report_page_tests;
 mod internal_nav_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod blank_data_nav_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
     use super::*;
     use rustkit_viewhost::ViewId;
@@ -2695,7 +2700,25 @@ fn navigate_content(
         return NavOutcome::Refused;
     }
     info!("Navigating content to: {}", crate::page_url_for_log(&url));
-    if is_new_tab_url(&url) {
+    let parsed = url::Url::parse(&url).ok();
+    if parsed.as_ref().is_some_and(|u| u.scheme() == "data") {
+        // Not the new tab page, and not followed: Chrome does not navigate a
+        // tab's top frame to a page's `data:` URL. (One typed in the address
+        // bar needs the navigation's initiator to tell apart.)
+        info!(url = %crate::page_url_for_log(&url), "Not navigating the tab to a data URL");
+        return NavOutcome::Refused;
+    }
+    if let Some(blank) = parsed.filter(|u| u.scheme() == "about" && u.path().eq_ignore_ascii_case("blank")) {
+        // An empty document at about:blank, as in Chrome; not the new tab
+        // page. `about:BLANK` is about:blank too, written that way.
+        let blank = url::Url::parse(&format!("about:blank{}", &blank.as_str()["about:".len() + blank.path().len()..]))
+            .unwrap_or(blank);
+        set_active_tab_url(state, blank.as_str());
+        let _ = content.load_html(BLANK_HTML);
+        chrome_url(chrome, blank.as_str());
+        return NavOutcome::Followed;
+    }
+    if url == NEW_TAB_URL {
         load_new_tab(content);
         chrome_url(chrome, "");
         sync_shield_to_chrome(state, chrome);
