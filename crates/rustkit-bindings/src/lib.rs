@@ -506,6 +506,27 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
     ("URL", "createObjectURL (blob store full)"),
 ];
 
+/// The longest message an internal page's `window.ipc.postMessage` queues.
+const INTERNAL_READ_MAX_BYTES: usize = 4096;
+/// How many of them wait at most between two drains.
+const INTERNAL_READ_MAX_QUEUED: usize = 64;
+
+/// An internal page's `window.ipc` ([`DomBindings::new_internal_page`]):
+/// a frozen object whose `postMessage` queues the message (a non-string as
+/// its JSON) on the Rust side.
+const INTERNAL_READS_JS: &str = r#"
+__rk.appRead = globalThis.__rustkit_app_read;
+delete globalThis.__rustkit_app_read;
+(function (read) {
+    var ipc = Object.freeze({
+        postMessage: function (message) {
+            read(typeof message === 'string' ? message : JSON.stringify(message));
+        }
+    });
+    Object.defineProperty(window, 'ipc', { value: ipc, writable: false, configurable: false, enumerable: false });
+})(__rk.appRead);
+"#;
+
 /// Every name the embedder's scripts keep on the host object (`__rk`).
 /// Each is an own property of it before the first script runs
 /// ([`JsRuntime::reserve_host_slots`]), `undefined` until its script fills
@@ -525,6 +546,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
     "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
+    // Installed only in an app page loaded for its reads (`new_internal_page`).
+    "appRead",
     // Installed only with nested browsing contexts on (web_frames.js).
     "frames",
     // The frame tree's shared state, which the runtime puts there itself.
@@ -1910,6 +1933,11 @@ pub struct DomBindings {
     /// What the page posted with `window.ipc.postMessage`, held on the
     /// Rust side (`__rk_ipc_post`), so a drain runs no script.
     ipc_queue: Rc<RefCell<Vec<IpcMessage>>>,
+    /// What an internal page ([`Self::new_internal_page`]) posted, for
+    /// [`Self::drain_internal_reads`]. Always empty in any other document.
+    read_queue: Rc<RefCell<Vec<String>>>,
+    /// Built by [`Self::new_internal_page`].
+    internal_reads: bool,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<DirtyMark>,
@@ -1939,7 +1967,7 @@ impl DomBindings {
     /// sees no `window.ipc`, `window.hiwaveChrome` or `__rk_ipc_post`, as
     /// in Chromium (CH3.A7).
     pub fn new(runtime: JsRuntime) -> Result<Self, BindingError> {
-        Self::build(runtime, false)
+        Self::build(runtime, false, false)
     }
 
     /// Create DOM bindings for one of the app's own documents (the chrome,
@@ -1947,11 +1975,20 @@ impl DomBindings {
     /// `window.hiwaveChrome.postMessage`, whose messages
     /// [`Self::drain_ipc_queue`] hands to the app (CH2.E9, CH3.A7).
     pub fn new_app_owned(runtime: JsRuntime) -> Result<Self, BindingError> {
-        Self::build(runtime, true)
+        Self::build(runtime, true, false)
     }
 
-    fn build(runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
-        Self::build_in(PageRuntime::main(runtime), app_bridge, false, None)
+    /// Create DOM bindings for one of the app's own pages shown in a
+    /// content view (the report page): `window.ipc.postMessage` only
+    /// queues the message for [`Self::drain_internal_reads`]; the embedder
+    /// decides which of them it answers. No `window.hiwaveChrome`, no
+    /// `__rk_ipc_post`, and nothing reaches [`Self::drain_ipc_queue`].
+    pub fn new_internal_page(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, false, true)
+    }
+
+    fn build(runtime: JsRuntime, app_bridge: bool, internal_reads: bool) -> Result<Self, BindingError> {
+        Self::build_in(PageRuntime::main(runtime), app_bridge, internal_reads, false, None)
     }
 
     /// Bindings for a document nested in this one's frame tree and of its
@@ -1962,7 +1999,7 @@ impl DomBindings {
     /// [`Self::drop_child`].
     pub fn new_child(&self) -> Result<Self, BindingError> {
         let realm = self.runtime.shared.borrow_mut().create_realm()?;
-        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, true, Some(self.clock_origin))
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, false, true, Some(self.clock_origin))
     }
 
     /// Give this page's global a property `name` that is `other`'s global
@@ -2138,6 +2175,7 @@ impl DomBindings {
     fn build_in(
         page: PageRuntime,
         app_bridge: bool,
+        internal_reads: bool,
         lazy: bool,
         tree_clock: Option<std::time::Instant>,
     ) -> Result<Self, BindingError> {
@@ -2176,6 +2214,24 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
         let clock_origin = Self::inject_globals(&mut *runtime, app_bridge, lazy, tree_clock)?;
+        let read_queue = Rc::new(RefCell::new(Vec::new()));
+        if internal_reads {
+            let queue = Rc::clone(&read_queue);
+            runtime.register_host_function(
+                "__rustkit_app_read",
+                1,
+                Box::new(move |args| {
+                    if let Some(JsValue::String(payload)) = args.first() {
+                        let mut queue = queue.borrow_mut();
+                        if payload.len() <= INTERNAL_READ_MAX_BYTES && queue.len() < INTERNAL_READ_MAX_QUEUED {
+                            queue.push(payload.clone());
+                        }
+                    }
+                    JsValue::Undefined
+                }),
+            )?;
+            runtime.evaluate_with_host(INTERNAL_READS_JS)?;
+        }
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
@@ -2290,6 +2346,8 @@ impl DomBindings {
             window: RefCell::new(WindowState::default()),
             dom_host,
             ipc_queue,
+            read_queue,
+            internal_reads,
             dirty,
             mutations,
             mutation_log,
@@ -4306,6 +4364,18 @@ impl DomBindings {
     /// Returns a Vec of IpcMessage structs.
     pub fn drain_ipc_queue(&self) -> Vec<IpcMessage> {
         std::mem::take(&mut *self.ipc_queue.borrow_mut())
+    }
+
+    /// What an internal page ([`Self::new_internal_page`]) posted with
+    /// `window.ipc.postMessage` since the last call. Empty for any other
+    /// document.
+    pub fn drain_internal_reads(&self) -> Vec<String> {
+        std::mem::take(&mut *self.read_queue.borrow_mut())
+    }
+
+    /// Whether these bindings were built by [`Self::new_internal_page`].
+    pub fn is_internal_page(&self) -> bool {
+        self.internal_reads
     }
 
     /// Check if there are pending IPC messages.

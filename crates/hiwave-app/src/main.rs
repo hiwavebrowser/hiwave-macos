@@ -2048,12 +2048,41 @@ fn load_about_page(content: &impl ContentWebViewOps) {
 }
 
 fn load_report_page(content: &impl ContentWebViewOps) {
-    // Embed Chart.js library inline in the report HTML
-    let report_with_chartjs = REPORT_HTML.replace(
+    let _ = content.load_internal_page(&report_page_html());
+}
+
+/// The report page with Chart.js inline.
+fn report_page_html() -> String {
+    REPORT_HTML.replace(
         "<!-- Chart.js is injected by Rust before page load -->",
-        &format!("<script>{}</script>", CHART_JS)
-    );
-    let _ = content.load_html(&report_with_chartjs);
+        &format!("<script>{}</script>", CHART_JS),
+    )
+}
+
+/// The answer to one message from the report page in the content view
+/// ([`load_report_page`]), as the page's `hiwave-response` detail: its
+/// three reads (today, this week, this month). Every other command gets an
+/// error and is not run.
+fn internal_page_read(state: &Arc<Mutex<AppState>>, body: &str) -> String {
+    let response = match serde_json::from_str::<IpcMessage>(body) {
+        Ok(msg @ (IpcMessage::GetTodayStats | IpcMessage::GetWeeklyReport | IpcMessage::GetMonthlyReport)) => {
+            ipc::commands::handle_message(state, msg)
+        }
+        _ => {
+            info!(cmd = %ipc_cmd(body), len = body.len(), "Report page: command not served");
+            ipc::IpcResponse::error("Not available on this page")
+        }
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| "null".to_string())
+}
+
+/// Answer what the report page in the content view posted since the last
+/// turn ([`internal_page_read`]).
+#[cfg(all(target_os = "macos", feature = "rustkit"))]
+fn serve_internal_page_reads(view: &webview_rustkit::RustKitView, state: &Arc<Mutex<AppState>>) {
+    for (nav_id, body) in view.take_internal_reads() {
+        view.answer_internal_read(nav_id, internal_page_read(state, &body));
+    }
 }
 
 /// True for the first wheel event after a quiet gap, so a flick is visible in
@@ -2389,6 +2418,9 @@ mod idle_page_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod close_tab_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod report_page_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
@@ -4331,6 +4363,8 @@ fn main() {
                             }
                             let _ = click_proxy.send_event(UserEvent::Navigate(url));
                         }
+                        // The report page's reads.
+                        serve_internal_page_reads(view, &state_for_events);
                         // CH2.E9: what the page committed, as the WebKit
                         // content view's handlers report it off macOS. Until
                         // 2026-11-05 nothing read these on macOS: the address
