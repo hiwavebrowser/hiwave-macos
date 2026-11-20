@@ -2307,9 +2307,13 @@ enum ScriptTiming {
     Async,
 }
 
-/// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
-/// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
-const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+/// The largest page script `run_page_scripts` starts. It was 4 MiB while
+/// Boa's parse and compile grew with the square of a scope's variables:
+/// YouTube's 10.9 MB `kevlar_base` bundle ran for 12.7 s. Since the scope
+/// name index (#1376) that bundle parses in about 1.4 s and compiles in about
+/// 0.6 s, so the limit now bounds memory, not time: Boa peaks at about 85
+/// bytes per source byte, about 1.4 GB for a 16 MiB script.
+const MAX_PAGE_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Why an inline HTML load (`load_html`) does not run a script: it runs
 /// inline classic scripts only. Every other `Skipped` there is a script it
@@ -9526,10 +9530,9 @@ impl Engine {
                 log.push(record);
                 continue;
             }
-            // Boa cannot be interrupted mid-script, so the budget can only
-            // be enforced between scripts. Boa takes about 1s per MB here,
-            // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
-            // and hung the capture. A script that big is not started.
+            // A script over MAX_PAGE_SCRIPT_BYTES is not started: Boa's
+            // parse of it alone would take more memory than a page should
+            // (about 85 bytes per source byte at its peak).
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
                 let record = ScriptRecord {
                     source: label,
