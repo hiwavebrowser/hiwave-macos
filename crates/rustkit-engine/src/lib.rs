@@ -11512,7 +11512,28 @@ impl Engine {
             .get(&id)
             .is_some_and(|view| view.lay.scrolled_in_task.replace(false));
         let mut script_note = "-".to_string();
-        if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
+        // REG-TRANS-FASTPATH: an animation frame whose registered custom property transitions
+        // took no paint-only frame names the elements that animate; a relayout the animations
+        // alone asked for restyles only those (and what is under them) on the same short path.
+        let animation_roots = self
+            .views
+            .get(&id)
+            .and_then(|view| view.lay.animation_roots.borrow_mut().take())
+            .filter(|_| {
+                !causes.counts.is_empty()
+                    && causes.counts.iter().all(|(kind, _)| kind == "animation")
+                    && causes.mutations.is_empty()
+                    && dirty.as_ref().is_none_or(|d| d.full.is_none() && d.nodes.is_empty())
+                    && !scrolled_in_task
+            });
+        if let (true, Some(roots)) =
+            (script_restyle_enabled() && pointer_restyle.is_none() && !cooling, animation_roots)
+        {
+            if let Some(view) = self.views.get(&id) {
+                view.lay.script_idle.set(0);
+                *view.lay.script_roots.borrow_mut() = Some(roots);
+            }
+        } else if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
             match script_restyle_roots(&causes, dirty.as_ref(), scrolled_in_task) {
                 Ok(roots) => {
                     if let Some(view) = self.views.get(&id) {

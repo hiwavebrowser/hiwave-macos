@@ -3009,8 +3009,8 @@ impl ComputedStyle {
     /// nothing else: no box is sized, placed, created or dropped by them,
     /// and no stacking context comes or goes. The list is deliberately
     /// short (`opacity`, `transform`, `visibility` and background images
-    /// are not on it); a property left off costs a layout, never a wrong
-    /// frame.
+    /// are not on it, except a gradient that stays a gradient in the same
+    /// layer); a property left off costs a layout, never a wrong frame.
     pub fn copy_paint_only(&mut self, from: &ComputedStyle) {
         self.color = from.color;
         self.background_color = from.background_color;
@@ -3032,6 +3032,32 @@ impl ComputedStyle {
         // Custom properties are substituted into the values above and
         // below at the cascade; nothing later reads them but script.
         self.custom_properties = from.custom_properties.clone();
+        // REG-TRANS-FASTPATH: gradient layers that stay gradient layers, with the same position,
+        // size, repeat, origin and clip, are paint (a gradient is drawn into the box it is given;
+        // no box reads it). An image URL, or a layer that comes or goes, is not.
+        if self.gradient_backgrounds_alike(from) {
+            self.background_layers = from.background_layers.clone();
+            self.background_gradient = from.background_gradient.clone();
+        }
+    }
+
+    /// Whether `self` and `other` have the same background layers but for gradient images:
+    /// layer by layer the same image, or a gradient on both sides with the rest of the layer
+    /// equal; and both or neither with the legacy single gradient.
+    fn gradient_backgrounds_alike(&self, other: &ComputedStyle) -> bool {
+        let gradient = |image: &BackgroundImage| matches!(image, BackgroundImage::Gradient(_));
+        self.background_layers.len() == other.background_layers.len()
+            && self.background_gradient.is_some() == other.background_gradient.is_some()
+            && self.background_layers.iter().zip(&other.background_layers).all(|(a, b)| {
+                a.image == b.image
+                    || (gradient(&a.image)
+                        && gradient(&b.image)
+                        && a.position == b.position
+                        && a.size == b.size
+                        && a.repeat == b.repeat
+                        && a.origin == b.origin
+                        && a.clip == b.clip)
+            })
     }
 
     /// Whether the properties [`Self::copy_paint_only`] lists are the same
@@ -3055,6 +3081,8 @@ impl ComputedStyle {
             && self.transition_duration == other.transition_duration
             && self.transition_timing_function == other.transition_timing_function
             && self.transition_delay == other.transition_delay
+            && self.background_layers == other.background_layers
+            && self.background_gradient == other.background_gradient
     }
 
     /// Whether `self` and `other` differ, if at all, only in the

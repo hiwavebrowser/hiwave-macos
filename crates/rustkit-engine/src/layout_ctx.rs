@@ -398,6 +398,19 @@ impl LayoutCtx {
             // TRANS-F: what reads a registered custom property (`var()`)
             // is known only to a cascade.
             if anims.custom_running() {
+                // REG-TRANS-FASTPATH: every element that animates (a frame's values move on all
+                // of them), for the relayout's short path to restyle alone: what reads a moving
+                // registered value through `var()` is its own declarations or, for an
+                // `inherits: true` property, its subtree's.
+                let mut roots: Vec<usize> = anims
+                    .record_nodes()
+                    .into_iter()
+                    .chain(script.keys().copied())
+                    .map(|key| crate::animations::split_key(key).0)
+                    .collect();
+                roots.sort_unstable();
+                roots.dedup();
+                *lay.animation_roots.borrow_mut() = Some(roots);
                 return Err("a registered custom property animates".into());
             }
             if let Some(node) = anims
@@ -772,6 +785,11 @@ pub(crate) struct ViewLayout {
     /// such restyle's build went into.
     pub(crate) script_roots: RefCell<Option<Vec<usize>>>,
     pub(crate) script_walked: Cell<Option<usize>>,
+    /// REG-TRANS-FASTPATH: a registered custom property's transition runs, so the animation frame
+    /// took no paint-only path (`animation_frame`); the elements that animate (raw NodeIds), for
+    /// the coming relayout to restyle alone on the LPF1 short path (`Engine::relayout`). Under
+    /// each the build restyles its subtree, which is where an `inherits: true` value reaches.
+    pub(crate) animation_roots: RefCell<Option<Vec<usize>>>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
