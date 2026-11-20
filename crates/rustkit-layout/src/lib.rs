@@ -4334,7 +4334,10 @@ impl LayoutBox {
         // border box, which is never narrower than its horizontal padding + border: Chrome for
         // Testing 148 builds `width: 100%` in a 0px block as that floor (chrome.html's collapsed
         // sidebar: 24, where the intrinsic-width fallback above built 105), and 100% of 10px as
-        // 24 too. An auto width stays intrinsic.
+        // 24 too. An auto width stays intrinsic. Author `box-sizing` is not read: RustKit's
+        // computed default is `content-box` for every element, so an author `content-box` on a
+        // select (where Chrome would add the padding and border) cannot be told apart from none
+        // until the UA sheet sets the select's `border-box`; nothing pins it yet.
         let width = match (&control, &self.style.width) {
             (FormControlType::Select { size, .. }, w) if *size <= 1 && !matches!(w, Length::Auto | Length::Zero) => {
                 let [_, right, _, left] = self.drop_down_edges(font_size);
@@ -4588,15 +4591,11 @@ impl LayoutBox {
         None
     }
 
-    /// Distance from a form control's synthetic baseline (its inner text
-    /// line's baseline) to its bottom margin edge: font descent +
-    /// half-leading + author bottom padding/border. Chrome hangs exactly
-    /// this much of a control below the line baseline (bare 19px input:
-    /// ~4-5px), where the bottom-edge model hung the whole box + strut.
     /// A drop-down select's padding + border per side (top, right, bottom, left), from its style:
     /// both are inside the control's content rect, which is its border box. The UA's are 0
     /// padding and a 1px border per side unless the author set them; `border-style: none` is no
-    /// border (as `form_control_intrinsic_size` counts them).
+    /// border (as `form_control_intrinsic_size` counts them). A percentage padding counts as 0
+    /// here, as there; nothing pins Chrome's value for one yet.
     fn drop_down_edges(&self, font_size: f32) -> [f32; 4] {
         let st = &self.style;
         let px = |l: &Length| match l {
@@ -4624,6 +4623,11 @@ impl LayoutBox {
         ]
     }
 
+    /// Distance from a form control's synthetic baseline (its inner text
+    /// line's baseline) to its bottom margin edge: font descent +
+    /// half-leading + author bottom padding/border. Chrome hangs exactly
+    /// this much of a control below the line baseline (bare 19px input:
+    /// ~4-5px), where the bottom-edge model hung the whole box + strut.
     fn form_control_baseline_hang(&self) -> f32 {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -18761,12 +18765,14 @@ mod tests {
         // or 50% of 0 and at 100% of 10px; padding 8px 4px 8; a bare UA select (1px border) 2.
         // RustKit fell back to the intrinsic width when the percentage resolved to 0 (47, 45, 31)
         // and did not floor a small one (10).
+        // `pct` < 0 stands for an author `width: 0`, which parses as `Px(0)` (`Length::Zero` is
+        // the unset value): Chrome 24 styled and 2 bare there too.
         let select = |pad_h: Option<f32>, pct: f32| {
             let mut s = ComputedStyle::new();
             s.display = rustkit_css::Display::InlineBlock;
             s.font_family = "Arial".to_string();
             s.font_size = Length::Px(13.0);
-            s.width = Length::Percent(pct);
+            s.width = if pct < 0.0 { Length::Px(0.0) } else { Length::Percent(pct) };
             if let Some(h) = pad_h {
                 s.appearance = rustkit_css::Appearance::None;
                 s.padding_top = Length::Px(8.0);
@@ -18799,6 +18805,8 @@ mod tests {
             (0.0, Some(4.0), 100.0, 8.0),
             (10.0, Some(12.0), 100.0, 24.0),
             (0.0, Some(12.0), 50.0, 24.0),
+            (300.0, Some(12.0), -1.0, 24.0),
+            (300.0, None, -1.0, 2.0),
         ] {
             let mut cb = Dimensions::default();
             cb.content = Rect::new(0.0, 0.0, container, 0.0);
