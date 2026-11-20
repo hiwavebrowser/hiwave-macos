@@ -164,7 +164,12 @@ fn typed(syntax: &str, initial: &str, from: &str, to: &str, extra: &str) -> Run 
 
 fn assert_runs(r: &Run, want: [&str; 4], what: &str) {
     assert_eq!(
-        (r.before.as_str(), r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()),
+        (
+            r.before.as_str(),
+            r.at[0].as_str(),
+            r.at[1].as_str(),
+            r.end.as_str()
+        ),
         (want[0], want[1], want[2], want[3]),
         "{what}: before, 0 ms, 50 ms, end ({r:?})"
     );
@@ -175,7 +180,16 @@ fn assert_runs(r: &Run, want: [&str; 4], what: &str) {
 #[test]
 fn a_registered_color_interpolates() {
     let r = typed("<color>", "black", "rgb(0,0,255)", "red", "");
-    assert_runs(&r, ["rgb(0, 0, 255)", "rgb(0, 0, 255)", "rgb(128, 0, 128)", "rgb(255, 0, 0)"], "<color>");
+    assert_runs(
+        &r,
+        [
+            "rgb(0, 0, 255)",
+            "rgb(0, 0, 255)",
+            "rgb(128, 0, 128)",
+            "rgb(255, 0, 0)",
+        ],
+        "<color>",
+    );
 }
 
 #[test]
@@ -196,15 +210,35 @@ fn a_registered_length_in_em_computes_to_px() {
 #[test]
 fn a_registered_length_percentage_interpolates_as_calc() {
     let r = typed("<length-percentage>", "0px", "10px", "50%", "");
-    assert_runs(&r, ["10px", "calc(0% + 10px)", "calc(25% + 5px)", "50%"], "<length-percentage>");
+    assert_runs(
+        &r,
+        ["10px", "calc(0% + 10px)", "calc(25% + 5px)", "50%"],
+        "<length-percentage>",
+    );
 }
 
 #[test]
 fn registered_numbers_percentages_and_angles_interpolate() {
-    assert_runs(&typed("<number>", "0", "0", "10", ""), ["0", "0", "5", "10"], "<number>");
-    assert_runs(&typed("<integer>", "0", "0", "10", ""), ["0", "0", "5", "10"], "<integer>");
-    assert_runs(&typed("<percentage>", "0%", "0%", "100%", ""), ["0%", "0%", "50%", "100%"], "<percentage>");
-    assert_runs(&typed("<angle>", "0deg", "0deg", "1turn", ""), ["0deg", "0deg", "180deg", "360deg"], "<angle>");
+    assert_runs(
+        &typed("<number>", "0", "0", "10", ""),
+        ["0", "0", "5", "10"],
+        "<number>",
+    );
+    assert_runs(
+        &typed("<integer>", "0", "0", "10", ""),
+        ["0", "0", "5", "10"],
+        "<integer>",
+    );
+    assert_runs(
+        &typed("<percentage>", "0%", "0%", "100%", ""),
+        ["0%", "0%", "50%", "100%"],
+        "<percentage>",
+    );
+    assert_runs(
+        &typed("<angle>", "0deg", "0deg", "1turn", ""),
+        ["0deg", "0deg", "180deg", "360deg"],
+        "<angle>",
+    );
 }
 
 #[test]
@@ -230,7 +264,10 @@ fn registered_lists_interpolate_item_by_item() {
 #[test]
 fn a_universal_syntax_is_discrete() {
     let r = typed("*", "0px", "0px", "100px", "");
-    assert_eq!((r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()), ("100px", "100px", "100px"));
+    assert_eq!(
+        (r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()),
+        ("100px", "100px", "100px")
+    );
     assert!(r.transitions.is_empty() && r.events.is_empty(), "{r:?}");
 }
 
@@ -241,11 +278,30 @@ fn a_universal_syntax_is_discrete() {
 fn registered_computed_values() {
     let value = |css: &str| {
         let (mut engine, view, _server) = load(&page(css, ""));
-        read(&mut engine, view, "getComputedStyle(h).getPropertyValue('--x')")
+        read(
+            &mut engine,
+            view,
+            "getComputedStyle(h).getPropertyValue('--x')",
+        )
     };
-    assert_eq!(value(&format!("{}#h{{--x:red}}", reg("--x", "<color>", false, "black"))), "rgb(255, 0, 0)");
-    assert_eq!(value(&reg("--x", "<color>", false, "rgb(1, 2, 3)")), "rgb(1, 2, 3)");
-    assert_eq!(value(&format!("{}#h{{--x:red}}", reg("--x", "<length>", false, "7px"))), "7px");
+    assert_eq!(
+        value(&format!(
+            "{}#h{{--x:red}}",
+            reg("--x", "<color>", false, "black")
+        )),
+        "rgb(255, 0, 0)"
+    );
+    assert_eq!(
+        value(&reg("--x", "<color>", false, "rgb(1, 2, 3)")),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        value(&format!(
+            "{}#h{{--x:red}}",
+            reg("--x", "<length>", false, "7px")
+        )),
+        "7px"
+    );
 }
 
 /// `inherits: true`: the child follows the parent's animated value.
@@ -262,7 +318,12 @@ fn an_inherited_registered_property_reaches_the_child_as_it_moves() {
         "--x",
     );
     assert_eq!(
-        (r.before.as_str(), r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()),
+        (
+            r.before.as_str(),
+            r.at[0].as_str(),
+            r.at[1].as_str(),
+            r.end.as_str()
+        ),
         ("0px", "0px", "50px", "100px"),
         "{r:?}"
     );
@@ -282,7 +343,12 @@ fn a_non_inherited_registered_property_is_the_initial_value_on_the_child() {
         "--x",
     );
     assert_eq!(
-        (r.before.as_str(), r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()),
+        (
+            r.before.as_str(),
+            r.at[0].as_str(),
+            r.at[1].as_str(),
+            r.end.as_str()
+        ),
         ("5px", "5px", "5px", "5px"),
         "{r:?}"
     );
@@ -294,13 +360,26 @@ fn a_non_inherited_registered_property_is_the_initial_value_on_the_child() {
 #[test]
 fn an_unregistered_custom_property_jumps() {
     for t in ["--u", "all"] {
-        let r = run(&format!("#h{{--u:0px;{}}}#h.on{{--u:100px}}", transition(t)), "", "h", "--u");
+        let r = run(
+            &format!("#h{{--u:0px;{}}}#h.on{{--u:100px}}", transition(t)),
+            "",
+            "h",
+            "--u",
+        );
         assert_eq!(
-            (r.before.as_str(), r.at[0].as_str(), r.at[1].as_str(), r.end.as_str()),
+            (
+                r.before.as_str(),
+                r.at[0].as_str(),
+                r.at[1].as_str(),
+                r.end.as_str()
+            ),
             ("0px", "100px", "100px", "100px"),
             "transition: {t}"
         );
-        assert!(r.transitions.is_empty() && r.events.is_empty(), "transition: {t}: {r:?}");
+        assert!(
+            r.transitions.is_empty() && r.events.is_empty(),
+            "transition: {t}: {r:?}"
+        );
     }
 }
 
@@ -318,7 +397,11 @@ fn transition_all_does_not_cover_a_registered_property() {
         "h",
         "--x",
     );
-    assert_eq!((r.at[0].as_str(), r.at[1].as_str()), ("100px", "100px"), "{r:?}");
+    assert_eq!(
+        (r.at[0].as_str(), r.at[1].as_str()),
+        ("100px", "100px"),
+        "{r:?}"
+    );
     assert!(r.transitions.is_empty() && r.events.is_empty(), "{r:?}");
 }
 
@@ -327,7 +410,10 @@ fn assert_pixel(got: [u8; 4], want: [u8; 3], tolerance: i32, what: &str) {
         .iter()
         .zip(want)
         .all(|(g, w)| (*g as i32 - w as i32).abs() <= tolerance);
-    assert!(close && got[3] == 255, "{what}: painted {got:?}, want {want:?}");
+    assert!(
+        close && got[3] == 255,
+        "{what}: painted {got:?}, want {want:?}"
+    );
 }
 
 /// A property that reads the registered one moves with it: its computed
@@ -424,7 +510,10 @@ fn tailwind_gradient_stops_transition() {
     let mut names = r.transitions.clone();
     names.sort();
     assert_eq!(names, ["h:--tw-gradient-from", "h:--tw-gradient-to"]);
-    assert_eq!(r.events, events_of(&["--tw-gradient-from", "--tw-gradient-to"]));
+    assert_eq!(
+        r.events,
+        events_of(&["--tw-gradient-from", "--tw-gradient-to"])
+    );
     assert_pixel(r.painted[0], [124, 3, 128], 3, "left");
     assert_pixel(r.painted[1], [63, 64, 128], 3, "centre");
     assert_pixel(r.painted[2], [3, 125, 128], 3, "right");
@@ -434,7 +523,10 @@ fn tailwind_gradient_stops_transition() {
 #[test]
 fn css_register_property_registers_from_script() {
     let r = run(
-        &format!("#h{{--r:rgb(0,0,255);{}}}#h.on{{--r:rgb(255,0,0)}}", transition("--r")),
+        &format!(
+            "#h{{--r:rgb(0,0,255);{}}}#h.on{{--r:rgb(255,0,0)}}",
+            transition("--r")
+        ),
         "CSS.registerProperty({name:'--r',syntax:'<color>',inherits:false,initialValue:'black'})",
         "h",
         "--r",
@@ -462,5 +554,8 @@ fn css_register_property_throws_as_chrome_does() {
          t({name:'--bad',syntax:'<length>',inherits:false,initialValue:'red'}),\
          t({name:'--any',syntax:'*',inherits:false})].join()})()",
     );
-    assert_eq!(got, "ok,InvalidModificationError,SyntaxError,SyntaxError,SyntaxError,ok");
+    assert_eq!(
+        got,
+        "ok,InvalidModificationError,SyntaxError,SyntaxError,SyntaxError,ok"
+    );
 }

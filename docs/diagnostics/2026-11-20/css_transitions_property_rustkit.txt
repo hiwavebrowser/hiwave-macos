@@ -1,0 +1,30 @@
+TRANS-F: registered custom property transitions, RustKit against Chrome for Testing 148.0.7778.216
+Chrome side: css_transitions_property_cft148.json (tools/parity_oracle/css_transitions_property_log.mjs)
+RustKit side: crates/rustkit-engine/src/css_transitions_property_tests.rs (virtual clock; samples at 0, 50, 110 ms)
+
+Red (develop c74e7359 + tests, commit ee02cb83): 16 of 19 fail.
+  pass on both (guards): an_unregistered_custom_property_jumps, a_universal_syntax_is_discrete,
+                         transition_all_does_not_cover_a_registered_property
+  animations::tests::a_custom_property_in_a_transition_is_not_reported_unsupported: FAILED
+    (develop reports CSSTransition.--tw-gradient-from and CSSTransition.--u to the Inspector)
+
+Green (fix): 19 of 19 pass.
+
+case                                 Chrome 0 / 50 / end                         RustKit before -> after
+<color>                              rgb(0,0,255) / rgb(128,0,128) / rgb(255,0,0) no transition -> same as Chrome
+<length> 10->110px                   10px / 60px / 110px                          jump -> same
+<length> 1em (font 10px) -> 30px     10px / 20px / 30px                           "1em" text -> same
+<length-percentage> 10px -> 50%      calc(0% + 10px) / calc(25% + 5px) / 50%     jump -> same
+<number> <integer> <percentage>      0 / 5 / 10, 0% / 50% / 100%                  jump -> same
+<angle> 0deg -> 1turn                0deg / 180deg / 360deg                       jump -> same
+<length>+ / <color># lists           item by item                                 jump -> same
+* syntax                             discrete, no transition                      same before and after
+inherits:true child                  0px / 50px / 100px                           jump -> same
+inherits:false child                 5px (initial) throughout                     "0px"/"100px" -> same
+unregistered / transition: all       discrete, no transition, no events           same before and after
+background-color: var(--x)           rgb(128,0,128) at 50, painted 128,0,128      jump -> same
+width: var(--x) 20->80px             50px at 50                                   jump -> same
+gradient of a registered colour      painted 128,0,128 at 50                      jump -> same (+-1)
+Tailwind v4 --tw-gradient-from/to    painted 124,3,128 / 63,64,128 / 3,125,128    jump -> within +-3
+CSS.registerProperty <color>         rgb(128,0,128) at 50                         not a function -> same
+registerProperty errors              ok,InvalidModificationError,SyntaxError x3,ok  -> same

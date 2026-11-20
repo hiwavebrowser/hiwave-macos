@@ -284,7 +284,20 @@ impl LayoutCtx {
             lay.animations.borrow().has_records(node)
         };
         let cascaded = may_animate.then(|| style.clone());
-        lay.animations.borrow_mut().on_style(node, style, &resolve);
+        {
+            let mut anims = lay.animations.borrow_mut();
+            // TRANS-F: the registered custom properties of this build.
+            let registry = crate::registered_props::current();
+            let same = match (&anims.registry, &registry) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                anims.registry = registry;
+            }
+            anims.on_style(node, style, &resolve);
+        }
         // Script's animated values, above the CSS ones: each entry parsed
         // against the style as it stands and composed on it.
         self.apply_script_layer(style, entries.as_deref());
@@ -306,6 +319,22 @@ impl LayoutCtx {
             }
         }
         may_animate
+    }
+
+    /// TRANS-F: the registered custom property values `node`'s running
+    /// transitions set in this build, for the element's second cascade.
+    pub(crate) fn take_custom_overlay(&self, node: usize) -> Option<std::collections::HashMap<String, String>> {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone())?;
+        let mut anims = lay.animations.borrow_mut();
+        anims.take_custom_overlay(node)
+    }
+
+    /// The style `node` cascaded to before its animations, as
+    /// `animate_style` kept it.
+    pub(crate) fn cascaded_style(&self, node: usize) -> Option<crate::ComputedStyle> {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone())?;
+        let anims = lay.animations.borrow();
+        anims.captured.get(&node).map(|c| c.cascaded.clone())
     }
 
     /// Script's animated-style entries for one element (Web Animations),
@@ -366,6 +395,11 @@ impl LayoutCtx {
             // (detached, or under `display: none`) paints nothing, and
             // the frame has nothing of it to place (LAT14: until
             // 2026-11-08 such an entry laid out every frame of the page).
+            // TRANS-F: what reads a registered custom property (`var()`)
+            // is known only to a cascade.
+            if anims.custom_running() {
+                return Err("a registered custom property animates".into());
+            }
             if let Some(node) = anims
                 .record_nodes()
                 .into_iter()

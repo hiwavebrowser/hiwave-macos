@@ -3957,6 +3957,9 @@ mod color_mix;
 pub mod mask;
 pub use mask::Mask;
 
+pub mod registered_property;
+pub use registered_property::{PropertyRegistry, Registration, TypedValue};
+
 pub mod font_face;
 pub use font_face::{parse_font_face, FontDisplayValue, FontFaceRule};
 
