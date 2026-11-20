@@ -113,13 +113,23 @@ PINNED_CHROME_VERSION = "148.0.7778.216"
 
 
 def probe_chrome_version(path: Path) -> Optional[str]:
-    """`<binary> --version` ("Google Chrome for Testing 148.0.7778.216") -> "148.0.7778.216"."""
+    """`<binary> --version` ("Google Chrome for Testing 148.0.7778.216") -> "148.0.7778.216".
+
+    On Windows `chrome.exe --version` prints nothing; Chrome for Testing ships
+    `<version>.manifest` beside chrome.exe, and that names the version instead.
+    chrome_board.mjs checks browser.version() against the pin on every row either way."""
     try:
         proc = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=30)
+        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
+        if match:
+            return match.group(1)
     except (OSError, subprocess.TimeoutExpired):
-        return None
-    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
-    return match.group(1) if match else None
+        pass
+    for manifest in sorted(Path(path).parent.glob("*.manifest")):
+        match = re.fullmatch(r"(\d+\.\d+\.\d+\.\d+)\.manifest", manifest.name)
+        if match:
+            return match.group(1)
+    return None
 
 
 def home_relative(path: Path) -> str:
