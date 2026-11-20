@@ -77,6 +77,61 @@ pub enum FaceKey {
     Recorded(rustkit_text::GlyphFace),
 }
 
+/// How a character is painted on Windows, from the face layout recorded.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsPaint {
+    /// Colour artwork from Segoe UI Emoji (`rasterize_glyph_directwrite_color`).
+    Colour,
+    /// A coverage mask from the run's own face.
+    Mask,
+    /// A coverage mask from the text fallback face layout measured the
+    /// character in (Segoe UI Symbol): a symbol without Emoji_Presentation,
+    /// which Chrome draws as text, not colour.
+    TextFallback,
+}
+
+/// The text face layout measures a text-presentation symbol in on Windows
+/// (`TextShaper::shape_uncached`), and paint draws it from.
+#[cfg(windows)]
+pub(crate) const WINDOWS_TEXT_SYMBOL_FAMILY: &str = "Segoe UI Symbol";
+
+/// Windows' paint path for `ch`. A recorded fallback face decides (layout's
+/// one decision); without one, an `is_emoji` character keeps the colour path,
+/// as before.
+#[cfg(windows)]
+pub(crate) fn windows_paint(ch: char, face: FaceKey) -> WindowsPaint {
+    match face {
+        FaceKey::Recorded(rustkit_text::GlyphFace::Fallback { emoji: false }) => WindowsPaint::TextFallback,
+        FaceKey::Recorded(rustkit_text::GlyphFace::Fallback { emoji: true }) => WindowsPaint::Colour,
+        _ if rustkit_text::is_emoji(ch) => WindowsPaint::Colour,
+        _ => WindowsPaint::Mask,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_paint_tests {
+    use super::*;
+    use rustkit_text::{GlyphFace, Variation};
+
+    /// A symbol layout measured in the text fallback face is a mask from that
+    /// face, never Segoe UI Emoji's colour artwork (U+2699 GEAR: Chrome for
+    /// Testing 148 win64 draws it from Segoe UI Symbol).
+    #[test]
+    fn a_recorded_text_fallback_is_a_mask_from_the_symbol_face() {
+        let gear = '\u{2699}';
+        assert_eq!(windows_paint(gear, FaceKey::Recorded(GlyphFace::Fallback { emoji: false })), WindowsPaint::TextFallback);
+        assert_eq!(windows_paint(gear, FaceKey::Recorded(GlyphFace::Fallback { emoji: true })), WindowsPaint::Colour);
+        // No record (a legacy command): the old rule.
+        assert_eq!(windows_paint(gear, FaceKey::Auto(Variation::None)), WindowsPaint::Colour);
+        assert_eq!(windows_paint('a', FaceKey::Recorded(GlyphFace::Primary)), WindowsPaint::Mask);
+        // The face exists and has ink for the symbol at 14px.
+        let drawn = rasterize_char_for_test(gear, WINDOWS_TEXT_SYMBOL_FAMILY, 14.0, 400).expect("Segoe UI Symbol has U+2699");
+        assert!(drawn.0.iter().any(|&a| a > 0), "no ink");
+        assert!((drawn.3 - 11.8125).abs() < 0.02, "advance {}", drawn.3);
+    }
+}
+
 impl Default for FaceKey {
     fn default() -> Self {
         FaceKey::Auto(rustkit_text::Variation::None)

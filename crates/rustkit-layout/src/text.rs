@@ -1309,6 +1309,19 @@ impl TextShaper {
         }
     }
 
+    /// Whether `c`, a character the primary face lacks, takes the emoji
+    /// presentation on Windows (Unicode TR51 ED-9, as Chrome's
+    /// `SymbolsIterator`): U+FE0F after it asks for the emoji face if `c` can
+    /// be one, U+FE0E for a text face, and otherwise Emoji_Presentation decides.
+    #[cfg(windows)]
+    fn windows_presentation(c: char, next: Option<char>) -> bool {
+        match rustkit_text::Variation::after(next) {
+            rustkit_text::Variation::Emoji => rustkit_text::has_emoji_property(c),
+            rustkit_text::Variation::Text => false,
+            rustkit_text::Variation::None => rustkit_text::has_emoji_presentation(c),
+        }
+    }
+
     /// Shape text using DirectWrite on Windows (uncached; see `shape`).
     #[cfg(windows)]
     fn shape_uncached(
@@ -1375,43 +1388,71 @@ impl TextShaper {
                     // the glyph is centred on the wrong width (image-gallery
                     // placed every emoji 8 px right of Chrome). Looked up
                     // once per shape, only when an emoji actually appears.
+                    //
+                    // A symbol WITHOUT Emoji_Presentation (U+1F6E1, U+2699,
+                    // U+2B07) is not an emoji to Chrome: its DirectWrite
+                    // fallback draws it from Segoe UI Symbol, a text face
+                    // (and so does U+FE0E after any of them). Only an
+                    // Emoji_Presentation character, or one U+FE0F turns into
+                    // an emoji, takes Segoe UI Emoji (`windows_presentation`).
+                    let fallback_advance =
+                        |slot: &mut Option<Option<(rustkit_text::FontFace, f32)>>, family: &str, c: char| -> Option<f32> {
+                            let face = slot.get_or_insert_with(|| {
+                                let family = collection.font_family_by_name(family).ok()??;
+                                let font = family
+                                    .first_matching_font(
+                                        RkFontWeight::from_u32(400),
+                                        RkFontStretch::from_u32(5),
+                                        RkFontStyle::Normal,
+                                    )
+                                    .ok()?;
+                                let face = font.create_font_face().ok()?;
+                                let upem = face.metrics().ok()?.design_units_per_em as f32;
+                                Some((face, size / upem))
+                            });
+                            let (face, scale) = face.as_ref()?;
+                            let ids = face.glyph_indices(&[c as u32]).ok()?;
+                            if ids[0] == 0 {
+                                return None;
+                            }
+                            let m = face.design_glyph_metrics(&ids, false).ok()?;
+                            Some(m[0].advance_width as f32 * scale)
+                        };
                     let mut emoji_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
-                    let mut emoji_advance = |c: char| -> Option<f32> {
-                        let face = emoji_face.get_or_insert_with(|| {
-                            let family = collection.font_family_by_name("Segoe UI Emoji").ok()??;
-                            let font = family
-                                .first_matching_font(
-                                    RkFontWeight::from_u32(400),
-                                    RkFontStretch::from_u32(5),
-                                    RkFontStyle::Normal,
-                                )
-                                .ok()?;
-                            let face = font.create_font_face().ok()?;
-                            let upem = face.metrics().ok()?.design_units_per_em as f32;
-                            Some((face, size / upem))
-                        });
-                        let (face, scale) = face.as_ref()?;
-                        let ids = face.glyph_indices(&[c as u32]).ok()?;
-                        if ids[0] == 0 {
-                            return None;
-                        }
-                        let m = face.design_glyph_metrics(&ids, false).ok()?;
-                        Some(m[0].advance_width as f32 * scale)
-                    };
+                    let mut symbol_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
 
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
                     {
+                        let mut face = GlyphFace::Primary;
                         let advance = if Self::is_default_ignorable(c) {
                             // Variation selectors, joiners and the like take
                             // no space; the primary face's .notdef would.
                             0.0
                         } else if glyph_id == 0 && rustkit_text::is_emoji(c) {
-                            emoji_advance(c).unwrap_or(if i < glyph_metrics.len() {
+                            let notdef = if i < glyph_metrics.len() {
                                 glyph_metrics[i].advance_width as f32 * scale
                             } else {
                                 size * 0.5
-                            })
+                            };
+                            let emoji = Self::windows_presentation(c, text_chars.get(i + 1).copied());
+                            let text_face = if emoji {
+                                None
+                            } else {
+                                fallback_advance(&mut symbol_face, "Segoe UI Symbol", c)
+                            };
+                            match text_face {
+                                Some(advance) => {
+                                    face = GlyphFace::Fallback { emoji: false };
+                                    advance
+                                }
+                                // An emoji, or a symbol Segoe UI Symbol lacks:
+                                // Segoe UI Emoji's, as before.
+                                None => {
+                                    face = GlyphFace::Fallback { emoji: true };
+                                    fallback_advance(&mut emoji_face, "Segoe UI Emoji", c).unwrap_or(notdef)
+                                }
+                            }
                         } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
@@ -1425,7 +1466,7 @@ impl TextShaper {
                             advance,
                             character: c,
                             cluster: i as u32,
-                            face: GlyphFace::Primary,
+                            face,
                         });
 
                         x_offset += advance;
@@ -4107,6 +4148,13 @@ mod tests {
     /// Chrome uses (Segoe UI Emoji's), and a variation selector takes no
     /// space. Otherwise the renderer paints the emoji from Segoe UI Emoji
     /// centred on the wrong width.
+    ///
+    /// Chrome for Testing 148.0.7778.216 win64 at 48px sans-serif
+    /// (CSS.getPlatformFontsForNode + the span's width): U+1F3D4 alone and
+    /// with U+FE0E is Segoe UI Symbol, 48.00 (no Emoji_Presentation); with
+    /// U+FE0F it is Segoe UI Emoji, 65.906, as are U+1F305 and U+1F30A; and
+    /// `a` + U+FE0F is `a` (26.703). This test used to expect the bare
+    /// mountain in Segoe UI Emoji too.
     #[cfg(windows)]
     #[test]
     fn emoji_take_the_emoji_faces_advance_and_selectors_take_none() {
@@ -4119,11 +4167,14 @@ mod tests {
                 .metrics
                 .width
         };
-        let mountain = w("\u{1F3D4}");
-        // Segoe UI Emoji advances are a little over an em; Arial's .notdef
-        // is well under one.
-        assert!(mountain > 48.0 && mountain < 72.0, "{mountain}");
-        assert_eq!(w("\u{1F3D4}\u{FE0F}"), mountain, "FE0F must add nothing");
+        let close = |got: f32, chrome: f32, what: &str| {
+            assert!((got - chrome).abs() < 0.02, "{what}: RustKit {got}, Chrome {chrome}");
+        };
+        close(w("\u{1F3D4}"), 48.0, "mountain, text presentation");
+        close(w("\u{1F3D4}\u{FE0E}"), 48.0, "mountain + FE0E");
+        close(w("\u{1F3D4}\u{FE0F}"), 65.906, "mountain + FE0F");
+        close(w("\u{1F305}"), 65.906, "sunrise");
+        assert_eq!(w("\u{1F3D4}\u{FE0F}"), w("\u{1F305}"), "FE0F adds nothing to the emoji's advance");
         assert_eq!(w("a\u{FE0F}"), w("a"));
         assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
     }
