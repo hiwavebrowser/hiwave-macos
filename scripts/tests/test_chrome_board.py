@@ -57,6 +57,45 @@ class TestChromeBoard(unittest.TestCase):
             self.assertEqual(captured, [], "nothing is captured once a fixture is missing")
             self.assertFalse((Path(tmp) / "out" / "BOARD.md").exists(), "no board is written")
 
+    def test_a_page_this_platform_does_not_ship_is_named_not_refused(self):
+        # hiwave-windows ships no Inspector page: its absent html refused the
+        # whole board, even with --only. Such a page is now left out of the plan
+        # (not scored, not green) and named, while a missing FIXTURE (a sync
+        # gap, not a platform difference) is still a refusal (test above).
+        from scripts import chrome_board
+
+        board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        board["pages"]["inspector"]["html"] = "crates/hiwave-app/src/ui/not-shipped-here.html"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board.json"
+            path.write_text(json.dumps(board), encoding="utf-8")
+            loaded = chrome_board.load_board(path)
+            self.assertEqual(chrome_board.pages_not_shipped(loaded, REPO), ["inspector"])
+            rows = chrome_board.plan(loaded, REPO, Path(tmp) / "work")
+            self.assertEqual(sorted({r.page for r in rows}), ["chrome", "report", "settings", "shelf"])
+            only = chrome_board.plan(loaded, REPO, Path(tmp) / "work", only="settings")
+            self.assertEqual({r.page for r in only}, {"settings"})
+            census = Path(tmp) / "census.json"
+            census.write_text(json.dumps({"red": [], "properties": [], "meta": {}}), encoding="utf-8")
+            red = chrome_board.census_red_lists(loaded, REPO, census)
+            self.assertNotIn("inspector", red["pages"])
+
+    def test_the_board_names_a_page_not_shipped_here(self):
+        from scripts import chrome_board
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            chrome_board.write_board(out, {
+                "run": {"at": "now", "sha": "f", "base": "b", "chromium": "148.0.7778.216",
+                        "chromium_path": "~/c", "chromium_pinned": "148.0.7778.216", "parity_capture": "pc", "gate_pct": 0.5},
+                "sizes": [], "states": {}, "rows": [], "census": {},
+                "not_shipped": {"inspector": "crates/hiwave-app/src/ui/inspector.html"},
+            })
+            md = (out / "BOARD.md").read_text(encoding="utf-8")
+            self.assertIn("Not shipped here", md)
+            self.assertIn("inspector", md)
+            self.assertIn("| inspector | 0 | 0 | not shipped here |", md)
+
     def test_chromium_and_rustkit_run_the_same_action_list(self):
         from scripts import chrome_board
 
