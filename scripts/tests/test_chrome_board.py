@@ -153,6 +153,26 @@ class TestChromeBoard(unittest.TestCase):
                 with self.assertRaises(chrome_board.BoardError):
                     chrome_board.pinned_chrome_path(pin, version_of=lambda p, v=other: v)
 
+    def test_the_pin_probe_reads_the_cft_manifest_when_version_prints_nothing(self):
+        # On Windows `chrome.exe --version` prints nothing, so the probe read no
+        # version and the board refused the pinned binary itself. Chrome for
+        # Testing ships `<version>.manifest` beside chrome.exe; the probe falls
+        # back to it (and still returns None when there is no such file).
+        from scripts import chrome_board
+
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "chrome.exe"  # never runs: the probe's run fails, as a silent one would
+            self.assertIsNone(chrome_board.probe_chrome_version(binary, windows=True))
+            (Path(tmp) / "148.0.7778.216.manifest").write_text("<assembly/>", encoding="utf-8")
+            (Path(tmp) / "chrome.VisualElementsManifest.xml").write_text("<x/>", encoding="utf-8")
+            self.assertEqual(chrome_board.probe_chrome_version(binary, windows=True), "148.0.7778.216")
+            # Windows only (R1 nit): elsewhere a silent --version stays None.
+            self.assertIsNone(chrome_board.probe_chrome_version(binary, windows=False))
+            # Two versioned manifests are ambiguous (R1 nit: a sort would pick 100.x
+            # before 99.x): no version, so the pin check refuses rather than guesses.
+            (Path(tmp) / "100.0.1.2.manifest").write_text("<assembly/>", encoding="utf-8")
+            self.assertIsNone(chrome_board.probe_chrome_version(binary, windows=True))
+
     def test_main_refuses_without_the_pin_before_any_capture(self):
         import os
         from unittest import mock

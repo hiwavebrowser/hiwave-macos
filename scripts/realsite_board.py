@@ -610,6 +610,14 @@ def summarize(rows, ts, width, height, all_ids, oracle=None):
     return summary
 
 
+def install_exit_signals(handler, sigmod=signal):
+    """SIGTERM and SIGHUP -> handler, for the signals this platform has (Windows has no SIGHUP)."""
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(sigmod, name, None)
+        if sig is not None:
+            sigmod.signal(sig, handler)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", action="append", help="only these site ids")
@@ -661,8 +669,7 @@ def main():
     def _signal_exit(signum, _frame):
         raise SystemExit(128 + signum)  # unwinds through OracleSession: lock released
 
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, _signal_exit)
+    install_exit_signals(_signal_exit)
 
     rows = []
     try:
