@@ -11,6 +11,7 @@ Run: python3 scripts/tests/test_wpt_tier1.py
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -868,6 +869,11 @@ class Runnability(unittest.TestCase):
             self.assertNotIn("--run-inline-scripts", wpt_tier1.capture_args(page, page, {"width": 1, "height": 1}))
 
 
+# A target directory outside the repository, absolute on every OS ("/elsewhere/t" has no drive
+# on Windows, so it is not absolute there): the root of the current drive, then elsewhere/t.
+OUTSIDE_TARGET = pathlib.Path(pathlib.Path.cwd().anchor) / "elsewhere" / "t"
+
+
 class Provenance(unittest.TestCase):
     def test_capture_binary_is_the_parity_profile(self):
         self.assertEqual(wpt_tier1.capture_bin({}), REPO / "target/parity/parity-capture")
@@ -881,8 +887,8 @@ class Provenance(unittest.TestCase):
 
     def test_capture_binary_honours_cargo_target_dir(self):
         self.assertEqual(
-            wpt_tier1.capture_bin({"CARGO_TARGET_DIR": "/elsewhere/t"}),
-            pathlib.Path("/elsewhere/t/parity/parity-capture"),
+            wpt_tier1.capture_bin({"CARGO_TARGET_DIR": str(OUTSIDE_TARGET)}),
+            OUTSIDE_TARGET / "parity" / "parity-capture",
         )
 
     def test_a_relative_cargo_target_dir_is_from_the_repo(self):
@@ -897,8 +903,9 @@ class Provenance(unittest.TestCase):
 
     def test_capture_binary_label_survives_a_target_outside_the_repo(self):
         self.assertEqual(
-            wpt_tier1.capture_label(pathlib.Path("/elsewhere/t/parity/parity-capture")),
-            "/elsewhere/t/parity/parity-capture",
+            wpt_tier1.capture_label(OUTSIDE_TARGET / "parity" / "parity-capture"),
+            # Forward slashes on every OS, as a repo-relative label (#1362).
+            (OUTSIDE_TARGET / "parity" / "parity-capture").as_posix(),
         )
         self.assertEqual(
             wpt_tier1.capture_label(REPO / "target/parity/parity-capture"),
@@ -947,7 +954,9 @@ class Manifest(unittest.TestCase):
 
     def test_sync_check_passes_or_names_what_is_missing(self):
         proc = subprocess.run(
-            ["bash", str(REPO / "scripts/wpt_sync.sh"), "--dry-run"], capture_output=True, text=True
+            # bash as PATH finds it: on Windows a bare "bash" is the system directory's (WSL's).
+            [shutil.which("bash") or "bash", str(REPO / "scripts/wpt_sync.sh"), "--dry-run"],
+            capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("css/css-flexbox/support/flexbox.css", proc.stdout)
