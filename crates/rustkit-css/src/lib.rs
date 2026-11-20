@@ -3468,8 +3468,13 @@ pub struct ComputedStyle {
 /// where Chrome 148 has 199.52.
 #[cfg(target_os = "macos")]
 pub const INITIAL_FONT_FAMILY: &str = "Times";
+/// The initial value of `font-family` on Windows: Chrome's default font there is Times New Roman
+/// (Chrome for Testing 148 win64: an element with no `font-family` measures and draws in it, as
+/// `serif` does; `sans-serif`, Arial, stood here and laid every unstyled page out in Arial).
+#[cfg(windows)]
+pub const INITIAL_FONT_FAMILY: &str = "Times New Roman";
 /// The initial value of `font-family`, which CSS leaves to the UA.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub const INITIAL_FONT_FAMILY: &str = "sans-serif";
 
 impl ComputedStyle {
