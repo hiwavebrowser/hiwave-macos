@@ -55,6 +55,12 @@ impl ContentWebViewOps for ContentWebView {
             ContentWebView::Wry(v) => v.set_bounds(rect).map_err(|e| e.to_string()),
         }
     }
+
+    fn report_console_error(&self, message: &str) {
+        if let ContentWebView::RustKit(v) = self {
+            v.report_console_error(message);
+        }
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "rustkit"))]
