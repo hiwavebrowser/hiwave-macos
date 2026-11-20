@@ -205,6 +205,16 @@
     define('ResizeObserver', ResizeObserver);
 
     function px(v) { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
+    // Whether an observer has a size to report: only then is it held for a frame (with nothing
+    // to report, a pending frame holds nothing, and the end of a load runs no frame for it).
+    function sizesChanged(ro) {
+        var t = ro._targets;
+        for (var i = 0; i < t.length; i++) {
+            var cs = g.getComputedStyle(t[i]), st = ro._state.get(t[i]);
+            if (st && (st.w !== px(cs.width) || st.h !== px(cs.height))) return true;
+        }
+        return false;
+    }
     function observeSizes(ro) {
         ro._targets.slice().forEach(function (target) {
             var cs = g.getComputedStyle(target);
@@ -245,21 +255,23 @@
         resizeWait = __rk.frameRounds();
         return false;
     }
+    // Held for a frame: the host that takes the page with no turn to come runs that frame
+    // (`__rk.pendingFrameRound`) and the next tick delivers it (#1361 R1).
+    __rk.resizeHeld = function () { return resizeWait >= 0; };
     var ticking = false;
-    // `release`: the host is about to take the page as it stands with no frame to come (a
-    // load-only capture, `Engine::release_held_observations`): a resize observation held for a
-    // frame is delivered now, as on develop before REPORT-CHART-0x0 (#1361 R1).
-    function tick(release) {
+    function tick() {
         if (ticking) return 0;
         ticking = true;
-        if (release === true) resizeWait = -1;
         try {
             // A callback can observe more or change layout-independent state;
             // what it changes is seen by the next tick, not this one.
             var sizes = null;
             observers.slice().forEach(function (o) {
                 if (o instanceof IntersectionObserver) { observeIntersections(o); return; }
-                if (sizes === null) sizes = release === true || resizeDue();
+                if (sizes === null) {
+                    if (resizeWait < 0 && !sizesChanged(o)) return;
+                    sizes = resizeDue();
+                }
                 if (sizes) observeSizes(o);
             });
             observers.slice().forEach(function (o) {

@@ -1290,6 +1290,10 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             args.actions_out_dir.as_deref(),
             &mut result,
         );
+        // What the actions left held for a frame, before the settle or the frame (#1361 R1).
+        if let Err(e) = engine.run_held_observation_frame(view_id) {
+            error!("Failed to run the held resize observation's frame: {:?}", e);
+        }
         if let Some(live_ms) = args.actions_live_ms {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -1299,10 +1303,12 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         }
     }
 
-    // The page as it stands, with no frame to come: resize observations held for a frame are
-    // delivered first, as the next rendering update would (#1361 R1).
-    if let Err(e) = engine.release_held_observations(view_id) {
-        error!("Failed to deliver held resize observations: {:?}", e);
+    // The page as it stands, with no turn to come: a resize observation held for a frame (an
+    // action showed a box while a frame was asked for) gets that frame, then is delivered, as
+    // the next rendering update would (#1361 R1). The engine already did it at the end of the
+    // load; with nothing held this runs nothing.
+    if let Err(e) = engine.run_held_observation_frame(view_id) {
+        error!("Failed to run the held resize observation's frame: {:?}", e);
     }
 
     // Render final view

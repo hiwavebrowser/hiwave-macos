@@ -12,7 +12,7 @@
  * The pages are the ones in rustkit-engine `load_geometry_read_tests.rs`
  * (`a_resize_observation_waits_for_the_frame_already_asked_for`,
  * `real_chart_js_built_hidden_resizes_both_charts_when_shown`,
- * `a_resize_observation_under_an_endless_frame_loop_is_delivered_in_a_load_only_capture`); keep them equal.
+ * `a_resize_observation_under_an_endless_frame_loop_is_delivered_in_the_load`); keep them equal.
  * `iframe` is Chrome's answer to whether a frame tree's frame callbacks hold the top document's
  * observations (they do: one rendering update for the tree).
  */
@@ -20,7 +20,10 @@ import { chromium } from 'playwright';
 import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { getDeterministicLaunchOptions } from './deterministic.mjs';
+import { getDeterministicLaunchOptions, getPinnedExecutablePath } from './deterministic.mjs';
+
+// The campaign pin: this receipt is Chrome for Testing 148.0.7778.216 or nothing (#1361 R1).
+const PIN = '148.0.7778.216';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CHART = readFileSync(join(ROOT, 'crates/hiwave-app/src/ui/chart.umd.min.js'), 'utf8');
@@ -40,12 +43,12 @@ export const ORDER_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{
   "</script></body></html>";
 
 // R1 (#1361): an endless frame loop (a spinner, a canvas loop) running when the observed box
-// is shown: the observation is still delivered.
+// is shown: the observation is still delivered, after the loop's frame.
 export const ENDLESS_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>" +
   "<div id=content style='display:none'><div id=cc></div></div><div id=out>x</div><script>" +
-  "function A(){requestAnimationFrame(A);}requestAnimationFrame(A);" +
+  "var frames=0;function A(){frames++;requestAnimationFrame(A);}requestAnimationFrame(A);" +
   "new ResizeObserver(function(es){var r=es[0].contentRect;" +
-  "document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height;" +
+  "document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height+' after '+(frames>0?'a frame':'no frame');" +
   "}).observe(document.getElementById('cc'));" +
   "document.getElementById('content').style.display='block';" +
   "</script></body></html>";
@@ -85,7 +88,15 @@ export function chartPage(chart) {
     "</script></body></html>";
 }
 
-const browser = await chromium.launch({ ...getDeterministicLaunchOptions(), headless: true });
+const browser = await chromium.launch({
+  ...getDeterministicLaunchOptions(),
+  executablePath: getPinnedExecutablePath({ required: true }),
+  headless: true,
+});
+if (browser.version() !== PIN) {
+  await browser.close();
+  throw new Error(`not the pinned Chrome: ${browser.version()} (want ${PIN})`);
+}
 const out = { version: browser.version(), viewport: '800x600' };
 for (const [name, html] of [['order', ORDER_PAGE], ['chart', chartPage(CHART)], ['endless', ENDLESS_PAGE], ['iframe', IFRAME_PAGE]]) {
   const page = await browser.newPage({ viewport: { width: 800, height: 600 } });

@@ -3,6 +3,6 @@
  "viewport": "800x600",
  "order": "R:A1 ro=800x300 A2 B A3",
  "chart": "R:later activityChart=760x300 protectionChart=760x300",
- "endless": "R:ro=800x300",
+ "endless": "R:ro=800x300 after a frame",
  "iframe": "R:F1 ro=800x300 F2 F3"
 }

@@ -290,23 +290,21 @@ fn real_chart_js_built_hidden_resizes_both_charts_when_shown() {
 }
 
 /// R1 on #1361: an endless frame loop (a spinner, a canvas loop) running while the observed box
-/// is shown. The observation waits for the loop's frame; a load runs no frame, so a load-only
-/// capture (the board, the campaign) delivers it before its frame and dumps
-/// (`Engine::release_held_observations`, which parity-capture calls), as develop delivered it
-/// in the load. Chrome for Testing 148.0.7778.216 at 800x600 (`report_chart_resize_cft148.json`
-/// `endless`) delivers it in the first rendering update. Without the release it was never
-/// delivered ("x").
+/// is shown. The observation waits for the loop's frame; the load itself runs no frame, so at
+/// its end the engine runs the frame the observation waits for, and the observation follows it,
+/// as in Chrome's first rendering update: a load-only capture (the board, the campaign, MCP,
+/// smoke) gets it, after a frame. Chrome for Testing 148.0.7778.216 at 800x600
+/// (`report_chart_resize_cft148.json` `endless`). At af94142e it was never delivered ("x").
 #[test]
-fn a_resize_observation_under_an_endless_frame_loop_is_delivered_in_a_load_only_capture() {
+fn a_resize_observation_under_an_endless_frame_loop_is_delivered_in_the_load() {
     let page = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>\
         <div id=content style='display:none'><div id=cc></div></div><div id=out>x</div><script>\
-        function A(){requestAnimationFrame(A);}requestAnimationFrame(A);\
+        var frames=0;function A(){frames++;requestAnimationFrame(A);}requestAnimationFrame(A);\
         new ResizeObserver(function(es){var r=es[0].contentRect;\
-        document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height;\
+        document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height+' after '+(frames>0?'a frame':'no frame');\
         }).observe(document.getElementById('cc'));\
         document.getElementById('content').style.display='block';\
         </script></body></html>";
     let (mut engine, view) = load_html(page);
-    engine.release_held_observations(view).expect("release");
-    assert_eq!(out(&mut engine, view), "R:ro=800x300", "Chrome 148 at 800x600");
+    assert_eq!(out(&mut engine, view), "R:ro=800x300 after a frame", "Chrome 148 at 800x600, load only");
 }
