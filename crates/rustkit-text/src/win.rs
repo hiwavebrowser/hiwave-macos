@@ -422,13 +422,14 @@ fn icu_binary_property(ch: char, which: i32) -> Option<bool> {
     type HasBinaryProperty = unsafe extern "C" fn(i32, i32) -> i8;
     static ICU: OnceLock<Option<HasBinaryProperty>> = OnceLock::new();
     let has = ICU.get_or_init(|| {
-        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-        // SAFETY: loading a system DLL by name and reading one export, whose C
+        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+        // SAFETY: loading the system's icu.dll from System32 only (never the
+        // application or current directory) and reading one export, whose C
         // signature is `UBool u_hasBinaryProperty(UChar32, UProperty)`.
         unsafe {
-            let module = LoadLibraryW(windows::core::w!("icu.dll")).ok()?;
+            let module = LoadLibraryExW(windows::core::w!("icu.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
             let proc = GetProcAddress(module, windows::core::s!("u_hasBinaryProperty"))?;
-            Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, HasBinaryProperty>(proc))
+            Some(std::mem::transmute::<*const (), HasBinaryProperty>(proc as *const ()))
         }
     });
     // SAFETY: a pure lookup on a code point; ICU accepts any i32.
