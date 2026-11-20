@@ -6887,20 +6887,36 @@ impl Renderer {
             #[cfg(target_os = "macos")]
             let drawn = self.glyph_cache.get_or_rasterize_faced(&self.queue, &key);
             #[cfg(windows)]
-            let drawn = {
-                let _ = &face;
-                let colour = if rustkit_text::is_emoji(ch) {
+            let drawn = match crate::glyph::windows_paint(ch, face) {
+                // A text-presentation symbol: the coverage mask from the text
+                // face layout measured it in (Segoe UI Symbol), as Chrome
+                // draws it, not Segoe UI Emoji's colour artwork.
+                crate::glyph::WindowsPaint::TextFallback => {
+                    let symbol = GlyphKey {
+                        font_family: crate::glyph::WINDOWS_TEXT_SYMBOL_FAMILY.to_string(),
+                        font_weight: 400,
+                        font_style: 0,
+                        web_face: 0,
+                        ..key.clone()
+                    };
                     self.glyph_cache
-                        .get_or_rasterize_color(&self.device, &self.queue, &key)
-                        .map(|entry| (entry, true))
-                } else {
-                    None
-                };
-                colour.or_else(|| {
-                    self.glyph_cache
-                        .get_or_rasterize(&self.device, &self.queue, &key)
+                        .get_or_rasterize(&self.device, &self.queue, &symbol)
                         .map(|entry| (entry, false))
-                })
+                }
+                paint => {
+                    let colour = if paint == crate::glyph::WindowsPaint::Colour {
+                        self.glyph_cache
+                            .get_or_rasterize_color(&self.device, &self.queue, &key)
+                            .map(|entry| (entry, true))
+                    } else {
+                        None
+                    };
+                    colour.or_else(|| {
+                        self.glyph_cache
+                            .get_or_rasterize(&self.device, &self.queue, &key)
+                            .map(|entry| (entry, false))
+                    })
+                }
             };
             #[cfg(not(any(target_os = "macos", windows)))]
             let drawn = {
