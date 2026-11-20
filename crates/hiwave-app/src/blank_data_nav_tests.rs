@@ -84,13 +84,21 @@ fn tab_url(state: &Arc<Mutex<AppState>>) -> String {
 
 #[test]
 fn about_blank_shows_an_empty_page_not_the_new_tab_page() {
-    for url in ["about:blank", "about:blank#top", "about:blank?q=x", "ABOUT:blank"] {
+    for (url, want) in [
+        ("about:blank", "about:blank"),
+        ("about:blank#top", "about:blank#top"),
+        ("about:blank?q=x", "about:blank?q=x"),
+        ("ABOUT:blank", "about:blank"),
+        // Chrome's address bar takes these to about:blank, and a page's
+        // `about:BLANK` is blank too.
+        ("ABOUT:BLANK", "about:blank"),
+        ("about:BLANK#top", "about:blank#top"),
+    ] {
         let (state, _dir) = state_with_tab(PAGE);
         let content = Loads::default();
         let bar = Bar::default();
         navigate_content(url.to_string(), &state, &content, &bar);
         assert_eq!(*content.0.borrow(), vec!["html".to_string()], "{url}");
-        let want = url::Url::parse(url).unwrap().to_string();
         assert_eq!(tab_url(&state), want, "{url}: the tab's URL");
         assert!(bar.shows(&want), "{url}: the address bar does not show it: {:?}", bar.0.borrow());
     }
@@ -138,4 +146,22 @@ fn the_new_tab_and_about_pages_still_open() {
         navigate_content(url.to_string(), &state, &content, &Bar::default());
         assert_eq!(*content.0.borrow(), vec![load.to_string()], "{url}");
     }
+}
+
+/// The command palette's "New Tab" (`execute_command` `new_tab`, from the
+/// shelf's or the chrome's palette) opens the new tab page, as before
+/// about:blank became an empty page (#1373 R1).
+#[test]
+fn the_command_palettes_new_tab_opens_the_new_tab_page() {
+    let (state, _dir) = state_with_tab(PAGE);
+    let response = ipc::commands::handle_message(&state, IpcMessage::ExecuteCommand { id: "new_tab".to_string() });
+    // As main.rs reads it (`handle_chrome_ipc`, `handle_shelf_ipc`).
+    let ipc::IpcResponse::Success { data } = response else { panic!("{response:?}") };
+    let result = data.get("result").expect("a result");
+    assert_eq!(result.get("action").and_then(|a| a.as_str()), Some("navigate"), "{result}");
+    let url = result.get("url").and_then(|u| u.as_str()).expect("a URL").to_string();
+    let content = Loads::default();
+    navigate_content(url.clone(), &state, &content, &Bar::default());
+    assert_eq!(*content.0.borrow(), vec!["new tab page".to_string()], "{url}");
+    assert_ne!(tab_url(&state), "about:blank", "the tab was left at about:blank");
 }
