@@ -623,7 +623,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // counts from the same time as one the top document sets.
         Q.liveAt = -1; Q.liveReal = 0;
         Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
-        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false; Q.stepped = false;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false;
         // The animation clock's high-water mark (`__rk.animationNow`, TIMELINE2 R1).
         Q.animHigh = 0;
         // The last animation frame run, as its number on the tree's frame grid (below), and
@@ -900,18 +900,20 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                 // times every run. And a frame a task already read the timeline of (its grid
                 // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
                 // the task equals the frame's `t`.
-                // ANIM-READ-JUMP: since the last stepped turn (`Q.stepped`: a test's or a
-                // capture's `pump_live`, not the app's real-time loop nor a load's timers), the
-                // clock is virtual time the page has not lived through, and the engine's CSS
-                // animations run on it (`__rk.animationNow`). Its frames are stamped with their
-                // grid time on it, callback and timeline alike (Chrome: `t` is the timeline's
-                // time in a frame): stamped from the real clock, a frame (or a timeline read,
+                // ANIM-READ-JUMP: a turn that is not a real one moves the timers' clock, not
+                // real time: a test's or a capture's `pump_live`, and in the app too a load's
+                // timers and a network delivery (`__rk.runTimers`). The engine's CSS animations
+                // run on that clock (`__rk.animationNow`), so the frames' timeline is its grid
+                // time too: stamped from the real clock, a frame (or a timeline read,
                 // `getAnimations()`) put the timeline the load's real time ahead of the CSS
                 // clock, and the CSS clock, which never runs behind the timeline, jumped there
-                // (a 100 ms transition ended at its first frame).
-                var stepped = !Q.det && Q.stepped;
-                var grid = !Q.det && (Q.gridStamps || stepped);
-                if (!Q.det && (Q.aheadAt === Q.now || stepped)) ts = at;
+                // (a 100 ms transition ended at its first frame). The callback's stamp stays on
+                // `performance.now()`'s clock (the clock-parity pins), so in such a turn a
+                // frame's `t` and its timeline time differ by what the real clock is ahead
+                // (`anim_read_jump_tests`), as with grid frame stamps (TIMELINE1). The app's
+                // real-time loop is unchanged; its hand-off from the load is a follow-up row.
+                var grid = !Q.det && (Q.gridStamps || !Q.realTurn);
+                if (!Q.det && Q.aheadAt === Q.now) ts = at;
                 if (!grid && Q.tlAt === at) ts = Q.tlTs;
                 // At least the grid distance from the last frame, but at most one grid step from it
                 // (16 or 17; CLOCK-INFLATE): a larger distance is the timers' clock catching up after a long
@@ -938,8 +940,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                     if (tl < Q.frameTl) tl = Q.frameTl;
                     if (tl < Q.tlHigh) tl = Q.tlHigh;
                 }
-                // Stepped: the timeline's time in the frame is the callback's.
-                if (stepped) tl = ts;
                 Q.frameTl = tl;
                 Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
             }
@@ -1123,7 +1123,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
         Q.realTurn = false;
-        Q.stepped = true;
         turnBegins();
         var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
@@ -1156,9 +1155,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
     __rk.advanceTimersFramed = function (delta, max, frameMs, real, before) {
         Q.realTurn = !!real;
-        // A stepped turn (not `real`) puts the clock in stepped mode until a real turn; a
-        // load's timers (`__rk.runTimers`) keep the mode they find (ANIM-READ-JUMP).
-        Q.stepped = !real;
         turnBegins();
         var target = Q.now + delta;
         var start = realNow();
@@ -1224,7 +1220,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
                     // timers' clock catching up would count it again (CLOCK-INFLATE). Read once
                     // per grid point, so a task reads one value.
                     Q.tlAt = g;
-                    var v = !Q.det && (Q.gridStamps || Q.stepped) ? g : treeNow() - (turnNow() - g);
+                    var v = !Q.det && (Q.gridStamps || !Q.realTurn) ? g : treeNow() - (turnNow() - g);
                     Q.tlTs = Q.prevFrameTs >= 0 && v < Q.frameTl ? Q.frameTl : v;
                 }
                 ts = Q.tlTs;

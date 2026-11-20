@@ -201,11 +201,17 @@ fn a_keyframes_animation_is_not_moved_on_by_a_listing() {
     check("width animation");
 }
 
-/// #1359 R1: inside an animation frame, the callback's time is the timeline's time (Chrome
-/// 148: `t === document.timeline.currentTime` in every frame, the receipt's
-/// `raf_t_is_timeline`), in stepped turns too, after a load whose real time is far ahead.
+/// #1359 R1, a known divergence, pinned: Chrome 148 keeps a frame's `t` equal to
+/// `document.timeline.currentTime` (the receipt's `raf_t_is_timeline`). In a turn that is not
+/// a real one the timeline is the grid time on the timers' clock (the fix), while the
+/// callback's stamp stays on `performance.now()`'s clock: the clock-parity pins
+/// (`clock_parity_tests`, `frame_clock_tests`) hold that relation, and stamping the callback
+/// on the grid too broke six of them. So after a load whose real time is 100 s ahead, `t` is
+/// about 100 s and the timeline the grid time. Both still move a grid step a frame. A
+/// capture with grid frame stamps already had this split (TIMELINE1,
+/// `timeline_tests::known_divergence_in_a_capture_...`).
 #[test]
-fn a_frames_time_is_the_timelines_in_a_stepped_turn() {
+fn known_divergence_a_stepped_frames_t_is_on_performance_nows_clock() {
     let receipt: serde_json::Value = serde_json::from_str(RECEIPT).unwrap();
     assert!(receipt["raf_t_is_timeline"]
         .as_array()
@@ -235,11 +241,24 @@ fn a_frames_time_is_the_timelines_in_a_stepped_turn() {
     );
     pump(&mut engine, view, &rt, 120);
     let seen = read(&mut engine, view, "seen.join()");
-    let frames: Vec<&str> = seen.split(',').filter(|s| !s.is_empty()).collect();
+    let frames: Vec<(f64, f64)> = seen
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|f| {
+            let (t, tl) = f.split_once('/').unwrap();
+            (t.parse().unwrap(), tl.parse().unwrap())
+        })
+        .collect();
     assert_eq!(frames.len(), 5, "five frames ran: {seen}");
-    for frame in frames {
-        let (t, tl) = frame.split_once('/').unwrap();
-        assert_eq!(t, tl, "rAF t vs document.timeline.currentTime: {seen}");
+    for w in frames.windows(2) {
+        for (a, b) in [(w[0].0, w[1].0), (w[0].1, w[1].1)] {
+            let step = b - a;
+            assert!((15.0..=18.0).contains(&step), "a grid step a frame: {seen}");
+        }
+    }
+    for (t, tl) in &frames {
+        assert!(*t > 99_000.0, "t on performance.now()'s clock: {seen}");
+        assert!(*tl < 1_000.0, "the timeline on the timers' grid: {seen}");
     }
     drop(server);
 }
