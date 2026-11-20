@@ -2391,6 +2391,9 @@ mod idle_page_tests;
 mod close_tab_tests;
 
 #[cfg(all(test, target_os = "macos", feature = "rustkit"))]
+mod blank_data_nav_tests;
+
+#[cfg(all(test, target_os = "macos", feature = "rustkit"))]
 mod panel_tests {
     use super::*;
     use rustkit_viewhost::ViewId;
@@ -2609,6 +2612,65 @@ fn is_about_url(url: &str) -> bool {
 
 fn is_report_url(url: &str) -> bool {
     url == REPORT_URL
+}
+
+/// The tab's page goes to `url` (the `UserEvent::Navigate` handler): the
+/// browser's own pages by name, anything else as a web URL, a host or a
+/// search.
+fn navigate_content(
+    url: String,
+    state: &Arc<Mutex<AppState>>,
+    content: &impl ContentWebViewOps,
+    chrome: &impl ChromeUi,
+) {
+    info!("Navigating content to: {}", crate::page_url_for_log(&url));
+    if is_new_tab_url(&url) {
+        load_new_tab(content);
+        chrome_url(chrome, "");
+        sync_shield_to_chrome(state, chrome);
+    } else if is_about_url(&url) {
+        // Update tab URL BEFORE loading the about page
+        // This prevents the data URL from overwriting the tab URL
+        set_active_tab_url(state, ABOUT_URL);
+        load_about_page(content);
+        chrome_url(chrome, ABOUT_URL);
+    } else if is_report_url(&url) {
+        // Update tab URL BEFORE loading the report page
+        set_active_tab_url(state, REPORT_URL);
+        load_report_page(content);
+        chrome_url(chrome, REPORT_URL);
+    } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
+        // Skip about: URLs (about:blank, about:srcdoc, etc.)
+        // Skip hiwave:// protocol URLs (handled above if recognized, otherwise ignore)
+        let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url
+        } else if url.contains('.') {
+            format!("https://{}", url)
+        } else {
+            format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
+        };
+        // Update the tab model BEFORE loading, like the about/report
+        // branches above. Without this the URL bar showed the typed URL
+        // only until the next renderTabs, which rewrote it from the stale
+        // model (live run 2026-08-05: typed wikipedia, bar snapped back to
+        // the old eBay URL).
+        set_active_tab_url(state, &full_url);
+        if let Err(e) = content.load_url(&full_url) {
+            error!("Failed to navigate: {}", e);
+        }
+        chrome_url(chrome, &full_url);
+    }
+}
+
+/// The active tab's model URL, when `url` parses.
+fn set_active_tab_url(state: &Arc<Mutex<AppState>>, url: &str) {
+    if let Ok(mut s) = state.lock() {
+        if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
+            if let Ok(parsed_url) = url::Url::parse(url) {
+                let _ = s.shell.update_tab_url(tab_id, parsed_url);
+            }
+        }
+    }
 }
 
 fn should_record_history_url(url: &str) -> bool {
@@ -4505,81 +4567,7 @@ fn main() {
             Event::UserEvent(user_event) => {
                 match user_event {
                     UserEvent::Navigate(url) => {
-                        info!("Navigating content to: {}", crate::page_url_for_log(&url));
-                        if is_new_tab_url(&url) {
-                            #[cfg(target_os = "macos")]
-                            load_new_tab(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_new_tab(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "");
-                            sync_shield_to_chrome(&state_for_events, &chrome_for_events);
-                        } else if is_about_url(&url) {
-                            // Update tab URL BEFORE loading the about page
-                            // This prevents the data URL from overwriting the tab URL
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(ABOUT_URL) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            load_about_page(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_about_page(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "hiwave://about");
-                        } else if is_report_url(&url) {
-                            // Update tab URL BEFORE loading the report page
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(REPORT_URL) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            load_report_page(&*content_for_events);
-                            #[cfg(not(target_os = "macos"))]
-                            load_report_page(&*content_for_events);
-                            chrome_url(&*chrome_for_events, "hiwave://report");
-                        } else if !url.starts_with("about:") && !url.starts_with("hiwave://") {
-                            // Skip about: URLs (about:blank, about:srcdoc, etc.)
-                            // Skip hiwave:// protocol URLs (handled above if recognized, otherwise ignore)
-                            let full_url = if url.starts_with("http://") || url.starts_with("https://") {
-                                url
-                            } else if url.contains('.') {
-                                format!("https://{}", url)
-                            } else {
-                                format!("https://duckduckgo.com/?q={}", urlencoding::encode(&url))
-                            };
-                            // Update the tab model BEFORE loading, like the
-                            // about/report branches above. Without this the
-                            // URL bar showed the typed URL only until the
-                            // next renderTabs, which rewrote it from the
-                            // stale model (live run 2026-08-05: typed
-                            // wikipedia, bar snapped back to the old eBay
-                            // URL).
-                            if let Ok(mut s) = state_for_events.lock() {
-                                if let Some(tab_id) = s.shell.get_active_tab().map(|tab| tab.id) {
-                                    if let Ok(parsed_url) = url::Url::parse(&full_url) {
-                                        let _ = s.shell.update_tab_url(tab_id, parsed_url);
-                                    }
-                                }
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                if let Err(e) = content_for_events.load_url(&full_url) {
-                                    error!("Failed to navigate: {}", e);
-                                }
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                if let Err(e) = content_for_events.load_url(&full_url) {
-                                    error!("Failed to navigate: {}", e);
-                                }
-                            }
-                            chrome_url(&*chrome_for_events, &full_url);
-                        }
+                        navigate_content(url, &state_for_events, &*content_for_events, &*chrome_for_events);
                     }
                     UserEvent::GoBack => {
                         info!("Going back");

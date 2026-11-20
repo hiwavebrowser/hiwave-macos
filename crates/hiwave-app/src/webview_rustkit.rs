@@ -380,7 +380,7 @@ impl RustKitView {
 
     /// A flag-off content view with no window (tests).
     #[cfg(test)]
-    fn headless(bounds: Bounds) -> Self {
+    pub(crate) fn headless(bounds: Bounds) -> Self {
         let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
         let view_id = engine.create_headless_view(bounds).expect("headless view");
         let (handle, endpoint) = connect(engine, view_id);
