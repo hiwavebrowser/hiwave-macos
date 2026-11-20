@@ -734,6 +734,8 @@ mod media_load_tests;
 #[cfg(all(test, feature = "headless"))]
 mod media_fetch_tests;
 #[cfg(all(test, feature = "headless"))]
+mod anim_read_jump_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_cost_tests;
 #[cfg(all(test, feature = "headless"))]
 mod border_radius_computed_tests;
