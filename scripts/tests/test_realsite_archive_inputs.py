@@ -330,6 +330,7 @@ class BoardTest(unittest.TestCase):
                 mock.patch.object(realsite_board, "chrome_capture", side_effect=fake_chrome), \
                 mock.patch.object(realsite_board, "run_json", side_effect=fake_run_json), \
                 mock.patch.object(realsite_board, "pixel_diff", return_value={"diffPercent": 1.0}), \
+                mock.patch.object(realsite_board, "non_background_fraction", return_value=0.5), \
                 mock.patch.object(realsite_board, "probe_access",
                                   return_value={"status": 200, "vendor": None, "blocked": False}), \
                 mock.patch.object(realsite_board, "rustkit_viewport_text", return_value="hello"):
