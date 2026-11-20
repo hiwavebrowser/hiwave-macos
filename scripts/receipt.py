@@ -97,7 +97,8 @@ def public_text(text, root):
         flag = m.group("wflag") or ""
         if m.group("drive") and os.name == "nt":
             # A drive path on this host: the same rule as a POSIX one (repo-relative inside
-            # the repository, "~" for a home directory, the basename otherwise).
+            # the repository, "~" for a home directory, the basename otherwise). On a POSIX host
+            # a drive path is never this checkout's, so it keeps the basename, on purpose.
             return flag + public_path(body, root) + rest
         parts = re.split(r"[\\/]", body.rstrip("\\/"))
         if (m.group("tilde") and len(parts) == 1) or is_home(body):

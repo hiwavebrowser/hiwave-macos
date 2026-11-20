@@ -143,6 +143,17 @@ class TestReceiptNoHostPaths(unittest.TestCase):
             self.assertEqual(out, want)
             self.assertNotIn("example", out)
 
+    @unittest.skipUnless(os.name == "nt", "a drive path is this checkout's only on Windows")
+    def test_a_windows_path_inside_the_repo_prints_repo_relative(self):
+        # The Windows-only branch (Prometheus R1 nit 1 on #1384): a drive path under the
+        # repository prints repo-relative with "/", as a POSIX one does, option kept.
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        lib = str(REPO / "target" / "lib")
+        self.assertEqual(receipt.public_text("-L" + lib, REPO), "-Ltarget/lib")
+        self.assertEqual(receipt.public_text("see " + str(REPO / "scripts" / "receipt.py"), REPO),
+                         "see scripts/receipt.py")
+
     def test_a_shell_variable_path_in_the_note_is_not_mangled(self):
         sys.path.insert(0, str(SCRIPTS))
         import receipt
