@@ -3391,6 +3391,28 @@ mod tests {
         assert_eq!(blink.primary, system.primary);
     }
 
+    /// `BlinkMacSystemFont` is macOS's name for the system font; Chrome on
+    /// Windows does not know it, so it is skipped like any missing family.
+    /// Chrome for Testing 148.0.7778.216 win64, "Hello world" at 14px:
+    /// `BlinkMacSystemFont` alone 67.27 (the default serif's), `-apple-system,
+    /// BlinkMacSystemFont, sans-serif` and `BlinkMacSystemFont, sans-serif` 69.25
+    /// (Arial's), `system-ui, sans-serif` 70.91 (Segoe UI's). At 32px bold the
+    /// report page's stack measures "0000" 71.19 (Arial), not Segoe UI's 73.63.
+    #[cfg(windows)]
+    #[test]
+    fn macos_only_aliases_fall_through_on_windows() {
+        let c = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont, sans-serif");
+        assert_eq!(c.primary, "Arial");
+        let c = FontFamilyChain::from_css_value("BlinkMacSystemFont, sans-serif");
+        assert_eq!(c.primary, "Arial");
+        // A real family after the aliases still wins.
+        let c = FontFamilyChain::from_css_value("-apple-system, 'Segoe UI', sans-serif");
+        assert_eq!(c.primary, "Segoe UI");
+        // system-ui is not one of them: it stays Segoe UI.
+        let c = FontFamilyChain::from_css_value("system-ui, sans-serif");
+        assert_eq!(c.primary, "Segoe UI");
+    }
+
     /// `-apple-system` is WebKit's name for the system font. Chrome has never
     /// supported it: it is an unknown family, skipped in the stack like any
     /// font that is not installed (CB7b). Chrome for Testing 148 on macOS,
