@@ -1274,7 +1274,7 @@ requested.
 
 Chrome for Testing 148.0.7778.216 does not parse the form by default (a parse-time SyntaxError, as
 before this patch); with `--js-flags=--js-source-phase-imports` it answers exactly as this patch does
-on all 13 cases. Either way a page using the form fails to run that module with a SyntaxError; the
+on all 14 cases. Either way a page using the form fails to run that module with a SyntaxError; the
 difference is whether dependencies are fetched first.
 
 **Not changed.** No module has a source phase representation (no `%AbstractModuleSource%`, no
@@ -1282,9 +1282,9 @@ WebAssembly module sources), so a source phase import never succeeds. An exporte
 import (`import source x from "m"; export { x }`) stays a local export instead of becoming an
 indirect export with import name *source*; the exporting module fails at link anyway.
 
-**Pin.** `crates/rustkit-js/tests/import_source_phase.rs`: 13 cases
+**Pin.** `crates/rustkit-js/tests/import_source_phase.rs`: 14 cases
 (`docs/diagnostics/2026-11-20/import_source_phase_cases.json`) against Chrome for Testing
 148.0.7778.216 with the flag (`import_source_phase_cft148_flag.json`; without it,
-`import_source_phase_cft148.json`). Red without the patch: 5 of 13 (the `import source <binding>`
-forms were parse errors). test262: `test/language/module-code/source-phase-import/import-source.js`
+`import_source_phase_cft148.json`). Red without the patch: 5 of 14 (the `import source <binding>`
+forms were parse errors). An escaped `sour\u0063e` is not the keyword: `import sour\u0063e x from "m"` stays a parse-time SyntaxError, in Chrome with and without the flag. test262: `test/language/module-code/source-phase-import/import-source.js`
 (sloppy and strict) passes.

@@ -12,5 +12,6 @@
  "11_source_named_list": "parse:SyntaxError",
  "12_source_bare_specifier": "parse:SyntaxError",
  "13_source_binding_redeclared": "parse:SyntaxError",
+ "14_escaped_source_keyword": "parse:SyntaxError",
  "_version": "148.0.7778.216"
 }

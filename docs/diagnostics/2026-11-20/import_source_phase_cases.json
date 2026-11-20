@@ -11,5 +11,6 @@
   "10_source_namespace": "import source * as ns from 'dep'; export const r = 1;",
   "11_source_named_list": "import source { a } from 'dep'; export const r = 1;",
   "12_source_bare_specifier": "import source 'dep'; export const r = 1;",
-  "13_source_binding_redeclared": "import source x from 'dep'; let x; export const r = 1;"
+  "13_source_binding_redeclared": "import source x from 'dep'; let x; export const r = 1;",
+  "14_escaped_source_keyword": "import sour\\u0063e x from 'dep'; export const r = 1;"
 }
