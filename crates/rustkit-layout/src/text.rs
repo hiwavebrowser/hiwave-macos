@@ -1478,6 +1478,9 @@ impl TextShaper {
                         };
                     let mut emoji_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
                     let mut symbol_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
+                    // Which fallback faces this run drew a character from: their
+                    // extents are united into the run's line below.
+                    let (mut used_symbol, mut used_emoji) = (false, false);
 
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
@@ -1502,13 +1505,20 @@ impl TextShaper {
                             match text_face {
                                 Some(advance) => {
                                     face = GlyphFace::Fallback { emoji: false };
+                                    used_symbol = true;
                                     advance
                                 }
                                 // An emoji, or a symbol Segoe UI Symbol lacks:
                                 // Segoe UI Emoji's, as before.
                                 None => {
                                     face = GlyphFace::Fallback { emoji: true };
-                                    fallback_advance(&mut emoji_face, "Segoe UI Emoji", c).unwrap_or(notdef)
+                                    match fallback_advance(&mut emoji_face, "Segoe UI Emoji", c) {
+                                        Some(advance) => {
+                                            used_emoji = true;
+                                            advance
+                                        }
+                                        None => notdef,
+                                    }
                                 }
                             }
                         } else if i < glyph_metrics.len() {
@@ -1530,9 +1540,29 @@ impl TextShaper {
                         x_offset += advance;
                     }
 
-                    let ascent = design_metrics.ascent as f32 * scale;
-                    let descent = design_metrics.descent as f32 * scale;
-                    let leading = design_metrics.line_gap as f32 * scale;
+                    let mut ascent = design_metrics.ascent as f32 * scale;
+                    let mut descent = design_metrics.descent as f32 * scale;
+                    let mut leading = design_metrics.line_gap as f32 * scale;
+                    // Blink unites every face the run drew from into its line
+                    // under `line-height: normal` (`unite_fallback_extents`,
+                    // shared with the macOS shaper): Chrome for Testing 148
+                    // win64 builds Arial 14px with U+1F6E1 (Segoe UI Symbol)
+                    // a 19px line, plain 16. One face at a time.
+                    for (used, slot) in [(used_symbol, &symbol_face), (used_emoji, &emoji_face)] {
+                        let Some(Some((fb_face, fb_scale))) = slot.as_ref().filter(|_| used) else {
+                            continue;
+                        };
+                        if let Ok(m) = fb_face.metrics() {
+                            (ascent, descent, leading) = unite_fallback_extents(
+                                (ascent, descent, leading),
+                                (
+                                    m.ascent as f32 * fb_scale,
+                                    m.descent as f32 * fb_scale,
+                                    m.line_gap as f32 * fb_scale,
+                                ),
+                            );
+                        }
+                    }
 
                     let metrics = TextMetrics {
                         width: x_offset,
@@ -4324,12 +4354,15 @@ mod tests {
     fn a_run_drawn_partly_from_a_fallback_face_unites_its_extents() {
         let shaper = TextShaper::new();
         let chain = FontFamilyChain::new("Arial");
+        // The run's `normal` line: ascent + descent + its line gap (a united
+        // run carries none), rounded, as Chrome's line box is (Arial 16px
+        // plain: 14.48 + 3.39 + 0.52 = 18.4, Chrome 18).
         let line = |t: &str, size: f32| {
             let m = shaper
                 .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, size)
                 .unwrap()
                 .metrics;
-            m.ascent.round() + m.descent.round()
+            (m.ascent + m.descent + m.leading).round()
         };
         for (text, size, chrome) in [
             ("Plain text", 14.0, 16.0),
