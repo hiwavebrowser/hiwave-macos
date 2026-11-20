@@ -221,6 +221,10 @@ impl FontFamilyChain {
             .iter()
             .copied()
             .filter(|f| !f.eq_ignore_ascii_case("-apple-system"))
+            // Windows: Chrome there does not know `BlinkMacSystemFont` either
+            // (macOS's name for the system font), so it is skipped too. Chrome
+            // for Testing 148 win64: `BlinkMacSystemFont, sans-serif` is Arial.
+            .filter(|f| !(cfg!(windows) && f.eq_ignore_ascii_case("BlinkMacSystemFont")))
             .collect();
 
         if families.is_empty() {
@@ -3388,7 +3392,11 @@ mod tests {
         assert_eq!(system.primary, "Segoe UI");
 
         let blink = FontFamilyChain::from_css_value("BlinkMacSystemFont");
+        #[cfg(not(windows))]
         assert_eq!(blink.primary, system.primary);
+        // Chrome on Windows does not know `BlinkMacSystemFont`: alone it is the default serif.
+        #[cfg(windows)]
+        assert_eq!(blink.primary, FontFamilyChain::serif().primary);
     }
 
     /// `BlinkMacSystemFont` is macOS's name for the system font; Chrome on
@@ -3427,12 +3435,17 @@ mod tests {
         assert_eq!(alone.primary, serif.primary, "-apple-system alone is the default serif");
         let system = FontFamilyChain::from_css_value("system-ui");
         let then_blink = FontFamilyChain::from_css_value("-apple-system, BlinkMacSystemFont");
+        #[cfg(not(windows))]
         assert_eq!(then_blink.primary, system.primary, "the next family, the system font");
+        #[cfg(windows)]
+        assert_eq!(then_blink.primary, serif.primary, "on Windows both are unknown: the default serif");
         let stack = FontFamilyChain::from_css_value("-apple-system, \"Segoe UI\", Helvetica");
         let mut walk = std::iter::once(stack.primary.as_str())
             .chain(stack.fallbacks.iter().map(String::as_str));
         assert!(
-            !walk.any(|f| f == system.primary || f.eq_ignore_ascii_case("-apple-system")),
+            // Windows: Segoe UI is the system font and a family this stack names (Chrome for
+            // Testing 148 win64 resolves the stack to it), so only -apple-system is checked there.
+            !walk.any(|f| (f == system.primary && !cfg!(windows)) || f.eq_ignore_ascii_case("-apple-system")),
             "no system font ahead of Helvetica: {} {:?}",
             stack.primary,
             stack.fallbacks
