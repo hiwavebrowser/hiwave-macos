@@ -295,6 +295,19 @@ class RealWindowGate(unittest.TestCase):
         dead.wait()
         return dead.pid
 
+    def test_pid_alive_tells_a_dead_pid_from_a_live_one(self):
+        """#1357: os.kill(pid, 0) is a POSIX liveness probe. On Windows signal 0 is
+        CTRL_C_EVENT, not a probe: a dead holder read as alive, so no stale lock
+        was ever recovered there."""
+        self.assertTrue(realsite_board._pid_alive(os.getpid()))
+        live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            self.assertTrue(realsite_board._pid_alive(live.pid))
+        finally:
+            live.kill()
+            live.wait()
+        self.assertFalse(realsite_board._pid_alive(self._dead_pid()))
+
     def test_dead_lock_recovery_loses_to_a_runner_that_recovered_first(self):
         """R1 (#960): two runners both read the same dead pid; exactly one may hold.
 
