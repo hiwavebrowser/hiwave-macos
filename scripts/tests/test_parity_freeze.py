@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import chrome_board  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "raf_canvas_loop.html"
+ENDLESS = Path(__file__).resolve().parent / "fixtures" / "raf_endless_loop.html"
+MAX_FRAMES = 300
 FROZEN_TIME = 1704067200000
 FRAME_MS = 1000 / 60
 
@@ -120,10 +122,18 @@ class RafDrivenDrawingReachesItsLastFrame(unittest.TestCase):
         self.assertEqual(self.log.get("dateAgain"), FROZEN_TIME)
         ts = self.log.get("timestamps") or []
         self.assertEqual(len(ts), 60)
-        # delta: a double near 1.7e12 resolves to ~2.4e-4 ms.
-        self.assertAlmostEqual(ts[0], FROZEN_TIME + FRAME_MS, delta=1e-3)
+        self.assertAlmostEqual(ts[0], FRAME_MS, places=6)
         for prev, cur in zip(ts, ts[1:]):
-            self.assertAlmostEqual(cur - prev, FRAME_MS, delta=1e-3)
+            self.assertAlmostEqual(cur - prev, FRAME_MS, places=6)
+
+    def test_the_frame_timestamp_is_on_the_performance_now_scale(self):
+        # Virtual frame time since the time origin, like performance.now();
+        # on the epoch scale, ts - performance.now() was about 1.7e12.
+        self.assertAlmostEqual(self.log.get("firstFrameTs"), FRAME_MS, places=6)
+        self.assertLess(abs(self.log["firstFrameTs"] - self.log["perfAtFirstFrame"]), 60_000)
+
+    def test_a_callback_cancelled_by_an_earlier_one_in_the_same_frame_never_runs(self):
+        self.assertIs(self.log.get("siblingCancelledRan"), False)
 
     def test_frame_callbacks_run_before_the_resize_observation_of_the_same_update(self):
         # Chart.js's line chart is never drawn if its animator's frames run
@@ -131,10 +141,42 @@ class RafDrivenDrawingReachesItsLastFrame(unittest.TestCase):
         self.assertEqual(self.log.get("order"), ["A1", "ro"] + [f"A{i}" for i in range(2, 11)])
 
     def test_the_capture_waited_for_the_frames_to_finish(self):
-        self.assertEqual(self.record.get("animation_frames", {}).get("settled"), True)
+        frames = self.record.get("animation_frames", {})
+        self.assertEqual(frames.get("settled"), True)
+        self.assertIs(frames.get("capped"), False)
 
     def test_a_cancelled_callback_never_runs(self):
         self.assertIs(self.log.get("cancelledRan"), False)
+
+
+@unittest.skipUnless(pinned_chrome(), "PARITY_CHROME_PATH (pinned Chrome for Testing) not set")
+@unittest.skipUnless((chrome_board.ORACLE_DIR / "node_modules").is_dir(), "no tools/parity_oracle/node_modules")
+class AnEndlessLoopStopsAtTheBudget(unittest.TestCase):
+    """A spinner page: the frame budget, not the wall clock, decides the frame
+    captured, and the capture says the budget was hit."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        out = Path(cls.tmp.name)
+        cmd = ["node", str(chrome_board.CHROMIUM_ARM), str(ENDLESS), str(out), "240", "140"]
+        cls.record = chrome_board._run(cmd, timeout=120)
+        cls.png = out / "chrome.png"
+        cls.log = (cls.record.get("ipc_calls") or [{}])[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_capture_reports_the_budget_was_hit(self):
+        self.assertEqual(self.record.get("status"), "ok", json.dumps(self.record)[:400])
+        self.assertEqual(self.record.get("animation_frames"),
+                         {"frames": MAX_FRAMES, "settled": True, "capped": True})
+
+    def test_the_loop_ran_exactly_the_budget_and_the_frame_shows_it(self):
+        self.assertEqual(self.log.get("frames"), MAX_FRAMES)
+        _, _, rows = read_png_rgba(self.png)
+        self.assertEqual(pixel(rows, 120, 70), (0, 255, 0, 255))
 
 
 if __name__ == "__main__":

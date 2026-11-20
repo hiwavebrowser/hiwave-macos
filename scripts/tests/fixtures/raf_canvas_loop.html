@@ -77,6 +77,17 @@
     observed.style.display = 'block';
   }, 30));
 
+  // A callback cancelled by an earlier callback of the same frame does not
+  // run (HTML: it is skipped when its turn comes).
+  log.siblingCancelledRan = false;
+  let siblingId = 0;
+  requestAnimationFrame(() => cancelAnimationFrame(siblingId));
+  siblingId = requestAnimationFrame(() => { log.siblingCancelledRan = true; });
+
+  // The frame timestamp is on performance.now()'s scale (ms since the time
+  // origin), not the epoch: libraries subtract one from the other.
+  requestAnimationFrame((ts) => { log.firstFrameTs = ts; log.perfAtFirstFrame = performance.now(); });
+
   // A cancelled frame callback never runs.
   const id = requestAnimationFrame(() => { log.cancelledRan = true; });
   cancelAnimationFrame(id);
