@@ -4330,6 +4330,26 @@ impl LayoutBox {
             }
         };
 
+        // A drop-down select is `box-sizing: border-box` (the UA's), so an author width sizes its
+        // border box, which is never narrower than its horizontal padding + border: Chrome for
+        // Testing 148 builds `width: 100%` in a 0px block as that floor (chrome.html's collapsed
+        // sidebar: 24, where the intrinsic-width fallback above built 105), and 100% of 10px as
+        // 24 too. An auto width stays intrinsic. Author `box-sizing` is not read: RustKit's
+        // computed default is `content-box` for every element, so an author `content-box` on a
+        // select (where Chrome would add the padding and border) cannot be told apart from none
+        // until the UA sheet sets the select's `border-box`; nothing pins it yet.
+        let width = match (&control, &self.style.width) {
+            (FormControlType::Select { size, .. }, w) if *size <= 1 && !matches!(w, Length::Auto | Length::Zero) => {
+                let [_, right, _, left] = self.drop_down_edges(font_size);
+                let resolved = match w {
+                    Length::Percent(pct) => pct / 100.0 * width_base,
+                    other => self.length_to_px(other, width_base),
+                };
+                resolved.max(left + right)
+            }
+            _ => width,
+        };
+
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px + extra_h,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
@@ -4571,6 +4591,38 @@ impl LayoutBox {
         None
     }
 
+    /// A drop-down select's padding + border per side (top, right, bottom, left), from its style:
+    /// both are inside the control's content rect, which is its border box. The UA's are 0
+    /// padding and a 1px border per side unless the author set them; `border-style: none` is no
+    /// border (as `form_control_intrinsic_size` counts them). A percentage padding counts as 0
+    /// here, as there; nothing pins Chrome's value for one yet.
+    fn drop_down_edges(&self, font_size: f32) -> [f32; 4] {
+        let st = &self.style;
+        let px = |l: &Length| match l {
+            Length::Percent(_) | Length::Auto => 0.0,
+            other => other.to_px(font_size, 16.0, 0.0),
+        };
+        let edge = |pad: &Length, width: &Length, style: BorderStyle, declared: bool| {
+            let border = if style == BorderStyle::None {
+                0.0
+            } else {
+                let w = px(width);
+                if declared || w > 0.0 {
+                    w
+                } else {
+                    1.0
+                }
+            };
+            px(pad) + border
+        };
+        [
+            edge(&st.padding_top, &st.border_top_width, st.border_top_style, st.border_declared[0]),
+            edge(&st.padding_right, &st.border_right_width, st.border_right_style, st.border_declared[1]),
+            edge(&st.padding_bottom, &st.border_bottom_width, st.border_bottom_style, st.border_declared[2]),
+            edge(&st.padding_left, &st.border_left_width, st.border_left_style, st.border_declared[3]),
+        ]
+    }
+
     /// Distance from a form control's synthetic baseline (its inner text
     /// line's baseline) to its bottom margin edge: font descent +
     /// half-leading + author bottom padding/border. Chrome hangs exactly
@@ -4594,6 +4646,22 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
+        // A drop-down (menulist) carries its label line centred in its content box, and Chrome
+        // seats the baseline on it at a whole pixel: floor(top edge + (content - (ascent +
+        // descent)) / 2 + ascent). Chrome for Testing 148, Arial 13px: 20 of 31 with `padding:
+        // 8px 12px; border: none`, 14 of 19 bare. Its padding and border are inside this box's
+        // content rect (a control's content rect is its border box), so read them from the style
+        // as `form_control_intrinsic_size` does: the UA's 0 padding and 1px border per side unless
+        // the author set them (`border-style: none` is no border).
+        if let BoxType::FormControl(FormControlType::Select { size, .. }) = &self.box_type {
+            if *size <= 1 {
+                let [top, _, bottom, _] = self.drop_down_edges(font_size);
+                let height = self.dimensions.content.height;
+                let content = (height - top - bottom).max(0.0);
+                let baseline = (top + (content - (ascent + descent)) / 2.0 + ascent).floor();
+                return (height - baseline).max(0.0) + self.dimensions.margin.bottom;
+            }
+        }
         let half_leading = half_leading(line_height, ascent, descent);
         // A single-line control taller than its text line (author `height`)
         // centres the line in its content box, so half the spare height
@@ -18709,6 +18777,142 @@ mod tests {
             "fixed 50px button line: Chrome 50, got {}",
             block.dimensions.content.height
         );
+    }
+
+    #[test]
+    fn a_selects_baseline_is_its_centred_text_line_not_its_bottom_less_the_descent() {
+        // chrome.html's mode selector (`select { padding: 8px 12px; border: none; font-size:
+        // 13px }`) sits on a line of a 16px block. Chrome for Testing 148.0.7778.216 (win64,
+        // Arial; an inline-block marker after the select gives the baseline): the select's
+        // baseline is 20 of its 31px (a bare UA select: 14 of 19) -- its label line centred in
+        // the box -- so the 16px strut's descent stays inside it and the line is the select's
+        // 31 (19). RustKit seated the baseline at the bottom less the text descent (27.71 of
+        // 31, 15.71 of 19), the strut hung 0.71 below, and the line read 31.71 (19.71); the
+        // whole left sidebar under it carried the 0.71.
+        let mut cb = Dimensions::default();
+        cb.content = Rect::new(0.0, 0.0, 300.0, 0.0);
+        let block_style = |px: f32| {
+            let mut s = ComputedStyle::new();
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(px);
+            s
+        };
+        let select = |styled: bool| {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineBlock;
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(13.0);
+            s.width = Length::Px(195.0);
+            if styled {
+                s.appearance = rustkit_css::Appearance::None;
+                s.padding_top = Length::Px(8.0);
+                s.padding_bottom = Length::Px(8.0);
+                s.padding_left = Length::Px(12.0);
+                s.padding_right = Length::Px(12.0);
+                s.padding_v_declared = true;
+                s.padding_declared = [true; 4];
+                s.border_top_style = BorderStyle::None;
+                s.border_right_style = BorderStyle::None;
+                s.border_bottom_style = BorderStyle::None;
+                s.border_left_style = BorderStyle::None;
+                s.border_v_declared = true;
+                s.border_declared = [true; 4];
+            }
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::Select {
+                    options: vec!["Zen".to_string()],
+                    selected_index: Some(0),
+                    size: 0,
+                    selected: vec![0],
+                }),
+                s,
+            )
+        };
+        // (block font px, styled select, Chrome's select height, Chrome's line height). In the
+        // 24px block the strut's ascent is above the select's: Chrome's line is 28, the select
+        // 8px down it with its baseline at 22 (the line from the block's top, not the select's).
+        for (block_px, styled, chrome_select, chrome_line) in
+            [(16.0, true, 31.0, 31.0), (16.0, false, 19.0, 19.0), (13.0, true, 31.0, 31.0), (24.0, false, 19.0, 28.0)]
+        {
+            let mut block = LayoutBox::new(BoxType::Block, block_style(block_px));
+            block.children.push(select(styled));
+            block.layout(&cb);
+            let got_select = block.children[0].dimensions.content.height;
+            let got_line = block.dimensions.content.height;
+            assert!(
+                (got_select - chrome_select).abs() <= 0.05,
+                "{block_px}px block, styled {styled}: select Chrome {chrome_select}, RustKit {got_select}"
+            );
+            assert!(
+                (got_line - chrome_line).abs() <= 0.05,
+                "{block_px}px block, styled {styled}: line Chrome {chrome_line}, RustKit {got_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_percentage_select_is_never_narrower_than_its_padding_and_border() {
+        // chrome.html's collapsed sidebar is `width: 0`; its mode selector is `width: 100%`.
+        // Chrome for Testing 148.0.7778.216 (win64, Arial 13px): a select is `box-sizing:
+        // border-box`, so its border box is the percentage, floored at its horizontal padding +
+        // border, never its intrinsic width -- styled (padding 8px 12px, border none) 24 at 100%
+        // or 50% of 0 and at 100% of 10px; padding 8px 4px 8; a bare UA select (1px border) 2.
+        // RustKit fell back to the intrinsic width when the percentage resolved to 0 (47, 45, 31)
+        // and did not floor a small one (10).
+        // `pct` < 0 stands for an author `width: 0`, which parses as `Px(0)` (`Length::Zero` is
+        // the unset value): Chrome 24 styled and 2 bare there too.
+        let select = |pad_h: Option<f32>, pct: f32| {
+            let mut s = ComputedStyle::new();
+            s.display = rustkit_css::Display::InlineBlock;
+            s.font_family = "Arial".to_string();
+            s.font_size = Length::Px(13.0);
+            s.width = if pct < 0.0 { Length::Px(0.0) } else { Length::Percent(pct) };
+            if let Some(h) = pad_h {
+                s.appearance = rustkit_css::Appearance::None;
+                s.padding_top = Length::Px(8.0);
+                s.padding_bottom = Length::Px(8.0);
+                s.padding_left = Length::Px(h);
+                s.padding_right = Length::Px(h);
+                s.padding_v_declared = true;
+                s.padding_declared = [true; 4];
+                s.border_top_style = BorderStyle::None;
+                s.border_right_style = BorderStyle::None;
+                s.border_bottom_style = BorderStyle::None;
+                s.border_left_style = BorderStyle::None;
+                s.border_v_declared = true;
+                s.border_declared = [true; 4];
+            }
+            LayoutBox::new(
+                BoxType::FormControl(FormControlType::Select {
+                    options: vec!["Zen".to_string()],
+                    selected_index: Some(0),
+                    size: 0,
+                    selected: vec![0],
+                }),
+                s,
+            )
+        };
+        // (container width, side padding (None = the bare UA select), width %, Chrome's width)
+        for (container, pad_h, pct, chrome) in [
+            (0.0, Some(12.0), 100.0, 24.0),
+            (0.0, None, 100.0, 2.0),
+            (0.0, Some(4.0), 100.0, 8.0),
+            (10.0, Some(12.0), 100.0, 24.0),
+            (0.0, Some(12.0), 50.0, 24.0),
+            (300.0, Some(12.0), -1.0, 24.0),
+            (300.0, None, -1.0, 2.0),
+        ] {
+            let mut cb = Dimensions::default();
+            cb.content = Rect::new(0.0, 0.0, container, 0.0);
+            let mut block = LayoutBox::new(BoxType::Block, ComputedStyle::new());
+            block.children.push(select(pad_h, pct));
+            block.layout(&cb);
+            let got = block.children[0].dimensions.content.width;
+            assert!(
+                (got - chrome).abs() <= 0.05,
+                "{pct}% of {container}px, side padding {pad_h:?}: Chrome {chrome}, RustKit {got}"
+            );
+        }
     }
 
     #[test]

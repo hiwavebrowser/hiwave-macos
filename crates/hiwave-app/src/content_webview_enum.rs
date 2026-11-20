@@ -35,6 +35,13 @@ impl ContentWebViewOps for ContentWebView {
         }
     }
 
+    fn load_internal_page(&self, html: &str) -> Result<(), String> {
+        match self {
+            ContentWebView::RustKit(v) => v.load_internal_page(html).map_err(|e| format!("Failed to load HTML: {}", e)),
+            ContentWebView::Wry(v) => v.load_html(html).map_err(|e| e.to_string()),
+        }
+    }
+
     fn evaluate_script(&self, script: &str) -> Result<(), String> {
         match self {
             ContentWebView::RustKit(v) => v.wry_evaluate_script(script),
@@ -46,6 +53,12 @@ impl ContentWebViewOps for ContentWebView {
         match self {
             ContentWebView::RustKit(v) => v.wry_set_bounds(rect),
             ContentWebView::Wry(v) => v.set_bounds(rect).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn report_console_error(&self, message: &str) {
+        if let ContentWebView::RustKit(v) = self {
+            v.report_console_error(message);
         }
     }
 }

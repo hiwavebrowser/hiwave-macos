@@ -106,6 +106,9 @@ pub struct RustKitView {
     chrome_updates: RefCell<ChromeUpdates>,
     /// What the page posted on `window.ipc`, in order (CH2.E9).
     ipc_inbox: RefCell<Vec<String>>,
+    /// What an internal page ([`Self::load_internal_page`]) posted, with
+    /// its navigation id, in order.
+    internal_reads: RefCell<Vec<(u64, String)>>,
     /// CH3.A7: the app owns this view (its chrome, a panel), so the
     /// documents it loads with `load_html_internal` get the app bridge.
     /// A content view never does.
@@ -385,7 +388,7 @@ impl RustKitView {
 
     /// A flag-off content view with no window (tests).
     #[cfg(test)]
-    fn headless(bounds: Bounds) -> Self {
+    pub(crate) fn headless(bounds: Bounds) -> Self {
         let mut engine = content_engine_builder().build().expect("engine (no GPU?)");
         let view_id = engine.create_headless_view(bounds).expect("headless view");
         let (handle, endpoint) = connect(engine, view_id);
@@ -437,6 +440,7 @@ impl RustKitView {
             current_title: RefCell::new(None),
             chrome_updates: RefCell::new(ChromeUpdates::default()),
             ipc_inbox: RefCell::new(Vec::new()),
+            internal_reads: RefCell::new(Vec::new()),
             app_owned: Cell::new(false),
             zoom_level: RefCell::new(1.0),
             visible: RefCell::new(true),
@@ -1000,9 +1004,62 @@ impl RustKitView {
 
     /// Load HTML content directly.
     pub fn load_html_internal(&self, html: &str) -> HiWaveResult<()> {
+        self.load_html_doc(html, false)
+    }
+
+    /// Load one of the app's own pages (the report page) into this web
+    /// content view. That document gets a `window.ipc` whose messages come
+    /// back from [`Self::take_internal_reads`]; the app answers the ones it
+    /// serves with [`Self::answer_internal_read`]. Only the app calls this,
+    /// with a document it built itself.
+    pub fn load_internal_page(&self, html: &str) -> HiWaveResult<()> {
+        self.load_html_doc(html, true)
+    }
+
+    /// What the internal page posted since the last call, oldest first,
+    /// each with the navigation id of the document that posted it.
+    pub fn take_internal_reads(&self) -> Vec<(u64, String)> {
+        if self.content.is_some() {
+            self.harvest();
+        }
+        std::mem::take(&mut *self.internal_reads.borrow_mut())
+    }
+
+    /// Answer a read of navigation `nav_id`. The page drops it unless it
+    /// still shows that internal page.
+    pub fn answer_internal_read(&self, nav_id: u64, response_json: String) {
+        if let Some(thread) = &self.content {
+            thread.answer_internal_read(nav_id, response_json);
+        } else {
+            self.submit(PageCmd::AnswerInternalRead { nav_id, response_json });
+        }
+    }
+
+    /// The page's answer to `script`, waiting for it on either path. Tests only.
+    #[cfg(test)]
+    pub(crate) fn read_for_test(&self, script: &str) -> String {
+        let Some(thread) = &self.content else {
+            return self.execute_script_sync(script).unwrap_or_default();
+        };
+        let mut rx = thread.eval(script);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(answer) = rx.try_recv() {
+                return answer.unwrap_or_default();
+            }
+            assert!(Instant::now() < deadline, "the page did not answer {script}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn load_html_doc(&self, html: &str, internal_page: bool) -> HiWaveResult<()> {
         self.cancel_load();
         if let Some(thread) = &self.content {
-            let _rx = thread.load_html(html);
+            let _rx = if internal_page {
+                thread.load_internal_page(html)
+            } else {
+                thread.load_html(html)
+            };
             // Events the old page sent before this (a script navigation just
             // before New Tab) are stale from here, as after `navigate`.
             // Drop one harvest already copied out of the queue; `stale`
@@ -1019,6 +1076,7 @@ impl RustKitView {
             match self.ask(|reply| PageCmd::LoadHtml {
                 html: html.to_string(),
                 nav_id: 0,
+                internal_page,
                 reply,
             }) {
                 Some(Ok(())) => {}
@@ -1393,6 +1451,15 @@ impl RustKitView {
         self.devtools_page.as_ref().map(|(inspector, _)| Arc::clone(inspector))
     }
 
+    /// An error line in the page's console from the browser (as Chrome
+    /// logs a navigation it does not follow), not run as page script.
+    /// Without a console (none recorded yet) only the app log has it.
+    pub fn report_console_error(&self, message: &str) {
+        if let Some(inspector) = self.devtools_inspector() {
+            inspector.console(rustkit_engine::ConsoleLevel::Error, message, None);
+        }
+    }
+
     /// Run the console's `code` in the page: the value, or the error. A
     /// page that reaches it at or past `deadline` cancels it (T6c).
     pub fn devtools_eval(&self, code: &str, deadline: std::time::Instant) -> oneshot::Receiver<Result<String, String>> {
@@ -1486,6 +1553,9 @@ impl RustKitView {
                 PageEvent::Focused(focused) => self.page_focused.set(focused),
                 PageEvent::TextFocused(text) => self.page_text_focused.set(text),
                 PageEvent::Ipc { payload, .. } => self.ipc_inbox.borrow_mut().push(payload),
+                PageEvent::InternalRead { payload, nav_id } => {
+                    self.internal_reads.borrow_mut().push((nav_id, payload))
+                }
                 PageEvent::KeyEquivalentDone { token, claimed } => {
                     rustkit_viewhost::finish_key_equivalent(token, claimed);
                 }
@@ -1666,7 +1736,8 @@ fn stale(accepted: u64, event: &PageEvent) -> bool {
         | PageEvent::Url { nav_id, .. }
         | PageEvent::LoadState { nav_id, .. }
         | PageEvent::NavigateRequested { nav_id, .. }
-        | PageEvent::Ipc { nav_id, .. } => *nav_id,
+        | PageEvent::Ipc { nav_id, .. }
+        | PageEvent::InternalRead { nav_id, .. } => *nav_id,
         PageEvent::Commit(commit) => commit.nav_generation,
         PageEvent::Focused(_)
         | PageEvent::TextFocused(_)
@@ -3099,5 +3170,202 @@ window.go = function () {\
         let (view, _requests, _mark) = spin_and_stop();
         let _ = wake_while(&view, Duration::from_secs(1), |_| false);
         assert!(green_frame(&view), "the frame after the stop does not draw the page");
+    }
+
+    /// The browser's own `hiwave://` pages open from its UI only. Each way a
+    /// page can start a navigation, to `hiwave://report`: what the page asks
+    /// the window for goes to the app's handler as the event loop sends it
+    /// (`NavInitiator::Page`), and the tab keeps its page, as Chrome keeps
+    /// a page for each of these with `chrome://settings`.
+    mod internal_nav {
+        use super::*;
+        use crate::internal_nav_tests::{active_tab_url, state_with_tab, RecordingChrome};
+        use crate::{navigate_content, NavInitiator, NavOutcome};
+
+        /// What the page asked the window to load within `wait`, taken as
+        /// the event loop takes it.
+        fn requested(view: &RustKitView, wait: Duration) -> Option<String> {
+            let deadline = Instant::now() + wait;
+            loop {
+                wake(view);
+                if let Some((url, _)) = view.take_script_navigation() {
+                    return Some(url);
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        /// Load `body` (it shows `stay-marker`), run `act`, and hand what the
+        /// page asks for to the app as a page-started navigation. With
+        /// `reaches_app` the page's request must reach the app (so the
+        /// app's check is what keeps the page); without, the engine itself
+        /// sends nothing: `location`, a scripted `click()` and a meta
+        /// refresh request http(s) URLs only (`web_history.js`), and the
+        /// app's check stands behind that.
+        fn page_stays(body: &'static str, act: impl Fn(&RustKitView), reaches_app: bool) {
+            let view = content_view();
+            let (base, log) = logging_server(body);
+            load_and_settle(&view, &base);
+            let (state, _dir) = state_with_tab(&base);
+            let chrome = RecordingChrome::default();
+            act(&view);
+            let asked = requested(&view, Duration::from_secs(2));
+            if reaches_app {
+                assert!(
+                    asked.as_deref().is_some_and(|u| u.to_ascii_lowercase().starts_with("hiwave:")),
+                    "the page's request did not reach the app: {asked:?}"
+                );
+            } else {
+                assert_eq!(asked, None, "the page's request reached the app");
+            }
+            if let Some(url) = asked {
+                let outcome = navigate_content(url.clone(), NavInitiator::Page, &state, &view, &chrome);
+                assert_eq!(outcome, NavOutcome::Refused, "{url} was followed");
+            }
+            // Anything the handler started has had time to land.
+            assert_eq!(requested(&view, Duration::from_millis(500)), None, "a second request");
+            assert!(read(&view, "location.href").contains(&base), "the page left: {}", read(&view, "location.href"));
+            assert!(read(&view, "document.body.textContent").contains("stay-marker"), "the page's document was replaced");
+            assert_eq!(active_tab_url(&state), base, "the tab's URL changed");
+            assert!(!chrome.told_url(), "the address bar was told a new URL");
+            assert_eq!(log.lock().unwrap().len(), 1, "the page was loaded again");
+        }
+
+        fn script(js: &'static str) -> impl Fn(&RustKitView) {
+            move |view| {
+                let _ = read(view, &format!("{js}; 'ran'"));
+            }
+        }
+
+        #[test]
+        fn a_location_assignment_to_an_internal_page_is_refused() {
+            page_stays("<p>stay-marker</p>", script("location.href = 'hiwave://report'"), false);
+        }
+
+        #[test]
+        fn location_assign_to_an_internal_page_is_refused() {
+            page_stays("<p>stay-marker</p>", script("location.assign('hiwave://report')"), false);
+        }
+
+        #[test]
+        fn location_replace_to_an_internal_page_is_refused() {
+            page_stays("<p>stay-marker</p>", script("location.replace('hiwave://report')"), false);
+        }
+
+        #[test]
+        fn a_user_click_on_a_link_to_an_internal_page_is_refused() {
+            page_stays(
+                "<body style='margin:0'><a href='hiwave://report' style='display:block;height:100px'>stay-marker</a></body>",
+                |view| {
+                    view.mouse_down_at_point(10.0, 10.0);
+                    let _ = view.click_at_point(10.0, 10.0);
+                },
+                true,
+            );
+        }
+
+        #[test]
+        fn a_scripted_click_on_a_link_to_an_internal_page_is_refused() {
+            page_stays(
+                "<a id=a href='hiwave://report'>stay-marker</a>",
+                script("document.getElementById('a').click()"),
+                false,
+            );
+        }
+
+        #[test]
+        fn enter_in_a_form_that_submits_to_an_internal_page_is_refused() {
+            page_stays(
+                "<body style='margin:0'><form action='hiwave://report'><input id=f name=q value=x \
+style='width:200px;height:40px'></form><p>stay-marker</p></body>",
+                |view| {
+                    let _ = view.focus_at_point(20.0, 20.0);
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !view.has_focused_element() {
+                        assert!(Instant::now() < deadline, "the field never took focus");
+                        wake(view);
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    let _ = view.handle_text_key(0x0D, "\r", false, false, false);
+                },
+                true,
+            );
+        }
+
+        #[test]
+        fn form_submit_to_an_internal_page_is_refused() {
+            page_stays(
+                "<form id=f action='hiwave://report'><input name=q value=x></form><p>stay-marker</p>",
+                script("document.getElementById('f').submit()"),
+                true,
+            );
+        }
+
+        #[test]
+        fn a_meta_refresh_to_an_internal_page_is_refused() {
+            page_stays(
+                "<meta http-equiv=refresh content='0;url=hiwave://report'><p>stay-marker</p>",
+                |_| {},
+                false,
+            );
+        }
+
+        /// RustKit has no `window.open` yet; nothing reaches the app. The
+        /// WebKit fallback's new-window handler checks the same way.
+        #[test]
+        fn window_open_of_an_internal_page_opens_nothing() {
+            page_stays(
+                "<p>stay-marker</p>",
+                script("try { window.open && window.open('hiwave://report'); } catch (e) {}"),
+                false,
+            );
+        }
+
+        /// A frame's `src` is the engine's (a cross-origin `src` is not
+        /// fetched); it never becomes a navigation of the tab.
+        #[test]
+        fn an_iframe_of_an_internal_page_does_not_navigate_the_tab() {
+            page_stays("<iframe src='hiwave://report'></iframe><p>stay-marker</p>", |_| {}, false);
+        }
+
+        /// Chrome's console line for the refusal, in the page's console.
+        #[test]
+        fn the_refusal_is_logged_to_the_pages_console() {
+            let view = content_view();
+            let (base, _log) = logging_server("<p>stay-marker</p>");
+            load_and_settle(&view, &base);
+            let _ = view.devtools_ask(rustkit_engine::DevtoolsQuery::Attach(true));
+            let (state, _dir) = state_with_tab(&base);
+            let chrome = RecordingChrome::default();
+            let outcome = navigate_content("hiwave://report".into(), NavInitiator::Page, &state, &view, &chrome);
+            assert_eq!(outcome, NavOutcome::Refused);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                wake(&view);
+                let mut rx = view.devtools_ask(rustkit_engine::DevtoolsQuery::Console { since: 0 });
+                let answer = loop {
+                    match rx.try_recv() {
+                        Ok(answer) => break Some(answer),
+                        Err(oneshot::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(_) => break None,
+                    }
+                };
+                if let Some(rustkit_engine::DevtoolsAnswer::Console(console)) = answer {
+                    if let Some(entry) =
+                        console.entries.iter().find(|e| e.message.starts_with("Not allowed to load local resource"))
+                    {
+                        assert_eq!(entry.level, "error");
+                        return;
+                    }
+                }
+                assert!(Instant::now() < deadline, "no console line for the refused navigation");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 }

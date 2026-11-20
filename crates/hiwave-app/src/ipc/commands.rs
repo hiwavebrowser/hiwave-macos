@@ -863,9 +863,10 @@ fn handle_execute_command(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse
 
     // Return action to be performed by main event loop
     let action = match id {
+        // The new tab page, not about:blank (an empty page, as in Chrome).
         "new_tab" => Some(serde_json::json!({
             "action": "navigate",
-            "url": "about:blank"
+            "url": "hiwave://newtab"
         })),
         "close_tab" => {
             // Close the active tab
