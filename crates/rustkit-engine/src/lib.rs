@@ -45246,12 +45246,13 @@ document.currentScript.remove();
     }
 
     #[test]
-    fn a_script_too_large_for_the_budget_is_not_started() {
+    fn a_script_over_16_mib_is_not_started() {
         let page = r#"<html><head>
 <script src="/huge.js"></script>
 <script>var after = true;</script>
 </head><body>hi</body></html>"#;
-        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(MAX_PAGE_SCRIPT_BYTES / 11 + 1));
+        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(16 * 1024 * 1024 / 11 + 1));
+        assert!(huge.len() > 16 * 1024 * 1024);
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
             ("/huge.js", "text/javascript", huge),
@@ -45263,6 +45264,38 @@ document.currentScript.remove();
             "{log:#?}"
         );
         assert_eq!(engine.execute_script(view, "typeof huge").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+    }
+
+    /// A bundle the size of YouTube's `kevlar_base` (10.9 MB, one function
+    /// with thousands of variables) runs. Generated here, not the real one.
+    #[test]
+    fn a_youtube_sized_script_runs() {
+        let page = r#"<html><head>
+<script src="/big.js"></script>
+<script>var after = true;</script>
+</head><body>hi</body></html>"#;
+        let mut big = String::from("var big = (function () {\n");
+        for i in 0..9_000 {
+            big.push_str(&format!("  var v{i} = {i};\n"));
+        }
+        big.push_str("  function sum() { return v0 + v4500 + v8999; }\n");
+        let target = 10_900_000;
+        let line = "  // padding padding padding padding padding padding padding padding\n";
+        let tail = "  return sum();\n})();\n";
+        while big.len() + line.len() + tail.len() <= target {
+            big.push_str(line);
+        }
+        big.push_str(tail);
+        assert!(big.len() > 10_800_000 && big.len() <= target, "{}", big.len());
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/big.js", "text/javascript", big),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert!(matches!(log[0].outcome, ScriptOutcome::Ran), "{log:#?}");
+        assert_eq!(engine.execute_script(view, "big").unwrap(), "Number(13499.0)");
         assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
     }
 
