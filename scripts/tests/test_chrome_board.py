@@ -70,6 +70,7 @@ class TestChromeBoard(unittest.TestCase):
             path = Path(tmp) / "board.json"
             path.write_text(json.dumps(board), encoding="utf-8")
             loaded = chrome_board.load_board(path)
+            loaded["_dir"] = str(BOARD_PATH.parent)  # the real fixtures; only the html moved
             self.assertEqual(chrome_board.pages_not_shipped(loaded, REPO), ["inspector"])
             rows = chrome_board.plan(loaded, REPO, Path(tmp) / "work")
             self.assertEqual(sorted({r.page for r in rows}), ["chrome", "report", "settings", "shelf"])
