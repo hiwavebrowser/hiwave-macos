@@ -13,8 +13,9 @@ The board (scripts/realsite_board.py) records both sides of every site: RustKit'
   <side>-document.html   the main document that side received (after redirects)
 
 Secrets: whatever wrote the HAR (RustKit already leaves them out; Playwright's recordHar does not),
-`slim_har` drops the Cookie, Set-Cookie, Authorization and Proxy-Authorization headers, empties the
-request and response cookie arrays, and drops request POST bodies (`postData` keeps its mimeType).
+`slim_har` keeps only allow-listed request headers (REQUEST_HEADERS: accept, content-type, range,
+referer, user-agent, origin, sec-fetch-*, ...), drops the Cookie(2), Set-Cookie(2), Authorization
+and Proxy-Authorization response headers, empties the request and response cookie arrays, and drops request POST bodies (`postData` keeps its mimeType).
 Query strings and response bodies are kept whole: replay matches exact URLs and serves the bodies.
 Both browser contexts are fresh (no account), but the archive still holds per-visit identifiers the
 sites put in URLs and pages, so HARs belong in a non-git folder with short retention, not in git.
@@ -55,7 +56,21 @@ DEFAULT_CAP_MB = 50
 MEDIA_PREFIXES = ("image/", "video/", "audio/")
 # Small text that drives layout (viewBox-sized icons): kept like fonts, not dropped as media.
 KEPT_MEDIA = ("image/svg+xml",)
-SECRET_HEADERS = frozenset({"cookie", "set-cookie", "authorization", "proxy-authorization"})
+# Response headers never archived (replay serves the rest as recorded).
+SECRET_HEADERS = frozenset({"cookie", "cookie2", "set-cookie", "set-cookie2", "authorization",
+                            "proxy-authorization"})
+# Request headers archived: only what replay or a diagnosis needs. Every other request header
+# (x-csrf-token, x-api-key, x-amz-security-token, ...) goes, whatever it is called. Replay matches
+# on method + URL and does not need request headers at all. Mirrored in rustkit-net har.rs.
+REQUEST_HEADERS = frozenset({":method", ":path", ":authority", ":scheme", "host", "accept",
+                             "accept-language", "accept-encoding", "content-type", "range",
+                             "referer", "user-agent", "origin"})
+REQUEST_HEADER_PREFIXES = ("sec-fetch-",)
+
+
+def request_header_kept(name):
+    name = str(name).lower()
+    return name in REQUEST_HEADERS or name.startswith(REQUEST_HEADER_PREFIXES)
 DEFAULT_SERVER = (
     Path.home() / "Repos/.worktrees/handtest-runs/replay-tools-727/tools/replay/server.py"
 )
@@ -98,13 +113,17 @@ def is_media(mime, keep_images=False):
 
 
 def strip_secrets(entry):
-    """Drop cookie and authorization headers, the cookie arrays and the request's POST body."""
+    """Keep only allow-listed request headers, drop cookie and authorization response headers,
+    empty the cookie arrays and drop the request's POST body."""
     for part in ("request", "response"):
         msg = entry.get(part)
         if not isinstance(msg, dict):
             continue
-        msg["headers"] = [h for h in msg.get("headers") or []
-                          if str(h.get("name", "")).lower() not in SECRET_HEADERS]
+        if part == "request":
+            keep = lambda h: request_header_kept(h.get("name", ""))  # noqa: E731
+        else:
+            keep = lambda h: str(h.get("name", "")).lower() not in SECRET_HEADERS  # noqa: E731
+        msg["headers"] = [h for h in msg.get("headers") or [] if keep(h)]
         msg["cookies"] = []
     req = entry.get("request")
     if isinstance(req, dict) and "postData" in req:

@@ -32,8 +32,31 @@ struct Recording {
 
 static RECORDING: Mutex<Option<Recording>> = Mutex::new(None);
 
-/// Header names never written to a recording.
-const SECRET_HEADERS: &[&str] = &["cookie", "set-cookie", "authorization", "proxy-authorization"];
+/// Response header names never written to a recording (replay serves the rest as recorded).
+const SECRET_HEADERS: &[&str] =
+    &["cookie", "cookie2", "set-cookie", "set-cookie2", "authorization", "proxy-authorization"];
+/// The only request header names written to a recording: what replay or a diagnosis needs. Every
+/// other request header (`x-csrf-token`, `x-api-key`, ...) is left out whatever it is called;
+/// replay matches on method and URL. Mirrors `REQUEST_HEADERS` in scripts/realsite_har.py.
+const REQUEST_HEADERS: &[&str] = &[
+    ":method",
+    ":path",
+    ":authority",
+    ":scheme",
+    "host",
+    "accept",
+    "accept-language",
+    "accept-encoding",
+    "content-type",
+    "range",
+    "referer",
+    "user-agent",
+    "origin",
+];
+
+fn request_header_kept(name: &str) -> bool {
+    REQUEST_HEADERS.contains(&name) || name.starts_with("sec-fetch-")
+}
 /// Headers that describe the transfer, not the decoded body the recording keeps.
 const TRANSFER_HEADERS: &[&str] = &["content-encoding", "content-length", "transfer-encoding"];
 
@@ -100,12 +123,24 @@ pub fn write(path: &Path) -> io::Result<bool> {
     written.map_or(Ok(false), |r| r.map(|()| true))
 }
 
+/// Recorded request headers: the allow-list only.
+fn request_headers_json(headers: &HeaderMap) -> Vec<Value> {
+    headers
+        .iter()
+        .filter(|(name, _)| request_header_kept(name.as_str()))
+        .map(|(name, value)| {
+            json!({"name": name.as_str(), "value": String::from_utf8_lossy(value.as_bytes())})
+        })
+        .collect()
+}
+
+/// Recorded response headers: all but the secret and transfer ones.
 fn headers_json(headers: &HeaderMap, drop_transfer: bool) -> Vec<Value> {
     headers
         .iter()
         .filter(|(name, _)| {
             let name = name.as_str();
-            !SECRET_HEADERS.contains(&name) && !(drop_transfer && TRANSFER_HEADERS.contains(&name))
+            !(SECRET_HEADERS.contains(&name) || drop_transfer && TRANSFER_HEADERS.contains(&name))
         })
         .map(|(name, value)| {
             json!({"name": name.as_str(), "value": String::from_utf8_lossy(value.as_bytes())})
@@ -199,7 +234,7 @@ pub(crate) fn record(request: &Request, result: &Result<Response, NetError>, beg
     let Some(recording) = guard.as_mut() else { return };
     let ms = began.elapsed().as_secs_f64() * 1000.0;
     let method = request.method.as_str().to_string();
-    let request_headers = headers_json(&request.headers, false);
+    let request_headers = request_headers_json(&request.headers);
     // Each redirect hop: its URL, its status, and where it sent the request.
     let chain = &response.redirect_chain;
     for (i, (from, status)) in chain.iter().enumerate() {
@@ -248,6 +283,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_str(mime).unwrap());
         headers.insert("set-cookie", HeaderValue::from_static("sid=secret"));
+        headers.insert("set-cookie2", HeaderValue::from_static("sid2=secret"));
         headers.insert("content-encoding", HeaderValue::from_static("gzip"));
         headers.insert("x-kept", HeaderValue::from_static("yes"));
         Response::for_test(
@@ -273,6 +309,9 @@ mod tests {
         let mut request = Request::get(url::Url::parse("http://a.test/start").unwrap());
         request.headers.insert("cookie", HeaderValue::from_static("sid=secret"));
         request.headers.insert("accept", HeaderValue::from_static("text/html"));
+        request.headers.insert("x-csrf-token", HeaderValue::from_static("secret-csrf"));
+        request.headers.insert("x-api-key", HeaderValue::from_static("secret-key"));
+        request.headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         // Not recording: nothing kept.
         record(&request, &Ok(response("http://a.test/start", 200, "text/html", b"x", vec![])), Instant::now());
         assert!(snapshot().is_none());
@@ -315,6 +354,10 @@ mod tests {
         assert_eq!(entries[0]["response"]["headers"][0]["value"], "http://a.test/mid");
         assert_eq!(entries[1]["response"]["headers"][0]["value"], "http://a.test/final");
         assert_eq!(entries[2]["response"]["content"]["text"], "<p>hi</p>");
+        // Request headers: the allow-list only.
+        let names: Vec<&str> =
+            entries[2]["request"]["headers"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["accept", "sec-fetch-mode"]);
         // Media bodies are not kept: the entry stays with its size.
         let png = &entries[3]["response"]["content"];
         assert_eq!(png["_skipped"], "media");
@@ -335,7 +378,9 @@ mod tests {
         let path = dir.join("out.har");
         assert!(write(&path).unwrap());
         let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(back, har);
+        // Compared through the same text round trip: a parsed f64 `time` can differ by an ulp.
+        let expected: Value = serde_json::from_str(&har.to_string()).unwrap();
+        assert_eq!(back, expected);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
 
