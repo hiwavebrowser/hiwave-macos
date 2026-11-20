@@ -103,6 +103,41 @@
       "want": "a=0,0,400,20 f=0,50,100,80 e=0,130,150,40 n=0,170,400,10"
     },
     {
+      "label": "overflow hidden block with margin-left beside a left float",
+      "body": "<div id=f style=\"float:left;width:100px;height:80px\"></div><div id=e style=\"overflow:hidden;height:40px;margin-left:20px\"></div>",
+      "want": "f=0,0,100,80 e=100,0,300,40"
+    },
+    {
+      "label": "overflow hidden block with margin-left past a left float",
+      "body": "<div id=f style=\"float:left;width:100px;height:80px\"></div><div id=e style=\"overflow:hidden;height:40px;margin-left:150px\"></div>",
+      "want": "f=0,0,100,80 e=150,0,250,40"
+    },
+    {
+      "label": "overflow hidden block with margin-right beside a right float",
+      "body": "<div id=f style=\"float:right;width:100px;height:80px\"></div><div id=e style=\"overflow:hidden;height:40px;margin-right:20px\"></div>",
+      "want": "f=300,0,100,80 e=0,0,300,40"
+    },
+    {
+      "label": "img margin 0 auto beside a left float",
+      "body": "<div id=f style=\"float:left;width:100px;height:80px\"></div><img id=e style=\"display:block;width:150px;height:40px;margin:0 auto\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\">",
+      "want": "f=0,0,100,80 e=175,0,150,40"
+    },
+    {
+      "label": "img negative margin-left beside a right float",
+      "body": "<div id=f style=\"float:right;width:100px;height:80px\"></div><img id=e style=\"display:block;width:150px;height:40px;margin-left:-20px\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\">",
+      "want": "f=300,0,100,80 e=0,0,150,40"
+    },
+    {
+      "label": "img negative margin-left moved below a left float",
+      "body": "<div id=f style=\"float:left;width:100px;height:80px\"></div><img id=e style=\"display:block;width:350px;height:40px;margin-left:-20px\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\">",
+      "want": "f=0,0,100,80 e=-20,80,350,40"
+    },
+    {
+      "label": "inline img with clear beside a float",
+      "body": "<div id=f style=\"float:left;width:100px;height:80px\"></div><div id=w>text <img id=e style=\"clear:both;width:20px;height:20px;vertical-align:top\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\"> more</div>",
+      "want": "f=0,0,100,80 w=0,0,400,20 e=128,0,20,20"
+    },
+    {
       "label": "img block float:left after a block img",
       "body": "<img id=e style=\"display:block;width:50px;height:20px;margin-bottom:15px\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\"><img id=g style=\"float:left;width:50px;height:20px;margin-top:5px\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEklEQVR4nGP4z8CAB+GTG8HSALfKY52fTcuYAAAAAElFTkSuQmCC\"><div id=n style=\"height:10px\"></div>",
       "want": "e=0,0,50,20 g=0,40,50,20 n=0,35,400,10"

@@ -42,6 +42,14 @@ const CASES = [
   ['plain block still overlaps the float (control)', `${L}<div id=e style="height:40px"></div>`],
   ['img block margin-top after a margined div, beside a float', `<div id=a style="height:20px;margin-bottom:30px"></div>${L}${IMG('width:150px;height:40px;margin-top:12px')}${N}`],
   ['img block with clear:left after a float', `<div id=a style="height:20px;margin-bottom:30px"></div>${L}${IMG('width:150px;height:40px;margin-top:12px;clear:left')}${N}`],
+  // R1 (#1356): margins of float-avoiding boxes.
+  ['overflow hidden block with margin-left beside a left float', `${L}<div id=e style="overflow:hidden;height:40px;margin-left:20px"></div>`],
+  ['overflow hidden block with margin-left past a left float', `${L}<div id=e style="overflow:hidden;height:40px;margin-left:150px"></div>`],
+  ['overflow hidden block with margin-right beside a right float', `${R}<div id=e style="overflow:hidden;height:40px;margin-right:20px"></div>`],
+  ['img margin 0 auto beside a left float', `${L}${IMG('width:150px;height:40px;margin:0 auto')}`],
+  ['img negative margin-left beside a right float', `${R}${IMG('width:150px;height:40px;margin-left:-20px')}`],
+  ['img negative margin-left moved below a left float', `${L}${IMG('width:350px;height:40px;margin-left:-20px')}`],
+  ['inline img with clear beside a float', `${L}<div id=w>text <img id=e style="clear:both;width:20px;height:20px;vertical-align:top" src="${PNG}"> more</div>`],
   ['img block float:left after a block img', `${IMG('width:50px;height:20px;margin-bottom:15px')}<img id=g style="float:left;width:50px;height:20px;margin-top:5px" src="${PNG}">${N}`],
 ];
 
