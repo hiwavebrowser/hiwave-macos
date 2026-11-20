@@ -225,6 +225,26 @@
     }
 
     // ---- delivery
+    // A frame's resize observations come after its animation frame callbacks (HTML update the
+    // rendering), so a size change seen while a frame callback is asked for is reported once
+    // that frame's round has run, not in the task that made it: script that asks for a frame
+    // from its callback (Chart.js's `throttled` resize) gets the frame after that round, as in
+    // Chrome 148 (REPORT-CHART-0x0, `report_chart_resize_cft148.json`). Reported earlier,
+    // Chart.js's resize landed while its animator's frame was still owed and was dropped.
+    // `resizeWait` is the round count the observations wait to see pass (-1: none).
+    var resizeWait = -1;
+    function resizeDue() {
+        if (typeof __rk.framePending !== 'function' || typeof __rk.frameRounds !== 'function') return true;
+        var pending = __rk.framePending();
+        if (resizeWait >= 0) {
+            // That round has run, or the frame it waited for was cancelled.
+            if (__rk.frameRounds() !== resizeWait || !pending) { resizeWait = -1; return true; }
+            return false;
+        }
+        if (!pending) return true;
+        resizeWait = __rk.frameRounds();
+        return false;
+    }
     var ticking = false;
     function tick() {
         if (ticking) return 0;
@@ -232,8 +252,11 @@
         try {
             // A callback can observe more or change layout-independent state;
             // what it changes is seen by the next tick, not this one.
+            var sizes = null;
             observers.slice().forEach(function (o) {
-                if (o instanceof IntersectionObserver) observeIntersections(o); else observeSizes(o);
+                if (o instanceof IntersectionObserver) { observeIntersections(o); return; }
+                if (sizes === null) sizes = resizeDue();
+                if (sizes) observeSizes(o);
             });
             observers.slice().forEach(function (o) {
                 if (!o._queue.length) return;

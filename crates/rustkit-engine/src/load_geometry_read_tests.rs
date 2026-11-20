@@ -11,6 +11,11 @@
 //! resizes from a ResizeObserver callback through `requestAnimationFrame`.
 //! That frame callback runs on the live loop's next turn, which the board's
 //! `--html-file` capture never turns. The last test pins the pattern.
+//!
+//! REPORT-CHART-0x0 found the second half: with the live loop turned, the
+//! first chart still stayed 0x0, because the ResizeObserver record came in
+//! the task that showed the box, before the frame Chart.js's animator had
+//! already asked for (the last two tests, against Chrome 148).
 
 use super::*;
 use crate::script_net_tests::serve_routes;

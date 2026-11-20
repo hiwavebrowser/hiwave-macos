@@ -517,7 +517,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "canvasCall", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
-    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
@@ -629,6 +629,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
+        // How many animation-frame rounds have run callbacks (`__rk.frameRounds`): a resize
+        // observation made while a frame is asked for waits for the next one (REPORT-CHART-0x0).
+        Q.rounds = 0;
         // The grid time of the frame whose callbacks run (its timestamp's time, below).
         Q.frameDue = 0;
         // A frame tree's turn (`__rk.treeTurn`): while one is open, the grid time of the frame
@@ -1063,6 +1066,7 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // One frame: its time is the latest grid point among its callbacks.
         if (latest >= 0) Q.frameDue = latest;
         if (latest >= 0 && Q.roundAt === -1) Q.roundAt = latest;
+        var before = ran;
         for (var j = 0; j < due && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
             var at = slotOf(round[j]);
@@ -1071,8 +1075,18 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             ran++;
             runFrame(round[j]);
         }
+        if (ran > before) Q.rounds = (Q.rounds | 0) + 1;
         return ran;
     }
+    // REPORT-CHART-0x0: HTML's update the rendering runs a frame's animation frame callbacks
+    // before it gathers and broadcasts resize observations, so an observation made while a frame
+    // callback is asked for is delivered after that frame's callbacks (web_observers_live.js).
+    // How many rounds have run callbacks, and whether a frame callback is asked for now.
+    __rk.frameRounds = function () { return Q.rounds | 0; };
+    __rk.framePending = function () {
+        for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
+        return false;
+    };
     __rk.runTimers = function (horizon, max) {
         Q.realTurn = false;
         return runTimers(horizon, max, false);
