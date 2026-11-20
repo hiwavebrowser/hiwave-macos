@@ -44,7 +44,7 @@ class TestReceiptNoHostPaths(unittest.TestCase):
         self.campaign = self.outside / "parity_test_results.json"
         self.campaign.write_text(json.dumps({"results": [{"pixel": {"diffPercent": 1.5}}], "passed": 1, "failed": 0}))
         self.run_file = self.outside / "ab_table.txt"
-        self.run_file.write_text("row\n")
+        self.run_file.write_bytes(b"row\n")  # 4 bytes on every OS (text mode writes \r\n on Windows)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -292,9 +292,10 @@ class TestReceiptNoHostPaths(unittest.TestCase):
             self.assertEqual(receipt.public_text(t, REPO), want)
         out = run_receipt("--note", f"bins at {self.outside / 'My Documents' / 'parity-capture'}")
         self.assert_clean(out)
+        # The part after the space is not a path on its own, so it keeps this OS's separator.
         self.assertEqual(
             json.loads(out)["note"],
-            "bins at My Documents/parity-capture",
+            "bins at My Documents" + os.sep + "parity-capture",
         )
 
     def test_a_schemeless_wiki_path_in_the_note_is_shortened_to_its_basename(self):
