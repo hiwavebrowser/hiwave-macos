@@ -55,7 +55,9 @@ struct Args {
     dump_scripts: Option<String>,
 
     /// Output path for a HAR 1.2 recording of every response the loader answered (decoded bodies;
-    /// no cookie or authorization values), written also when the capture times out
+    /// image, video and audio bodies left out, SVG kept, images kept with
+    /// REALSITE_HAR_KEEP_IMAGES=1; no cookie or authorization values), written also when the
+    /// capture times out
     /// (QB-ARCHIVE-INPUT: the real-site board archives it to replay a site offline).
     #[arg(long)]
     dump_har: Option<String>,
@@ -892,7 +894,9 @@ fn main() {
         .init();
 
     if args.dump_har.is_some() {
-        rustkit_net::har::start_recording();
+        // Image bodies only on request (the board's opt-in); video and audio never.
+        let keep_images = std::env::var("REALSITE_HAR_KEEP_IMAGES").is_ok_and(|v| v == "1");
+        rustkit_net::har::start_recording(keep_images);
     }
 
     // Hard wall-clock limit. A live page can stall the engine anywhere
@@ -959,10 +963,8 @@ fn main() {
 
 /// `--dump-har`: the loader's recording so far, written to `path` (QB-ARCHIVE-INPUT).
 fn write_har(path: Option<&str>) {
-    let (Some(path), Some(har)) = (path, rustkit_net::har::snapshot()) else {
-        return;
-    };
-    if let Err(e) = fs::write(path, har.to_string()) {
+    let Some(path) = path else { return };
+    if let Err(e) = rustkit_net::har::write(std::path::Path::new(path)) {
         error!("Failed to write HAR: {:?}", e);
     }
 }
