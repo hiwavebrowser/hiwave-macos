@@ -246,6 +246,12 @@ attributes:
 
 So every frame is an IOSurface-backed BGRA buffer.
 
+**As built in step 3 (2026-11-19):** in the app the presenter runs on the window
+thread, which is the main thread, so the pull below happens at the engine's frame tick
+on the content thread instead (still never on the main thread). The tick copies the
+frame to RGBA and posts it under the video's key; the presenter only uploads it. The key
+names the player too (`rustkit-video:<node>@<player>`), so two views never share one.
+
 **Per present, for each playing video, on the present side (off the main thread, §3.2):**
 
 1. `itemTimeForHostTime(CACurrentMediaTime())` gives the item time to show now.

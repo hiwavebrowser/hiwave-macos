@@ -6405,6 +6405,12 @@ impl LayoutBox {
         start_y: f32,
     ) -> f32 {
         let mb = child.dimensions.margin_box();
+        // CSS 2.1 §9.5.2: a float with `clear` goes below the floats it clears.
+        let start_y = if child.clear == Clear::None {
+            start_y
+        } else {
+            start_y.max(floats.clear(child.clear))
+        };
         let (fx, fy) = floats.find_float_position(
             child.float,
             mb.width,
@@ -6547,6 +6553,72 @@ impl LayoutBox {
         }
     }
 
+    /// CSS 2.1 §9.5: an in-flow box whose border box must not overlap the margin
+    /// box of a float in its formatting context: a block-level replaced element, a
+    /// table, or a block that establishes a new block formatting context (including
+    /// `display: flow-root`, which `establishes_bfc` leaves to collapse-through).
+    fn avoids_floats(child: &LayoutBox) -> bool {
+        if child.float != Float::None || matches!(child.position, Position::Absolute | Position::Fixed) {
+            return false;
+        }
+        match child.box_type {
+            BoxType::Image { .. } => {
+                !matches!(child.style.display, rustkit_css::Display::Inline)
+                    && !child.style.display.is_atomic_inline()
+            }
+            BoxType::Block => {
+                crate::margin_collapse::establishes_bfc(&child.style, child.float)
+                    || child.style.display_modifier == rustkit_css::DisplayModifier::FlowRoot
+            }
+            _ => false,
+        }
+    }
+
+    /// CSS 2.1 §9.5 (row REPLACED-FLOAT-AVOID): after `child` is laid out at the flow
+    /// cursor (and cleared), put its border box where it overlaps no float of
+    /// `floats`: down to the first band, over its whole height, at least as wide as
+    /// its border box, then at the start of that band. Its own margins may lie over a
+    /// float: a fixed start margin places the border box no earlier than it would sit
+    /// with no float (Chrome 148: `margin-left: 20px` beside a 100px float sits at
+    /// 100), and an auto start margin takes what the band leaves. Returns the
+    /// vertical shift.
+    fn place_beside_floats(child: &mut LayoutBox, floats: &FloatContext, container: &Dimensions) -> f32 {
+        if floats.is_empty() || !Self::avoids_floats(child) {
+            return 0.0;
+        }
+        let content = container.content;
+        let bb = child.dimensions.border_box();
+        let mut y = bb.y - content.y;
+        let (left, band) = Self::fitting_band(floats, &mut y, bb.width, bb.height.max(1.0), content.width);
+        let dy = y - (bb.y - content.y);
+        let margin = child.dimensions.margin;
+        let auto_start = matches!(child.style.margin_left, Length::Auto);
+        let auto_end = matches!(child.style.margin_right, Length::Auto);
+        // Whether a float narrows the band the box ends up in.
+        let narrowed = band < content.width - 0.01 || left > 0.01;
+        let x = if !narrowed && dy <= 0.001 {
+            // No float beside it where it was laid out: where its own layout put it.
+            bb.x - content.x
+        } else if auto_start && auto_end {
+            left + ((band - bb.width) / 2.0).max(0.0)
+        } else if auto_start {
+            left + (band - bb.width - margin.right.max(0.0)).max(0.0)
+        } else if narrowed {
+            // Beside a float a start margin may lie over it, never push the box
+            // before the band (Chrome 148: margin-left -20 beside a right float
+            // sits at 0).
+            left.max(margin.left)
+        } else {
+            // Moved below every float: its own margin, negative too (Chrome: -20).
+            margin.left
+        };
+        let dx = content.x + x - bb.x;
+        if dx.abs() > 0.001 || dy > 0.001 {
+            crate::flex::translate_subtree(child, dx, dy);
+        }
+        dy
+    }
+
     /// CSS 2.1 §9.5: a block that establishes a formatting context
     /// (overflow other than visible, flex, grid) must not overlap the
     /// floats beside it; it is laid out in the band they leave free.
@@ -6558,15 +6630,28 @@ impl LayoutBox {
     ) {
         if floats.is_empty()
             || !matches!(child.box_type, BoxType::Block)
-            || !crate::margin_collapse::establishes_bfc(&child.style, child.float)
+            || !Self::avoids_floats(child)
         {
             return;
         }
         let width = cb.content.width;
         let (left, right) = floats.available_width(cursor_y, width);
         if left > 0.0 || right < width {
-            cb.content.x += left;
-            cb.content.width = (right - left).max(0.0);
+            // The box's own margins may lie over the floats: only the part of a
+            // float that reaches past a margin narrows it (Chrome 148: margin-left
+            // 20 beside a 100px float is 100/300, margin-left 150 is 150/250). The
+            // containing block is the band widened by the margins the floats cover,
+            // so the margins laid out inside it put the border box at
+            // `max(band start, margin)`. An auto margin counts as 0 here.
+            let margin = |m: &Length| match m {
+                Length::Auto => 0.0,
+                m => child.length_to_px(m, width),
+            };
+            let (ml, mr) = (margin(&child.style.margin_left), margin(&child.style.margin_right));
+            let start = left.max(ml) - ml;
+            let end = right.min(width - mr) + mr;
+            cb.content.x += start;
+            cb.content.width = (end - start).max(0.0);
         }
     }
 
@@ -7117,6 +7202,7 @@ impl LayoutBox {
                     );
                 }
                 cursor_y += Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                cursor_y += Self::place_beside_floats(child, &floats, &self.dimensions);
                 if let Some(f) = child.context_floats.take() {
                     floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
                 }
@@ -8237,8 +8323,10 @@ impl LayoutBox {
                     );
                 }
                 // cursor_y below is read from the child's border box, so the
-                // clearance shift carries into the flow.
+                // clearance shift carries into the flow; so does the move down that
+                // keeps a float-avoiding box off the floats (§9.5).
                 Self::apply_clearance(child, &mut floats, self.dimensions.content.y);
+                Self::place_beside_floats(child, &floats, &self.dimensions);
                 if let Some(f) = child.context_floats.take() {
                     floats = f.translated(-self.dimensions.content.x, -self.dimensions.content.y);
                 }
