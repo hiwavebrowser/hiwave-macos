@@ -4378,6 +4378,41 @@ mod tests {
         }
     }
 
+    /// A character the primary face lacks and the emoji path does not take is
+    /// drawn from the face DirectWrite's system font fallback maps it to, as
+    /// Chrome does: Chrome for Testing 148.0.7778.216 win64 draws U+25BE / U+25B8
+    /// / U+21BB (the chrome page's workspace expander and reload) from Cambria
+    /// Math (CSS.getPlatformFontsForNode). Under a Segoe UI primary its advance
+    /// is 10.00 at 12px, 8.36 at 10px, 13.00 at 16px (RustKit took Segoe UI's
+    /// .notdef: 7.75, 6.46, 10.33), and its rounded typo extents (USE_TYPO_METRICS)
+    /// lift the `normal` line: 12px 16 -> 17, 10px 14 -> 14, 16px 21 -> 23.
+    #[cfg(windows)]
+    #[test]
+    fn a_missing_glyph_outside_the_emoji_path_takes_the_system_fallback_face() {
+        use rustkit_text::GlyphFace;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Segoe UI");
+        let run = |t: &str, size: f32| {
+            shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, size)
+                .unwrap()
+        };
+        for (text, size, width, line) in [
+            ("\u{25BE}", 12.0, 10.0, 17.0),
+            ("\u{25B8}", 12.0, 10.0, 17.0),
+            ("\u{25BE}", 10.0, 8.36, 14.0),
+            ("\u{21BB}", 16.0, 13.0, 23.0),
+        ] {
+            let shaped = run(text, size);
+            let w = shaped.metrics.width;
+            assert!((w - width).abs() < 0.02, "{text:?} at {size}px: RustKit {w}, Chrome {width}");
+            assert_eq!(shaped.glyphs[0].face, GlyphFace::Fallback { emoji: false }, "{text:?}");
+            let m = &shaped.metrics;
+            let got = (m.ascent + m.descent + m.leading).round();
+            assert_eq!(got, line, "{text:?} at {size}px line");
+        }
+    }
+
     #[test]
     fn test_wrap_text_multiple_lines() {
         let shaper = TextShaper::new();
