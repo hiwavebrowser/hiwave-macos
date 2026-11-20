@@ -720,6 +720,8 @@ mod css_transitions_visibility_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_property_tests;
 #[cfg(all(test, feature = "headless"))]
+mod registered_transition_fastpath_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_lists_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_grid_tests;
