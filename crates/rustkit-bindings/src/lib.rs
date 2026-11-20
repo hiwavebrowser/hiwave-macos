@@ -517,11 +517,11 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "canvasCall", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
-    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "hasCtor", "historyReset",
+    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
     "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
-    "now", "observersTick", "perfNow", "pickOption", "realTop", "runTimers", "runTimersFramed", "scrollToFragment",
+    "now", "observersTick", "pendingFrameRound", "perfNow", "pickOption", "realTop", "resizeHeld", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
     "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
     "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
@@ -629,6 +629,10 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
+        // How many animation frames have run callbacks (`__rk.frameRounds`, counted in `ranFrame`):
+        // a resize observation made while a frame is asked for waits for the next one
+        // (REPORT-CHART-0x0).
+        Q.rounds = 0;
         // The grid time of the frame whose callbacks run (its timestamp's time, below).
         Q.frameDue = 0;
         // A frame tree's turn (`__rk.treeTurn`): while one is open, the grid time of the frame
@@ -836,7 +840,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var k = Q.frameK + 1, c = gridAtOrBefore(Q.now);
         return c > k ? c : k;
     }
-    function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
+    // A callback of a frame after the last one run starts that frame's round (`Q.rounds`), from a
+    // turn's round or from the load's timers alike (#1361 R1: the load's frames counted none, and
+    // a resize observation held for a frame under an endless loop was never delivered).
+    function ranFrame(timer) {
+        if (timer.k > Q.frameK) { Q.frameK = timer.k; Q.rounds = (Q.rounds | 0) + 1; }
+    }
     function runFrame(timer) {
         ranFrame(timer);
         Q.inFrame = true;
@@ -1085,6 +1094,42 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         }
         return ran;
     }
+    // REPORT-CHART-0x0: HTML's update the rendering runs a frame's animation frame callbacks
+    // before it gathers and broadcasts resize observations, so an observation made while a frame
+    // callback is asked for is delivered after that frame's callbacks (web_observers_live.js).
+    // How many frames have run callbacks, and whether a frame callback is asked for now. The
+    // queue is the frame tree's, so a frame's loop holds the top document's observations too:
+    // Chrome's rendering update runs every document's frame callbacks before any document's
+    // resize observations (`report_chart_resize_cft148.json` `iframe`: "F1 ro=800x300 F2 F3").
+    __rk.frameRounds = function () { return Q.rounds | 0; };
+    // The frame a held resize observation waits for, run now as one round: the callbacks asked
+    // for so far (not those they ask for), in order, at the frame time of the latest of them.
+    // The clock does not move. For a host that takes the page with no turn to come (the end of
+    // a load, a capture after its actions: `Engine::run_held_observation_frame`), so the
+    // observation still comes after the frame's callbacks, as in Chrome (#1361 R1).
+    __rk.pendingFrameRound = function (max) {
+        var round = objCreate(null), due = 0, latest = -1, ran = 0;
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame) {
+                round[due++] = timers[i];
+                if (timers[i].due > latest) latest = timers[i].due;
+            }
+        }
+        if (latest >= 0) Q.frameDue = latest;
+        Q.inFrame = false;
+        for (var j = 0; j < due && ran < max; j++) {
+            var at = slotOf(round[j]);
+            if (at < 0) continue;
+            removeAt(at);
+            ran++;
+            runFrame(round[j]);
+        }
+        return ran;
+    };
+    __rk.framePending = function () {
+        for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
+        return false;
+    };
     __rk.runTimers = function (horizon, max) {
         Q.realTurn = false;
         return runTimers(horizon, max, false);
@@ -3178,6 +3223,15 @@ impl DomBindings {
             Ok(JsValue::Number(n)) if n >= 0.0 => n as usize,
             _ => 0,
         }
+    }
+
+    /// Whether a resize observation is held for an animation frame (REPORT-CHART-0x0): it is
+    /// delivered after that frame's callbacks.
+    pub fn resize_held(&self) -> bool {
+        matches!(
+            self.host_turn("return typeof __rk.resizeHeld === 'function' && __rk.resizeHeld();", &[]),
+            Ok(JsValue::Boolean(true))
+        )
     }
 
     /// Tell the page its window was scrolled by the user: fires `scroll`.

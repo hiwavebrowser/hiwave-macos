@@ -155,6 +155,32 @@ class TestChromeBoard(unittest.TestCase):
             self.assertIn("hover_tab2", seen_states)
             self.assertIn("focus_mode", seen_states)
 
+    # REPORT-CHART-0x0: a page whose script resizes from a ResizeObserver through an animation
+    # frame (report.html's charts) needs RustKit's live loop after the load and after the actions,
+    # long enough for Chart.js's 1 s animation to finish. A page's `live_ms` asks for it; a page
+    # without one turns none. report.html's is 1500 (with #1365, Chrome's arm draws the charts).
+    def test_a_page_with_live_ms_turns_the_live_loop_after_the_load_and_the_actions(self):
+        from scripts import chrome_board
+
+        board = json.loads(BOARD_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(board["pages"]["report"].get("live_ms"), 1500)
+        board["pages"]["report"]["live_ms"] = 100
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "board.json"
+            path.write_text(json.dumps(board), encoding="utf-8")
+            board_dir = Path(chrome_board.load_board(BOARD_PATH)["_dir"])
+            loaded = chrome_board.load_board(path)
+            loaded["_dir"] = str(board_dir)
+            rows = chrome_board.plan(loaded, REPO, Path(tmp) / "work")
+            for row in rows:
+                rustkit = chrome_board.rustkit_command(row, Path("/bin/parity-capture"))
+                if row.page == "report":
+                    self.assertEqual(rustkit[rustkit.index("--live-ms") + 1], "100", row.case_id)
+                    self.assertEqual(rustkit[rustkit.index("--actions-live-ms") + 1], "100", row.case_id)
+                else:
+                    self.assertNotIn("--live-ms", rustkit, row.case_id)
+                    self.assertNotIn("--actions-live-ms", rustkit, row.case_id)
+
     def test_the_composed_page_carries_the_stub_before_and_the_fixture_after_the_page_script(self):
         from scripts import chrome_board
 

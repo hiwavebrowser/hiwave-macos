@@ -6669,6 +6669,10 @@ impl Engine {
             return Ok(());
         }
         self.scroll_to_loaded_fragment(id);
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         let view = self
             .views
             .get_mut(&id)
@@ -10959,6 +10963,10 @@ impl Engine {
         }
         self.scroll_to_loaded_fragment(id);
 
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         // Finish navigation
         let view = self
             .views
@@ -11201,6 +11209,10 @@ impl Engine {
         }
         self.flush_script_dom_writes(id, None)?;
 
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         // Finish navigation
         let view = self
             .views
@@ -26842,6 +26854,29 @@ impl Engine {
     #[doc(hidden)]
     pub fn execute_as_page_script(&mut self, id: EngineViewId, script: &str) -> Result<String, EngineError> {
         self.script_turn(id, |bindings| bindings.evaluate_as_page_script(script))
+    }
+
+    /// A resize observation held for an animation frame (REPORT-CHART-0x0: Chrome runs the
+    /// frame's callbacks first) when no turn is to come: run that frame's callbacks as one round,
+    /// then the turn's observer tick delivers it, in Chrome's order. The engine does it once at
+    /// the end of every load (a load runs no frame of its own, so a load-only capture, an MCP
+    /// render or a smoke frame would never get it), and a capture does it again after its
+    /// actions. Nothing held, nothing run: a page with no held observation gets no frame here.
+    pub fn run_held_observation_frame(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let held = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .is_some_and(|b| b.resize_held());
+        if !held {
+            return Ok(());
+        }
+        self.execute_host_turn(
+            id,
+            &format!("return __rk.pendingFrameRound({MAX_LIVE_TIMER_CALLBACKS});"),
+            &[],
+        )
+        .map(|_| ())
     }
 
     /// [`Self::execute_script`] for one of the engine's own entry points:

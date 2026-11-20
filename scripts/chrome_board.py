@@ -194,6 +194,9 @@ class Row:
     actions_path: Path
     out_dir: Path
     actions: List[Dict[str, Any]] = field(default_factory=list)
+    # The page's `live_ms` (board.json): RustKit turns its live loop this long after the load and
+    # again after the actions, as the Chromium arm waits SETTLE_MS at both points. None: no turn.
+    live_ms: Optional[int] = None
 
     @property
     def size(self) -> str:
@@ -302,6 +305,7 @@ def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str]
                     page=page, state=state, width=int(width), height=int(height),
                     html_path=html_path, actions_path=actions_path,
                     out_dir=work / page / state / f"{width}x{height}", actions=actions,
+                    live_ms=int(spec["live_ms"]) if spec.get("live_ms") is not None else None,
                 ))
     return rows
 
@@ -328,7 +332,7 @@ def rustkit_command(row: Row, binary: Path) -> List[str]:
         "--actions-out-dir", str(row.out_dir),
         "--dump-frame", str(row.out_dir / "rustkit.ppm"),
         "--dump-layout", str(row.out_dir / "rustkit-layout.json"),
-    ]
+    ] + ([] if row.live_ms is None else ["--live-ms", str(row.live_ms), "--actions-live-ms", str(row.live_ms)])
 
 
 def _run(cmd: List[str], timeout: int, cwd: Path = REPO_ROOT) -> Dict[str, Any]:

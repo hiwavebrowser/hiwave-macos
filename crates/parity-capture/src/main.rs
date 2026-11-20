@@ -126,6 +126,15 @@ struct Args {
     #[arg(long)]
     live_ms: Option<u64>,
 
+    /// After `--actions`, turn the live loop for this many milliseconds of
+    /// real time, as the chrome board's Chromium arm waits after its
+    /// actions (`chrome_board.mjs` SETTLE_MS): what an action started (a
+    /// click's request answered in a microtask, a chart resized from a
+    /// ResizeObserver through an animation frame) gets its frames. Off by
+    /// default: the actions' state is taken as they leave it.
+    #[arg(long)]
+    actions_live_ms: Option<u64>,
+
     /// Pace `--live-ms` as the app's window thread does with the content thread off
     /// (`HIWAVE_CONTENT_THREAD=0`, `hiwave-app` `process_events`): every wait for a timer or a request
     /// at least as long as the last turn took, so after one long turn the next frame waits as long
@@ -1281,6 +1290,25 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             args.actions_out_dir.as_deref(),
             &mut result,
         );
+        // What the actions left held for a frame, before the settle or the frame (#1361 R1).
+        if let Err(e) = engine.run_held_observation_frame(view_id) {
+            error!("Failed to run the held resize observation's frame: {:?}", e);
+        }
+        if let Some(live_ms) = args.actions_live_ms {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => return result.failed("error", format!("Failed to create runtime: {}", e)),
+            };
+            run_live(&rt, &mut engine, view_id, live_ms, LivePacing::of(args));
+        }
+    }
+
+    // The page as it stands, with no turn to come: a resize observation held for a frame (an
+    // action showed a box while a frame was asked for) gets that frame, then is delivered, as
+    // the next rendering update would (#1361 R1). The engine already did it at the end of the
+    // load; with nothing held this runs nothing.
+    if let Err(e) = engine.run_held_observation_frame(view_id) {
+        error!("Failed to run the held resize observation's frame: {:?}", e);
     }
 
     // Render final view
@@ -2452,6 +2480,12 @@ mod tests {
         let too_large = log_of(&big);
         let failed = inline_script_failure(&too_large).expect("a too-large inline script fails the capture");
         assert!(matches!(failed.outcome, ScriptOutcome::Skipped(why) if why.starts_with("too large")), "{too_large:?}");
+    }
+
+    #[test]
+    fn actions_live_ms_is_off_unless_given() {
+        assert_eq!(parsed(&[]).actions_live_ms, None);
+        assert_eq!(parsed(&["--actions-live-ms", "100"]).actions_live_ms, Some(100));
     }
 
     #[test]
