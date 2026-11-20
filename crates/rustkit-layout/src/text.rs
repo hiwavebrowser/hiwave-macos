@@ -699,6 +699,12 @@ impl GlyphRun {
 /// primary face's gap never rides on top of a taller fallback face, and the united run then carries
 /// no gap of its own. Shared by every platform shaper; each collects its fallback faces' extents
 /// its own way.
+///
+/// Several fallback faces fold one at a time: the united run has no gap, so
+/// `unite(unite(p, f1), f2)` is the max over every face of its ascent (and descent) plus its own
+/// half-gap. Folding the faces' raw extents together first (the max ascent with the max gap of
+/// any face) is not the same when their gaps differ: that pairs one face's ascent with another
+/// face's gap.
 pub fn unite_fallback_extents(
     primary: (f32, f32, f32),
     fallback: (f32, f32, f32),
@@ -3229,8 +3235,10 @@ mod tests {
 
     #[test]
     fn a_fallback_face_taller_than_the_line_sets_both_extents() {
-        // Chrome 148 on Linux: Arial 14px (Liberation Sans 13 + 3, no gap) with the shield drawn
-        // from Noto Sans Symbols2 (15 + 9) builds a 24px line.
+        // The arithmetic behind Chrome 148 on Linux's 24px line for Arial 14px with the shield
+        // drawn from Noto Sans Symbols2. The inputs are those faces' whole-pixel extents as
+        // RustKit's Linux backend rounds them (Liberation Sans 13 + 3, Symbols2 15 + 9), not raw
+        // font metrics.
         assert_eq!(
             unite_fallback_extents((13.0, 3.0, 0.0), (15.0, 9.0, 0.0)),
             (15.0, 9.0, 0.0)
@@ -3245,6 +3253,17 @@ mod tests {
             unite_fallback_extents((14.48, 3.39, 0.52), (20.0, 6.25, 0.0)),
             (20.0, 6.25, 0.0)
         );
+    }
+
+    #[test]
+    fn several_fallback_faces_fold_one_at_a_time_each_with_its_own_gap() {
+        // f1 is tall with no gap, f2 short with a gap of 4: the line is max(13, 16, 12 + 2) above
+        // and max(3, 3, 3 + 2) below. Folding the raw extents first, (16, 3, 4), would give 18 + 5.
+        let primary = (13.0, 3.0, 0.0);
+        let (f1, f2) = ((16.0, 3.0, 0.0), (12.0, 3.0, 4.0));
+        let folded = unite_fallback_extents(unite_fallback_extents(primary, f1), f2);
+        assert_eq!(folded, (16.0, 5.0, 0.0));
+        assert_eq!(folded, unite_fallback_extents(unite_fallback_extents(primary, f2), f1));
     }
 
     #[test]
