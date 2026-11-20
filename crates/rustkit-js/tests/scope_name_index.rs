@@ -1,7 +1,8 @@
-//! The vendored `boa_ast` looks a scope's bindings up by name through an index
-//! (third_party/boa_engine/PATCHES.md, "scope name index"). Before it, each
-//! lookup scanned the scope's bindings, so a function with many variables
-//! parsed and compiled in time that grew with the square of their number:
+//! The vendored `boa_ast` looks a scope's bindings up by name through an index,
+//! and declaration instantiation tests a name list through a set
+//! (third_party/boa_engine/PATCHES.md, `scope-name-index`). Before, each lookup
+//! scanned, so a function with many variables parsed and compiled in time that
+//! grew with the square of their number:
 //! YouTube's 10.9 MB `kevlar_base` bundle (one function, about 9,000
 //! variables) took 5.6 s to parse and 6.4 s to compile.
 
