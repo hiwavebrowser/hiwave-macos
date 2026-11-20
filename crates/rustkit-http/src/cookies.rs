@@ -7,7 +7,7 @@
 //! siblings. Not here (stated, not half-built): `SameSite` enforcement and
 //! cookie prefixes.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
 use url::Url;
@@ -43,12 +43,98 @@ pub enum CookieSource {
 
 #[derive(Debug, Default)]
 pub struct CookieJar {
-    inner: Mutex<(Vec<Cookie>, u64)>,
+    inner: Mutex<JarState>,
+}
+
+#[derive(Debug, Default)]
+struct JarState {
+    cookies: Vec<Cookie>,
+    counter: u64,
+    subscriptions: Vec<Watcher>,
+}
+
+/// A mutation visible to a particular document. Deletions carry only the name.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CookieChange {
+    Changed { name: String, value: String },
+    Deleted { name: String },
+}
+
+#[derive(Debug, Default)]
+pub struct CookieChanges {
+    pub changes: Vec<CookieChange>,
+    /// The receiver fell behind. Its consumer should re-read the jar.
+    pub overflowed: bool,
+}
+
+/// A document's subscription. Dropping it disconnects it from the jar.
+#[derive(Debug)]
+pub struct CookieSubscription(Arc<Mutex<CookieChanges>>);
+
+impl CookieSubscription {
+    pub fn drain(&self) -> CookieChanges {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+#[derive(Debug)]
+struct Watcher {
+    url: Url,
+    queue: Weak<Mutex<CookieChanges>>,
+}
+
+impl JarState {
+    fn notify(&mut self, before: Option<&Cookie>, after: Option<&Cookie>) {
+        const MAX_PENDING_CHANGES: usize = 256;
+        self.subscriptions.retain(|watcher| {
+            let Some(queue) = watcher.queue.upgrade() else { return false };
+            let visible = |cookie: &&Cookie| cookie.visible_at(&watcher.url, true);
+            let change = match (before.filter(visible), after.filter(visible)) {
+                (Some(old), Some(new)) if old.value == new.value => return true,
+                (_, Some(new)) => CookieChange::Changed { name: new.name.clone(), value: new.value.clone() },
+                (Some(old), None) => CookieChange::Deleted { name: old.name.clone() },
+                (None, None) => return true,
+            };
+            let mut pending = queue.lock().unwrap();
+            if !pending.overflowed {
+                if pending.changes.len() == MAX_PENDING_CHANGES {
+                    pending.changes.clear();
+                    pending.overflowed = true;
+                } else {
+                    pending.changes.push(change);
+                }
+            }
+            true
+        });
+    }
+}
+
+impl Cookie {
+    fn visible_at(&self, url: &Url, for_script: bool) -> bool {
+        (!for_script || !self.http_only)
+            && url.host_str().is_some_and(|host| {
+                if self.host_only { host == self.domain } else { domain_matches(host, &self.domain) }
+            })
+            && path_matches(url.path(), &self.path)
+            && (!self.secure || is_secure(url))
+    }
 }
 
 impl CookieJar {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Subscribe to future script-visible changes at a document's creation URL.
+    pub fn subscribe(&self, url: &Url) -> Option<CookieSubscription> {
+        if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let queue = Arc::new(Mutex::new(CookieChanges::default()));
+        let mut state = self.inner.lock().unwrap();
+        state.subscriptions.retain(|watcher| watcher.queue.strong_count() != 0);
+        state.subscriptions.push(Watcher { url: url.clone(), queue: Arc::downgrade(&queue) });
+        Some(CookieSubscription(queue))
     }
 
     /// Store one `Set-Cookie` value (or a `document.cookie` assignment)
@@ -57,11 +143,11 @@ impl CookieJar {
     pub fn set(&self, url: &Url, header: &str, source: CookieSource) {
         let Some(cookie) = parse(url, header, source) else { return };
         let now = SystemTime::now();
-        let mut guard = self.inner.lock().unwrap();
-        let (cookies, counter) = &mut *guard;
+        let mut state = self.inner.lock().unwrap();
         let same = |c: &Cookie| c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path;
         let mut created = None;
-        if let Some(old) = cookies.iter().find(|c| same(c)) {
+        let old = state.cookies.iter().find(|c| same(c));
+        if let Some(old) = old {
             // A replacement keeps the old one's place (§5.3 step 11).
             created = Some(old.created);
             if old.http_only && source == CookieSource::Script {
@@ -72,34 +158,34 @@ impl CookieJar {
                 return;
             }
         }
-        cookies.retain(|c| !same(c) && c.expires.is_none_or(|e| e > now));
+        let before = old.filter(|c| !state.subscriptions.is_empty() && c.expires.is_none_or(|e| e > now)).cloned();
+        state.cookies.retain(|c| !same(c) && c.expires.is_none_or(|e| e > now));
         if cookie.expires.is_some_and(|e| e <= now) {
+            state.notify(before.as_ref(), None);
             return;
         }
-        *counter += 1;
-        cookies.push(Cookie { created: created.unwrap_or(*counter), ..cookie });
-        if cookies.len() > MAX_COOKIES {
-            cookies.sort_by_key(|c| c.created);
-            let excess = cookies.len() - MAX_COOKIES;
-            cookies.drain(..excess);
+        state.notify(before.as_ref(), Some(&cookie));
+        state.counter += 1;
+        let created = created.unwrap_or(state.counter);
+        state.cookies.push(Cookie { created, ..cookie });
+        if state.cookies.len() > MAX_COOKIES {
+            state.cookies.sort_by_key(|c| c.created);
+            let evicted = state.cookies.remove(0);
+            state.notify(Some(&evicted), None);
         }
     }
 
     /// The `Cookie` header for a request to `url`, or `None` with nothing
     /// to send. `for_script` leaves out `HttpOnly` ones (`document.cookie`).
     pub fn header_for(&self, url: &Url, for_script: bool) -> Option<String> {
-        let host = url.host_str()?.to_ascii_lowercase();
-        let secure = is_secure(url);
+        url.host_str()?;
         let now = SystemTime::now();
         let guard = self.inner.lock().unwrap();
         let mut matching: Vec<&Cookie> = guard
-            .0
+            .cookies
             .iter()
             .filter(|c| c.expires.is_none_or(|e| e > now))
-            .filter(|c| if c.host_only { host == c.domain } else { domain_matches(&host, &c.domain) })
-            .filter(|c| path_matches(url.path(), &c.path))
-            .filter(|c| !c.secure || secure)
-            .filter(|c| !(for_script && c.http_only))
+            .filter(|c| c.visible_at(url, for_script))
             .collect();
         if matching.is_empty() {
             return None;
@@ -239,6 +325,49 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn subscriptions_report_scoped_script_visible_mutations() {
+        let jar = CookieJar::new();
+        let origin = url("https://a.example.com/shop/cart");
+        let watch = jar.subscribe(&origin).unwrap();
+        let off_path = jar.subscribe(&url("https://a.example.com/other")).unwrap();
+        let sibling = jar.subscribe(&url("https://b.example.com/shop/cart")).unwrap();
+        let insecure = jar.subscribe(&url("http://a.example.com/shop/cart")).unwrap();
+        jar.set(&origin, "sid=first; Secure", CookieSource::Http);
+        jar.set(&origin, "private=secret; HttpOnly", CookieSource::Http);
+        jar.set(&origin, "sid=second; Secure", CookieSource::Script);
+        jar.set(&origin, "sid=; Max-Age=0; Secure", CookieSource::Http);
+        let batch = watch.drain();
+        assert!(!batch.overflowed);
+        assert_eq!(batch.changes, [
+            CookieChange::Changed { name: "sid".into(), value: "first".into() },
+            CookieChange::Changed { name: "sid".into(), value: "second".into() },
+            CookieChange::Deleted { name: "sid".into() },
+        ]);
+        assert!(off_path.drain().changes.is_empty());
+        assert!(sibling.drain().changes.is_empty());
+        assert!(insecure.drain().changes.is_empty());
+        assert!(watch.drain().changes.is_empty());
+    }
+
+    #[test]
+    fn subscriptions_can_recover_after_overflow() {
+        let jar = CookieJar::new();
+        let origin = url("https://example.com/");
+        let watch = jar.subscribe(&origin).unwrap();
+        for value in 0..300 {
+            jar.set(&origin, &format!("counter={value}"), CookieSource::Script);
+        }
+        let batch = watch.drain();
+        assert!(batch.overflowed);
+        assert!(batch.changes.is_empty());
+        assert_eq!(jar.header_for(&origin, true).as_deref(), Some("counter=299"));
+        jar.set(&origin, "counter=300", CookieSource::Script);
+        let batch = watch.drain();
+        assert!(!batch.overflowed);
+        assert_eq!(batch.changes, [CookieChange::Changed { name: "counter".into(), value: "300".into() }]);
     }
 
     #[test]
