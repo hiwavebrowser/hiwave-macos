@@ -246,16 +246,20 @@
         return false;
     }
     var ticking = false;
-    function tick() {
+    // `release`: the host is about to take the page as it stands with no frame to come (a
+    // load-only capture, `Engine::release_held_observations`): a resize observation held for a
+    // frame is delivered now, as on develop before REPORT-CHART-0x0 (#1361 R1).
+    function tick(release) {
         if (ticking) return 0;
         ticking = true;
+        if (release === true) resizeWait = -1;
         try {
             // A callback can observe more or change layout-independent state;
             // what it changes is seen by the next tick, not this one.
             var sizes = null;
             observers.slice().forEach(function (o) {
                 if (o instanceof IntersectionObserver) { observeIntersections(o); return; }
-                if (sizes === null) sizes = resizeDue();
+                if (sizes === null) sizes = release === true || resizeDue();
                 if (sizes) observeSizes(o);
             });
             observers.slice().forEach(function (o) {

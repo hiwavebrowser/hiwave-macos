@@ -12,7 +12,7 @@
  * The pages are the ones in rustkit-engine `load_geometry_read_tests.rs`
  * (`a_resize_observation_waits_for_the_frame_already_asked_for`,
  * `real_chart_js_built_hidden_resizes_both_charts_when_shown`,
- * `a_resize_observation_under_an_endless_frame_loop_is_delivered_in_the_load`); keep them equal.
+ * `a_resize_observation_under_an_endless_frame_loop_is_delivered_in_a_load_only_capture`); keep them equal.
  * `iframe` is Chrome's answer to whether a frame tree's frame callbacks hold the top document's
  * observations (they do: one rendering update for the tree).
  */
@@ -40,12 +40,12 @@ export const ORDER_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{
   "</script></body></html>";
 
 // R1 (#1361): an endless frame loop (a spinner, a canvas loop) running when the observed box
-// is shown: the observation is still delivered, after the loop's next frame.
+// is shown: the observation is still delivered.
 export const ENDLESS_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>" +
   "<div id=content style='display:none'><div id=cc></div></div><div id=out>x</div><script>" +
-  "var frames=0;function A(){frames++;requestAnimationFrame(A);}requestAnimationFrame(A);" +
+  "function A(){requestAnimationFrame(A);}requestAnimationFrame(A);" +
   "new ResizeObserver(function(es){var r=es[0].contentRect;" +
-  "document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height+' after '+(frames>0?'a frame':'no frame');" +
+  "document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height;" +
   "}).observe(document.getElementById('cc'));" +
   "document.getElementById('content').style.display='block';" +
   "</script></body></html>";

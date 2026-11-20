@@ -69,7 +69,7 @@
     "report": {
       "html": "crates/hiwave-app/src/ui/report.html",
       "fixture": "report.js",
-   "live_ms": 1500,
+      "live_ms": 1500,
       "inject": {"<!-- Chart.js is injected by Rust before page load -->": "crates/hiwave-app/src/ui/chart.umd.min.js"},
       "states": ["default", "weekly"]
     }

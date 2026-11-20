@@ -26791,6 +26791,20 @@ impl Engine {
         self.script_turn(id, |bindings| bindings.evaluate_as_page_script(script))
     }
 
+    /// Deliver the resize observations held for an animation frame (REPORT-CHART-0x0: they wait
+    /// for the frame callbacks already asked for, as Chrome's rendering update runs them first),
+    /// for a host that takes the page as it stands with no frame to come: a load-only capture
+    /// (`parity-capture` before its frame and dumps). The live loop needs none: its next frame
+    /// delivers them. The callbacks' writes are laid out, as any turn's are (#1361 R1).
+    pub fn release_held_observations(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        self.execute_host_turn(
+            id,
+            "return typeof __rk.observersTick === 'function' ? __rk.observersTick(true) : 0;",
+            &[],
+        )
+        .map(|_| ())
+    }
+
     /// [`Self::execute_script`] for one of the engine's own entry points:
     /// `body` is a function body whose `__rk` is the host object, which no
     /// page script reaches (`return __rk.fragmentNavigation(__a[0]);`), and

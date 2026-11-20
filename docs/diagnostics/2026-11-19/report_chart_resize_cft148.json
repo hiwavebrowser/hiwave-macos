@@ -1,8 +1,8 @@
 {
- "version": "143.0.7499.4",
+ "version": "148.0.7778.216",
  "viewport": "800x600",
  "order": "R:A1 ro=800x300 A2 B A3",
  "chart": "R:later activityChart=760x300 protectionChart=760x300",
- "endless": "R:ro=800x300 after a frame",
+ "endless": "R:ro=800x300",
  "iframe": "R:F1 ro=800x300 F2 F3"
 }

@@ -1299,6 +1299,12 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
         }
     }
 
+    // The page as it stands, with no frame to come: resize observations held for a frame are
+    // delivered first, as the next rendering update would (#1361 R1).
+    if let Err(e) = engine.release_held_observations(view_id) {
+        error!("Failed to deliver held resize observations: {:?}", e);
+    }
+
     // Render final view
     if let Err(e) = engine.render_view(view_id) {
         return result.failed("error", format!("Failed to render: {:?}", e));

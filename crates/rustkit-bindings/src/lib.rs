@@ -629,8 +629,9 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // The last animation frame run, as its number on the tree's frame grid (below), and
         // whether a frame's callbacks are running now.
         Q.frameK = 0; Q.inFrame = false;
-        // How many animation-frame rounds have run callbacks (`__rk.frameRounds`): a resize
-        // observation made while a frame is asked for waits for the next one (REPORT-CHART-0x0).
+        // How many animation frames have run callbacks (`__rk.frameRounds`, counted in `ranFrame`):
+        // a resize observation made while a frame is asked for waits for the next one
+        // (REPORT-CHART-0x0).
         Q.rounds = 0;
         // The grid time of the frame whose callbacks run (its timestamp's time, below).
         Q.frameDue = 0;
@@ -839,7 +840,12 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         var k = Q.frameK + 1, c = gridAtOrBefore(Q.now);
         return c > k ? c : k;
     }
-    function ranFrame(timer) { if (timer.k > Q.frameK) Q.frameK = timer.k; }
+    // A callback of a frame after the last one run starts that frame's round (`Q.rounds`), from a
+    // turn's round or from the load's timers alike (#1361 R1: the load's frames counted none, and
+    // a resize observation held for a frame under an endless loop was never delivered).
+    function ranFrame(timer) {
+        if (timer.k > Q.frameK) { Q.frameK = timer.k; Q.rounds = (Q.rounds | 0) + 1; }
+    }
     function runFrame(timer) {
         ranFrame(timer);
         Q.inFrame = true;
@@ -1066,7 +1072,6 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         // One frame: its time is the latest grid point among its callbacks.
         if (latest >= 0) Q.frameDue = latest;
         if (latest >= 0 && Q.roundAt === -1) Q.roundAt = latest;
-        var before = ran;
         for (var j = 0; j < due && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
             var at = slotOf(round[j]);
@@ -1075,13 +1080,15 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             ran++;
             runFrame(round[j]);
         }
-        if (ran > before) Q.rounds = (Q.rounds | 0) + 1;
         return ran;
     }
     // REPORT-CHART-0x0: HTML's update the rendering runs a frame's animation frame callbacks
     // before it gathers and broadcasts resize observations, so an observation made while a frame
     // callback is asked for is delivered after that frame's callbacks (web_observers_live.js).
-    // How many rounds have run callbacks, and whether a frame callback is asked for now.
+    // How many frames have run callbacks, and whether a frame callback is asked for now. The
+    // queue is the frame tree's, so a frame's loop holds the top document's observations too:
+    // Chrome's rendering update runs every document's frame callbacks before any document's
+    // resize observations (`report_chart_resize_cft148.json` `iframe`: "F1 ro=800x300 F2 F3").
     __rk.frameRounds = function () { return Q.rounds | 0; };
     __rk.framePending = function () {
         for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
