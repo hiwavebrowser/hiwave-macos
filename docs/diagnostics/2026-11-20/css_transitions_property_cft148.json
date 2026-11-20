@@ -1,0 +1,633 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": [
+    0,
+    1,
+    50,
+    99
+  ],
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "<color>",
+      "css": "@property --x{syntax:'<color>';inherits:false;initial-value:black}#h{--x:rgb(0,0,255);transition:--x 100ms linear}#h.on{--x:red}",
+      "script": "",
+      "read": "h --x",
+      "before": "rgb(0, 0, 255)",
+      "at": {
+        "0": "rgb(0, 0, 255)",
+        "1": "rgb(3, 0, 252)",
+        "50": "rgb(128, 0, 128)",
+        "99": "rgb(252, 0, 3)"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "rgb(255, 0, 0)",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<length>",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:0px}#h{--x:10px;transition:--x 100ms linear}#h.on{--x:110px}",
+      "script": "",
+      "read": "h --x",
+      "before": "10px",
+      "at": {
+        "0": "10px",
+        "1": "11px",
+        "50": "60px",
+        "99": "109px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "110px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<length> em to px",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:0px}#h{font-size:10px;--x:1em;transition:--x 100ms linear}#h.on{--x:30px}",
+      "script": "",
+      "read": "h --x",
+      "before": "10px",
+      "at": {
+        "0": "10px",
+        "1": "10.2px",
+        "50": "20px",
+        "99": "29.8px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "30px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<length-percentage>",
+      "css": "@property --x{syntax:'<length-percentage>';inherits:false;initial-value:0px}#h{--x:10px;transition:--x 100ms linear}#h.on{--x:50%}",
+      "script": "",
+      "read": "h --x",
+      "before": "10px",
+      "at": {
+        "0": "calc(0% + 10px)",
+        "1": "calc(0.5% + 9.9px)",
+        "50": "calc(25% + 5px)",
+        "99": "calc(49.5% + 0.1px)"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "50%",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<number>",
+      "css": "@property --x{syntax:'<number>';inherits:false;initial-value:0}#h{--x:0;transition:--x 100ms linear}#h.on{--x:10}",
+      "script": "",
+      "read": "h --x",
+      "before": "0",
+      "at": {
+        "0": "0",
+        "1": "0.1",
+        "50": "5",
+        "99": "9.9"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "10",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<integer>",
+      "css": "@property --x{syntax:'<integer>';inherits:false;initial-value:0}#h{--x:0;transition:--x 100ms linear}#h.on{--x:10}",
+      "script": "",
+      "read": "h --x",
+      "before": "0",
+      "at": {
+        "0": "0",
+        "1": "0",
+        "50": "5",
+        "99": "10"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "10",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<percentage>",
+      "css": "@property --x{syntax:'<percentage>';inherits:false;initial-value:0%}#h{--x:0%;transition:--x 100ms linear}#h.on{--x:100%}",
+      "script": "",
+      "read": "h --x",
+      "before": "0%",
+      "at": {
+        "0": "0%",
+        "1": "1%",
+        "50": "50%",
+        "99": "99%"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100%",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<angle>",
+      "css": "@property --x{syntax:'<angle>';inherits:false;initial-value:0deg}#h{--x:0deg;transition:--x 100ms linear}#h.on{--x:1turn}",
+      "script": "",
+      "read": "h --x",
+      "before": "0deg",
+      "at": {
+        "0": "0deg",
+        "1": "3.6deg",
+        "50": "180deg",
+        "99": "356.4deg"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "360deg",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<length>+ list",
+      "css": "@property --x{syntax:'<length>+';inherits:false;initial-value:0px}#h{--x:0px 0px;transition:--x 100ms linear}#h.on{--x:10px 20px}",
+      "script": "",
+      "read": "h --x",
+      "before": "0px 0px",
+      "at": {
+        "0": "0px 0px",
+        "1": "0.1px 0.2px",
+        "50": "5px 10px",
+        "99": "9.9px 19.8px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "10px 20px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "<color># list",
+      "css": "@property --x{syntax:'<color>#';inherits:false;initial-value:black}#h{--x:blue, red;transition:--x 100ms linear}#h.on{--x:red, blue}",
+      "script": "",
+      "read": "h --x",
+      "before": "rgb(0, 0, 255), rgb(255, 0, 0)",
+      "at": {
+        "0": "rgb(0, 0, 255), rgb(255, 0, 0)",
+        "1": "rgb(3, 0, 252), rgb(252, 0, 3)",
+        "50": "rgb(128, 0, 128), rgb(128, 0, 128)",
+        "99": "rgb(252, 0, 3), rgb(3, 0, 252)"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "rgb(255, 0, 0), rgb(0, 0, 255)",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "* syntax (discrete)",
+      "css": "@property --x{syntax:'*';inherits:false;initial-value:0px}#h{--x:0px;transition:--x 100ms linear}#h.on{--x:100px}",
+      "script": "",
+      "read": "h --x",
+      "before": "0px",
+      "at": {
+        "0": "100px",
+        "1": "100px",
+        "50": "100px",
+        "99": "100px"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100px",
+      "events": []
+    },
+    {
+      "label": "<color> computed value of a keyword",
+      "css": "@property --x{syntax:'<color>';inherits:false;initial-value:black}#h{--x:red}",
+      "script": "",
+      "read": "h --x",
+      "before": "rgb(255, 0, 0)",
+      "at": {
+        "0": "rgb(255, 0, 0)",
+        "1": "rgb(255, 0, 0)",
+        "50": "rgb(255, 0, 0)",
+        "99": "rgb(255, 0, 0)"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "rgb(255, 0, 0)",
+      "events": []
+    },
+    {
+      "label": "<color> initial value when undeclared",
+      "css": "@property --x{syntax:'<color>';inherits:false;initial-value:rgb(1, 2, 3)}",
+      "script": "",
+      "read": "h --x",
+      "before": "rgb(1, 2, 3)",
+      "at": {
+        "0": "rgb(1, 2, 3)",
+        "1": "rgb(1, 2, 3)",
+        "50": "rgb(1, 2, 3)",
+        "99": "rgb(1, 2, 3)"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "rgb(1, 2, 3)",
+      "events": []
+    },
+    {
+      "label": "<length> invalid declaration is the initial value",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:7px}#h{--x:red}",
+      "script": "",
+      "read": "h --x",
+      "before": "7px",
+      "at": {
+        "0": "7px",
+        "1": "7px",
+        "50": "7px",
+        "99": "7px"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "7px",
+      "events": []
+    },
+    {
+      "label": "inherits:true child follows",
+      "css": "@property --x{syntax:'<length>';inherits:true;initial-value:0px}#h{--x:0px;transition:--x 100ms linear}#h.on{--x:100px}",
+      "script": "",
+      "read": "c --x",
+      "before": "0px",
+      "at": {
+        "0": "0px",
+        "1": "1px",
+        "50": "50px",
+        "99": "99px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "inherits:false child has the initial value",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:5px}#h{--x:0px;transition:--x 100ms linear}#h.on{--x:100px}",
+      "script": "",
+      "read": "c --x",
+      "before": "5px",
+      "at": {
+        "0": "5px",
+        "1": "5px",
+        "50": "5px",
+        "99": "5px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "5px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "unregistered (discrete)",
+      "css": "#h{--u:0px;transition:--u 100ms linear}#h.on{--u:100px}",
+      "script": "",
+      "read": "h --u",
+      "before": "0px",
+      "at": {
+        "0": "100px",
+        "1": "100px",
+        "50": "100px",
+        "99": "100px"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100px",
+      "events": []
+    },
+    {
+      "label": "unregistered, transition all",
+      "css": "#h{--u:0px;transition:all 100ms linear}#h.on{--u:100px}",
+      "script": "",
+      "read": "h --u",
+      "before": "0px",
+      "at": {
+        "0": "100px",
+        "1": "100px",
+        "50": "100px",
+        "99": "100px"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100px",
+      "events": []
+    },
+    {
+      "label": "registered, transition all",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:0px}#h{--x:0px;transition:all 100ms linear}#h.on{--x:100px}",
+      "script": "",
+      "read": "h --x",
+      "before": "0px",
+      "at": {
+        "0": "100px",
+        "1": "100px",
+        "50": "100px",
+        "99": "100px"
+      },
+      "transitions": [],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "100px",
+      "events": []
+    },
+    {
+      "label": "background-color reads a registered colour",
+      "css": "@property --x{syntax:'<color>';inherits:false;initial-value:black}#h{--x:rgb(0,0,255);background-color:var(--x);transition:--x 100ms linear}#h.on{--x:rgb(255,0,0)}",
+      "script": "",
+      "read": "h background-color",
+      "before": "rgb(0, 0, 255)",
+      "at": {
+        "0": "rgb(0, 0, 255)",
+        "1": "rgb(3, 0, 252)",
+        "50": "rgb(128, 0, 128)",
+        "99": "rgb(252, 0, 3)"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "128,0,128,255",
+        "centre": "128,0,128,255",
+        "right": "128,0,128,255"
+      },
+      "end": "rgb(255, 0, 0)",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "width reads a registered length",
+      "css": "@property --x{syntax:'<length>';inherits:false;initial-value:0px}#h{--x:20px;width:var(--x);transition:--x 100ms linear}#h.on{--x:80px}",
+      "script": "",
+      "read": "h width",
+      "before": "20px",
+      "at": {
+        "0": "20px",
+        "1": "20.5938px",
+        "50": "50px",
+        "99": "79.3906px"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "80px",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "gradient of a registered colour",
+      "css": "@property --x{syntax:'<color>';inherits:false;initial-value:black}#h{--x:rgb(0,0,255);background-image:linear-gradient(var(--x),var(--x));transition:--x 100ms linear}#h.on{--x:rgb(255,0,0)}",
+      "script": "",
+      "read": "h background-image",
+      "before": "linear-gradient(rgb(0, 0, 255), rgb(0, 0, 255))",
+      "at": {
+        "0": "linear-gradient(rgb(0, 0, 255), rgb(0, 0, 255))",
+        "1": "linear-gradient(rgb(3, 0, 252), rgb(3, 0, 252))",
+        "50": "linear-gradient(rgb(128, 0, 128), rgb(128, 0, 128))",
+        "99": "linear-gradient(rgb(252, 0, 3), rgb(252, 0, 3))"
+      },
+      "transitions": [
+        "h:--x"
+      ],
+      "painted_at_50": {
+        "left": "128,0,128,255",
+        "centre": "128,0,128,255",
+        "right": "128,0,128,255"
+      },
+      "end": "linear-gradient(rgb(255, 0, 0), rgb(255, 0, 0))",
+      "events": [
+        "run:--x",
+        "start:--x",
+        "end:--x"
+      ]
+    },
+    {
+      "label": "tailwind gradient stops",
+      "css": "@property --tw-gradient-from{syntax:\"<color>\";inherits:false;initial-value:#0000}@property --tw-gradient-to{syntax:\"<color>\";inherits:false;initial-value:#0000}@property --tw-gradient-position{syntax:\"*\";inherits:false}@property --tw-gradient-stops{syntax:\"*\";inherits:false}#h{--tw-gradient-position:to right;--tw-gradient-from:rgb(0,0,255);--tw-gradient-to:rgb(0,0,255);--tw-gradient-stops:var(--tw-gradient-position),var(--tw-gradient-from) 0%,var(--tw-gradient-to) 100%;background-image:linear-gradient(var(--tw-gradient-stops));transition:--tw-gradient-from 100ms linear,--tw-gradient-to 100ms linear}#h.on{--tw-gradient-from:rgb(255,0,0);--tw-gradient-to:rgb(0,255,0)}",
+      "script": "",
+      "read": "h --tw-gradient-from",
+      "before": "rgb(0, 0, 255)",
+      "at": {
+        "0": "rgb(0, 0, 255)",
+        "1": "rgb(3, 0, 252)",
+        "50": "rgb(128, 0, 128)",
+        "99": "rgb(252, 0, 3)"
+      },
+      "transitions": [
+        "h:--tw-gradient-from",
+        "h:--tw-gradient-to"
+      ],
+      "painted_at_50": {
+        "left": "124,3,128,255",
+        "centre": "63,64,128,255",
+        "right": "3,125,128,255"
+      },
+      "end": "rgb(255, 0, 0)",
+      "events": [
+        "run:--tw-gradient-from",
+        "start:--tw-gradient-from",
+        "run:--tw-gradient-to",
+        "start:--tw-gradient-to",
+        "end:--tw-gradient-from",
+        "end:--tw-gradient-to"
+      ]
+    },
+    {
+      "label": "CSS.registerProperty <color>",
+      "css": "#h{--r:rgb(0,0,255);transition:--r 100ms linear}#h.on{--r:rgb(255,0,0)}",
+      "script": "CSS.registerProperty({name:'--r',syntax:'<color>',inherits:false,initialValue:'black'})",
+      "read": "h --r",
+      "before": "rgb(0, 0, 255)",
+      "at": {
+        "0": "rgb(0, 0, 255)",
+        "1": "rgb(3, 0, 252)",
+        "50": "rgb(128, 0, 128)",
+        "99": "rgb(252, 0, 3)"
+      },
+      "transitions": [
+        "h:--r"
+      ],
+      "painted_at_50": {
+        "left": "255,255,255,255",
+        "centre": "255,255,255,255",
+        "right": "255,255,255,255"
+      },
+      "end": "rgb(255, 0, 0)",
+      "events": [
+        "run:--r",
+        "start:--r",
+        "end:--r"
+      ]
+    }
+  ],
+  "register_property_errors": {
+    "twice": [
+      "ok",
+      "InvalidModificationError"
+    ],
+    "no_dashes": "SyntaxError",
+    "no_initial": "SyntaxError",
+    "bad_initial": "SyntaxError",
+    "universal_no_initial": "ok"
+  }
+}

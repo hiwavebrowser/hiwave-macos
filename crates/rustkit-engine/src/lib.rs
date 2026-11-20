@@ -718,6 +718,8 @@ mod css_transitions_sizes_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_visibility_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_property_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_lists_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_grid_tests;
@@ -778,6 +780,7 @@ mod clock_live_timer_tests;
 #[cfg(test)]
 mod clock_flag_tests;
 mod animations;
+mod registered_props;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
@@ -14107,8 +14110,14 @@ impl layout_ctx::LayoutCtx {
         };
         // `document.adoptedStyleSheets` follows the document's `<style>`
         // and `<link>` sheets. The document node holds the text.
-        let adopted: Vec<String> =
+        let mut adopted: Vec<String> =
             document.root().adopted_styles().into_iter().filter(|text| !text.is_empty()).collect();
+        // `CSS.registerProperty()` registrations, as `@property` text after
+        // every sheet (TRANS-F).
+        let registered = document.registered_property_rules();
+        if !registered.is_empty() {
+            adopted.push(registered);
+        }
         // What the prepared sheets are made of, by identity (see
         // `SheetsFingerprint`); `None` when the build cannot vouch for it.
         let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport, &order);
@@ -14169,6 +14178,7 @@ impl layout_ctx::LayoutCtx {
                     && stylesheets
                         .iter()
                         .any(|s| s.rules.iter().any(container_query::floats_first_letter));
+                let registry = registered_props::registry_for(&stylesheets);
                 let prepared = PreparedSheets {
                     from: fingerprint.clone(),
                     // The document tree's sheets. Shared, so the build can
@@ -14176,6 +14186,7 @@ impl layout_ctx::LayoutCtx {
                     // (`shadow_tree`); the rules stay where they are, so
                     // the rule index still recognizes them.
                     sheets: Rc::new(stylesheets),
+                    registry,
                     css_vars,
                     any_container_rule,
                     container_first_letter,
@@ -14190,6 +14201,7 @@ impl layout_ctx::LayoutCtx {
         drop(inline_sheets);
         let stylesheets = prepared.sheets;
         let css_vars = prepared.css_vars;
+        let _registry = registered_props::RegistryScope::install(prepared.registry.clone());
         let _tree_indexes = TreeRuleIndexScope::install();
         let _tree_scopes = shadow_tree::BuildScope::install(
             document,
@@ -15065,6 +15077,32 @@ impl layout_ctx::LayoutCtx {
                 // and overlay the running ones (after the memo, so the
                 // memo keeps the cascade's own result).
                 let may_animate = self.animate_style(node.id.raw(), &mut style, stylesheets);
+                // TRANS-F: a registered custom property moves. What reads
+                // it (`var()` in this element's own declarations) is
+                // cascaded again with the moving values; what the
+                // animations set over the cascade is carried across.
+                if let Some(values) = self.take_custom_overlay(node.id.raw()) {
+                    let cascaded = self.cascaded_style(node.id.raw());
+                    let _override = registered_props::OverrideScope::install(values);
+                    let own_rules =
+                        shadow_tree::OwnRules::install(node, &tag_lower, attributes, ancestors, sib);
+                    let mut fresh = self.compute_style_for_element(
+                        tag_name,
+                        attributes,
+                        stylesheets,
+                        css_vars,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        parent_style,
+                    );
+                    drop(own_rules);
+                    if let Some(cascaded) = cascaded {
+                        animations::carry_animated(&cascaded, &style, &mut fresh);
+                    }
+                    fresh.custom_properties = style.custom_properties.clone();
+                    *style = fresh;
+                }
                 // Its memo entry is the bare cascade, and transitions and animations are applied
                 // after it: an element that animates, or may (it names an animation or a
                 // transition), hands its children values its entry does not show. A retained
@@ -16953,6 +16991,17 @@ impl layout_ctx::LayoutCtx {
             }
         }
         let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
+        let registry = registered_props::current();
+        let vars = match registry.as_deref() {
+            Some(registry) => registered_props::fix_up(
+                Some(registry),
+                vars,
+                &inherited_vars,
+                &declared_vars,
+                parent.is_none(),
+            ),
+            None => vars,
+        };
 
         // Apply matching rules: normal declarations, then `!important` ones
         // (CSS Cascade 4 §6.1), specificity order within each.
@@ -17040,6 +17089,21 @@ impl layout_ctx::LayoutCtx {
 
         pseudo_style.settle_animation_opacity(stylesheets);
 
+        let vars = match registry.as_deref() {
+            Some(registry) => {
+                let parent_px = parent
+                    .map(|p| registered_props::font_px(&p.font_size, 16.0))
+                    .unwrap_or(16.0);
+                registered_props::compute_own(
+                    Some(registry),
+                    vars,
+                    &declared_vars,
+                    registered_props::font_px(&pseudo_style.font_size, parent_px),
+                    self.building_viewport(),
+                )
+            }
+            None => vars,
+        };
         pseudo_style.custom_properties = vars;
 
         // Without `content` there is no box, so there is nothing to keep:
@@ -17934,7 +17998,10 @@ impl layout_ctx::LayoutCtx {
         // under a rule index, whose rule numbers the key holds with the
         // index's source. Rules from other trees are not in the key (extras):
         // no sharing with them.
-        let share = match (index.is_some() && extras.is_empty(), parent_style) {
+        let share = match (
+            index.is_some() && extras.is_empty() && !registered_props::override_active(),
+            parent_style,
+        ) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
                 source: index.as_ref().map_or((0, 0, 0), |ix| ix.source),
@@ -17979,6 +18046,10 @@ impl layout_ctx::LayoutCtx {
             .get("style")
             .map(|s| rustkit_css::split_declaration_list(s))
             .unwrap_or_default();
+        // TRANS-F: a moving registered value is the element's last
+        // declaration of it, so the element's other custom properties
+        // that read it (`--tw-gradient-stops`) take the moving value too.
+        let overridden = registered_props::override_values();
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
             for (rule, _, _) in rules_for(important_pass) {
@@ -18010,7 +18081,22 @@ impl layout_ctx::LayoutCtx {
                 }
             }
         }
+        declared_vars.extend(overridden.iter().map(|(k, v)| (k.as_str(), Some(v.as_str()))));
         let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
+        // TRANS-F: registered properties (initial values, `inherits`,
+        // invalid values) and a running transition's override.
+        let registry = registered_props::current();
+        let vars = if registry.is_some() || registered_props::override_active() {
+            registered_props::fix_up(
+                registry.as_deref(),
+                vars,
+                &inherited_vars,
+                &declared_vars,
+                parent_style.is_none(),
+            )
+        } else {
+            vars
+        };
         let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
@@ -18150,6 +18236,22 @@ impl layout_ctx::LayoutCtx {
 
         style.settle_animation_opacity(stylesheets);
 
+        // Registered values computed against the element's font size.
+        let vars = match registry.as_deref() {
+            Some(registry) => {
+                let parent_px = parent_style
+                    .map(|p| registered_props::font_px(&p.font_size, 16.0))
+                    .unwrap_or(16.0);
+                registered_props::compute_own(
+                    Some(registry),
+                    vars,
+                    &declared_vars,
+                    registered_props::font_px(&style.font_size, parent_px),
+                    self.building_viewport(),
+                )
+            }
+            None => vars,
+        };
         style.custom_properties = vars;
 
         style_share_store(share, &style);
@@ -47260,6 +47362,8 @@ pub(crate) struct PreparedSheets {
     css_vars: Rc<HashMap<String, String>>,
     any_container_rule: bool,
     container_first_letter: bool,
+    /// The registered custom properties of these sheets (TRANS-F).
+    registry: Option<Arc<rustkit_css::PropertyRegistry>>,
 }
 
 impl SheetsFingerprint {
