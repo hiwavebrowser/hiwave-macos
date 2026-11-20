@@ -2636,9 +2636,18 @@ fn is_report_url(url: &str) -> bool {
     url == REPORT_URL
 }
 
+/// Whether `url` names one of the browser's own pages: the `hiwave:`
+/// scheme in any case, read as the URL parser reads it (leading spaces and
+/// embedded tabs or newlines ignored).
+fn is_internal_page_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| u.scheme() == "hiwave")
+        || url.trim().to_ascii_lowercase().starts_with("hiwave:")
+}
+
 /// The tab's page goes to `url` (the `UserEvent::Navigate` handler): the
 /// browser's own pages by name, anything else as a web URL, a host or a
-/// search.
+/// search. A page's own navigation (`NavInitiator::Page`) does not open a
+/// browser page.
 fn navigate_content(
     url: String,
     initiator: NavInitiator,
@@ -2646,7 +2655,13 @@ fn navigate_content(
     content: &impl ContentWebViewOps,
     chrome: &impl ChromeUi,
 ) -> NavOutcome {
-    let _ = initiator;
+    if initiator == NavInitiator::Page && is_internal_page_url(&url) {
+        // As Chrome with `chrome://` from a web page: the page stays, and
+        // its console says so.
+        info!(url = %crate::page_url_for_log(&url), "Not following a page's navigation to a browser page");
+        content.report_console_error(&format!("Not allowed to load local resource: {url}"));
+        return NavOutcome::Refused;
+    }
     info!("Navigating content to: {}", crate::page_url_for_log(&url));
     if is_new_tab_url(&url) {
         load_new_tab(content);
@@ -3472,6 +3487,12 @@ fn main() {
             let _ = content_proxy_downloads_complete.send_event(UserEvent::SyncDownloads);
         })
         .with_new_window_req_handler(move |url| {
+            // A page's new window does not open a browser page (Chrome's
+            // `window.open` returns null for `chrome://`).
+            if is_internal_page_url(&url) {
+                info!(url = %crate::page_url_for_log(&url), "Not opening a page's new window on a browser page");
+                return false;
+            }
             // Allow Cloudflare challenges to stay as iframes (required for verification)
             if url.contains("challenges.cloudflare.com") || url.contains("turnstile") {
                 info!("Allowing Cloudflare challenge iframe: {}", crate::page_url_for_log(&url));
@@ -3611,6 +3632,9 @@ fn main() {
                     }
                     IpcMessage::GoForward => {
                         let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
+                    }
+                    IpcMessage::CreateTab { url } if url.as_deref().is_some_and(is_internal_page_url) => {
+                        info!("Content IPC: not opening a tab on a browser page");
                     }
                     IpcMessage::CreateTab { url } => {
                         // Handle create tab directly

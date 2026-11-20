@@ -1388,6 +1388,15 @@ impl RustKitView {
         self.devtools_page.as_ref().map(|(inspector, _)| Arc::clone(inspector))
     }
 
+    /// An error line in the page's console from the browser (as Chrome
+    /// logs a navigation it does not follow), not run as page script.
+    /// Without a console (none recorded yet) only the app log has it.
+    pub fn report_console_error(&self, message: &str) {
+        if let Some(inspector) = self.devtools_inspector() {
+            inspector.console(rustkit_engine::ConsoleLevel::Error, message, None);
+        }
+    }
+
     /// Run the console's `code` in the page: the value, or the error. A
     /// page that reaches it at or past `deadline` cancels it (T6c).
     pub fn devtools_eval(&self, code: &str, deadline: std::time::Instant) -> oneshot::Receiver<Result<String, String>> {

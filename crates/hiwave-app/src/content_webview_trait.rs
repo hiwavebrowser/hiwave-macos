@@ -9,6 +9,9 @@ pub trait ContentWebViewOps {
     fn load_html(&self, html: &str) -> Result<(), String>;
     fn evaluate_script(&self, script: &str) -> Result<(), String>;
     fn set_bounds(&self, rect: Rect) -> Result<(), String>;
+    /// An error line in the page's console from the browser itself (not
+    /// run as the page's script). A view without a console drops it.
+    fn report_console_error(&self, _message: &str) {}
 }
 
 // Implement for WRY WebView
@@ -67,6 +70,10 @@ impl ContentWebViewOps for super::webview_rustkit::RustKitView {
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         self.wry_set_bounds(rect)
     }
+
+    fn report_console_error(&self, message: &str) {
+        super::webview_rustkit::RustKitView::report_console_error(self, message)
+    }
 }
 
 // Implement for Arc<RustKitView>
@@ -87,6 +94,10 @@ impl ContentWebViewOps for Arc<super::webview_rustkit::RustKitView> {
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         self.wry_set_bounds(rect)
     }
+
+    fn report_console_error(&self, message: &str) {
+        super::webview_rustkit::RustKitView::report_console_error(self, message)
+    }
 }
 
 // Implement for Arc<ContentWebView>
@@ -106,5 +117,9 @@ impl ContentWebViewOps for Arc<super::content_webview_enum::ContentWebView> {
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
         (**self).set_bounds(rect)
+    }
+
+    fn report_console_error(&self, message: &str) {
+        (**self).report_console_error(message)
     }
 }
