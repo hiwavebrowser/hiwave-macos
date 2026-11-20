@@ -1209,6 +1209,7 @@ fn style_record(
                 rustkit_css::FlexBasis::Content => "content".into(),
                 rustkit_css::FlexBasis::Length(px) => css_px(px),
                 rustkit_css::FlexBasis::Percent(pc) => format!("{}%", num(pc)),
+                rustkit_css::FlexBasis::Calc(sum) => crate::computed_read::flex_basis_calc(sum, font_px, b.viewport),
             }),
             "align-items" => Some(kw(&s.align_items)),
             "align-self" => Some(kw(&s.align_self)),

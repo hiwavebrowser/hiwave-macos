@@ -892,6 +892,7 @@ impl Presenter {
         &mut self,
         viewhost_id: ViewId,
         display_list: Option<&DisplayList>,
+        scroll_offset: (f32, f32),
         path: &str,
     ) -> Result<(), EngineError> {
         // Get surface size
@@ -913,14 +914,15 @@ impl Presenter {
                 renderer.set_viewport_size(width, height);
 
                 // Capture with actual display list rendering
-                self.compositor
-                    .capture_frame_with_renderer(
-                        viewhost_id,
-                        path,
-                        renderer,
-                        &display_list.commands,
-                    )
-                    .map_err(|e| EngineError::RenderError(e.to_string()))
+                renderer.set_scroll_offset(scroll_offset);
+                let result = self.compositor.capture_frame_with_renderer(
+                    viewhost_id,
+                    path,
+                    renderer,
+                    &display_list.commands,
+                );
+                renderer.set_scroll_offset((0.0, 0.0));
+                result.map_err(|e| EngineError::RenderError(e.to_string()))
             }
             _ => {
                 // Fallback to magenta test pattern if no display list

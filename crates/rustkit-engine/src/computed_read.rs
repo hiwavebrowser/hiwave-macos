@@ -93,6 +93,15 @@ pub(crate) fn length(l: &Length, font_px: f32) -> Option<String> {
     })
 }
 
+pub(crate) fn flex_basis_calc(mut sum: css::CalcSum, font_px: f32, (w, h): (f32, f32)) -> String {
+    sum.px += (sum.vw * w + sum.vh * h + sum.vmin * w.min(h) + sum.vmax * w.max(h)) / 100.0;
+    sum.vw = 0.0;
+    sum.vh = 0.0;
+    sum.vmin = 0.0;
+    sum.vmax = 0.0;
+    length(&Length::Calc(Box::new(sum)), font_px).unwrap_or_default()
+}
+
 fn pair(a: &str, b: &str) -> String {
     if a == b {
         a.to_string()
@@ -905,6 +914,25 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         row("background", &texts.join(", "));
     }
 
+    if let Some(content) = &s.content {
+        let mut value = String::from("\"");
+        for ch in content.chars() {
+            match ch {
+                '"' | '\\' => {
+                    value.push('\\');
+                    value.push(ch);
+                }
+                ch if ch.is_ascii_control() => {
+                    use std::fmt::Write;
+                    let _ = write!(value, "\\{:x} ", ch as u32);
+                }
+                ch => value.push(ch),
+            }
+        }
+        value.push('"');
+        row("content", &value);
+    }
+
     // Replaced content.
     if !s.object_fit.is_empty() && s.object_fit != "fill" {
         row("object-fit", &s.object_fit);
@@ -1233,6 +1261,7 @@ pub(crate) fn rows(b: &LayoutBox, font_px: f32, line_height: &str) -> String {
         css::FlexBasis::Content => "content".to_string(),
         css::FlexBasis::Length(p) => css_px(p),
         css::FlexBasis::Percent(p) => format!("{}%", numf(p)),
+        css::FlexBasis::Calc(sum) => flex_basis_calc(sum, font_px, b.viewport),
     };
     if s.flex_grow != 0.0 {
         row("flex-grow", &numf(s.flex_grow));

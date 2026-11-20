@@ -343,6 +343,25 @@ pub struct CalcSum {
 }
 
 impl CalcSum {
+    /// Evaluate the coefficients without allocating a boxed length.
+    pub fn to_px_with_viewport(
+        &self,
+        font_size: f32,
+        root_font_size: f32,
+        container_size: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+    ) -> f32 {
+        self.px
+            + self.percent / 100.0 * container_size
+            + self.em * font_size
+            + self.rem * root_font_size
+            + self.vw / 100.0 * viewport_width
+            + self.vh / 100.0 * viewport_height
+            + self.vmin / 100.0 * viewport_width.min(viewport_height)
+            + self.vmax / 100.0 * viewport_width.max(viewport_height)
+    }
+
     fn scaled(self, k: f32) -> Self {
         CalcSum {
             px: self.px * k,
@@ -604,16 +623,9 @@ impl Length {
                 );
                 pref.clamp(min_val, max_val)
             }
-            Length::Calc(sum) => {
-                sum.px
-                    + sum.percent / 100.0 * container_size
-                    + sum.em * font_size
-                    + sum.rem * root_font_size
-                    + sum.vw / 100.0 * viewport_width
-                    + sum.vh / 100.0 * viewport_height
-                    + sum.vmin / 100.0 * viewport_width.min(viewport_height)
-                    + sum.vmax / 100.0 * viewport_width.max(viewport_height)
-            }
+            Length::Calc(sum) => sum.to_px_with_viewport(
+                font_size, root_font_size, container_size, viewport_width, viewport_height,
+            ),
         }
     }
 }
@@ -1370,6 +1382,8 @@ pub enum FlexBasis {
     Length(f32),
     /// Percentage of container.
     Percent(f32),
+    /// A calculation evaluated against the container's main size.
+    Calc(CalcSum),
 }
 
 // ==================== Grid Types ====================
