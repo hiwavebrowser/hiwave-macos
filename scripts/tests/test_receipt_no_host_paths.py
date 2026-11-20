@@ -126,6 +126,23 @@ class TestReceiptNoHostPaths(unittest.TestCase):
                         ("--remap-path-prefix=/Users/example/hiwave=. -C link-arg=/opt/x/y.o", "--remap-path-prefix=hiwave=. -C link-arg=y.o")]:
             self.assertEqual(receipt.public_text(t, REPO), want)
 
+    def test_a_windows_path_glued_to_an_option_is_stripped(self):
+        # #1362: a drive path right after a short option ("-LC:\...", RUSTFLAGS on Windows) was
+        # not matched (the drive letter followed a letter), so the whole host path stayed in the
+        # receipt. The option stays, the path goes, as for "-L/abs".
+        sys.path.insert(0, str(SCRIPTS))
+        import receipt
+        for t, want in [
+            (r"-LC:\Users\example\AppData\Local\Temp\x\lib", "-Llib"),
+            (r"-L C:\Users\example\x\lib", "-L lib"),
+            (r"--remap-path-prefix=C:\Users\example\hiwave=. -LC:\Users\example\x\lib", "--remap-path-prefix=hiwave=. -Llib"),
+            (r"-isystemC:\Users\example\include", "-isysteminclude"),
+            (r"-LD:/build/target/lib", "-Llib"),
+        ]:
+            out = receipt.public_text(t, REPO)
+            self.assertEqual(out, want)
+            self.assertNotIn("example", out)
+
     def test_a_shell_variable_path_in_the_note_is_not_mangled(self):
         sys.path.insert(0, str(SCRIPTS))
         import receipt
