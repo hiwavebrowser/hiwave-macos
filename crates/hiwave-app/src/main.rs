@@ -3197,10 +3197,8 @@ fn main() {
     let _content_proxy_downloads = proxy.clone();
     let _content_proxy_downloads_complete = proxy.clone();
     let _content_proxy_history = proxy.clone();
-    let _content_proxy_ipc = proxy.clone();
     let _content_state = Arc::clone(&state);
     let _content_state2 = Arc::clone(&state);
-    let _content_state_ipc = Arc::clone(&state);
     let _content_state_download_start = Arc::clone(&state);
     let _content_state_download_complete = Arc::clone(&state);
     let initial_url = {
@@ -3263,10 +3261,8 @@ fn main() {
         let content_proxy_downloads = _content_proxy_downloads;
         let content_proxy_downloads_complete = _content_proxy_downloads_complete;
         let content_proxy_history = _content_proxy_history;
-        let content_proxy_ipc = _content_proxy_ipc;
         let content_state = _content_state;
         let content_state2 = _content_state2;
-        let content_state_ipc = _content_state_ipc;
         let content_state_download_start = _content_state_download_start;
         let content_state_download_complete = _content_state_download_complete;
 
@@ -3513,131 +3509,6 @@ fn main() {
             let _ = content_proxy4.send_event(UserEvent::SyncTabs);
             let _ = content_proxy4.send_event(UserEvent::Navigate(url));
             false
-        })
-        .with_ipc_handler(move |message| {
-            let body = message.body();
-            log_ipc("Content IPC", body);
-            if let Ok(msg) = serde_json::from_str::<IpcMessage>(body) {
-                match &msg {
-                    IpcMessage::GoBack => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::GoBack);
-                    }
-                    IpcMessage::GoForward => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::GoForward);
-                    }
-                    IpcMessage::CreateTab { url } => {
-                        // Handle create tab directly
-                        let _ = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
-                        let _ = content_proxy_ipc.send_event(UserEvent::SyncWorkspaces);
-                        if let Some(u) = url {
-                            let _ = content_proxy_ipc.send_event(UserEvent::Navigate(u.clone()));
-                        }
-                    }
-                    IpcMessage::AddToShelf { tab_id } => {
-                        // If tab_id is "active", use the currently active tab
-                        let actual_tab_id = if tab_id == "active" {
-                            if let Ok(s) = content_state_ipc.lock() {
-                                s.shell.get_active_tab().map(|t| t.id.0.to_string()).unwrap_or_default()
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            tab_id.clone()
-                        };
-
-                        if !actual_tab_id.is_empty() {
-                            let shelf_msg = IpcMessage::AddToShelf { tab_id: actual_tab_id };
-                            let _ = ipc::commands::handle_message(&content_state_ipc, shelf_msg);
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncShelf(crate::ShelfScope::Workspace));
-                            let _ = content_proxy_ipc.send_event(UserEvent::SyncTabs);
-                        }
-                    }
-                    IpcMessage::FindInPageResult { result } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::FindInPageResult(result.clone()));
-                    }
-                    IpcMessage::TabAudioStateChanged { playing } => {
-                        info!("Tab audio state changed from content: playing={}", playing);
-                        let _ = content_proxy_ipc.send_event(UserEvent::TabAudioStateChanged { playing: *playing });
-                    }
-                    // Autofill: decided in the event loop by `ipc::autofill`,
-                    // which reads the view's own URL.
-                    IpcMessage::GetCredentialsForAutofill { domain } => {
-                        let domain = (!domain.is_empty()).then(|| domain.clone());
-                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillRequested { domain });
-                    }
-                    IpcMessage::AutofillPick { id } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::AutofillPick { id: id.clone() });
-                    }
-                    // Handle analytics and other commands that need responses sent back to content
-                    IpcMessage::GetTodayStats
-                    | IpcMessage::GetWeeklyReport
-                    | IpcMessage::GetMonthlyReport
-                    | IpcMessage::GetCustomReport { .. }
-                    | IpcMessage::GetTopDomains { .. }
-                    | IpcMessage::GetWorkspaceStats
-                    | IpcMessage::ResetAnalyticsData
-                    | IpcMessage::ExportAnalyticsData { .. } => {
-                        info!("Analytics command from content: {:?}", msg);
-                        let response = ipc::commands::handle_message(&content_state_ipc, msg.clone());
-                        let response_json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-                        let script = format!(
-                            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: {} }}));",
-                            response_json
-                        );
-                        let _ = content_proxy_ipc.send_event(UserEvent::EvaluateContentScript(script));
-                    }
-                    // Inspector IPC handlers from content webview
-                    // The page can post these itself: each payload is read
-                    // into the shape the injected scripts send, and one
-                    // that does not fit is dropped (SEC1b).
-                    IpcMessage::InspectorDomTreeResult { tree } => {
-                        let Some(tree) = ipc::inspector_payload::dom_tree(tree) else {
-                            warn!("inspector: dropped a malformed DOM tree from the content page");
-                            return;
-                        };
-                        let json = serde_json::to_string(&tree).unwrap_or_else(|_| "null".to_string());
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendDomTree(json));
-                    }
-                    IpcMessage::InspectorElementStylesResult { styles } => {
-                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
-                            warn!("inspector: dropped malformed element styles from the content page");
-                            return;
-                        };
-                        let json = serde_json::to_string(&styles).unwrap_or_else(|_| "null".to_string());
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorSendElementStyles(json));
-                    }
-                    IpcMessage::InspectorElementPicked { path, styles } => {
-                        let Some(styles) = ipc::inspector_payload::element_styles(styles) else {
-                            warn!("inspector: dropped a malformed picked element from the content page");
-                            return;
-                        };
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorElementPicked {
-                            path: path.clone(),
-                            styles,
-                        });
-                    }
-                    IpcMessage::InspectorPickerStopped => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorPickerStopped);
-                    }
-                    IpcMessage::InspectElement { path } => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectElement { path: path.clone() });
-                    }
-                    // Console IPC handlers
-                    IpcMessage::InspectorConsoleMessage { entry } => {
-                        let Some(entry) = ipc::inspector_payload::console_entry(entry) else {
-                            warn!("inspector: dropped a malformed console line from the content page");
-                            return;
-                        };
-                        let json = serde_json::to_string(&entry).unwrap_or_else(|_| "null".to_string());
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleMessage(json));
-                    }
-                    IpcMessage::InspectorConsoleClear => {
-                        let _ = content_proxy_ipc.send_event(UserEvent::InspectorConsoleClear);
-                    }
-                    _ => {}
-                }
-            }
         })
         .build_as_child(&window)
         .expect("Failed to create Content WebView")

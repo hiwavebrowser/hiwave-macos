@@ -7,7 +7,6 @@
 
 pub mod autofill;
 pub mod commands;
-pub mod inspector_payload;
 
 use serde::{Deserialize, Serialize};
 use serde_json;
