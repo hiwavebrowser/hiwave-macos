@@ -6,11 +6,19 @@ The board (scripts/realsite_board.py) records both sides of every site: RustKit'
 (tools/parity_oracle/realsite.mjs). `archive_inputs` turns each raw recording into:
 
   <side>.har.gz          the HAR, gzipped, with image/video/audio bodies left out (the entry stays,
-                         `content._skipped: "media"`; REALSITE_HAR_KEEP_IMAGES=1 keeps images) and
-                         the side's bodies capped (default 50 MB,
+                         `content._skipped: "media"`; SVG is kept; REALSITE_HAR_KEEP_IMAGES=1 keeps
+                         images) and the side's bodies capped (default 50 MB,
                          REALSITE_HAR_CAP_MB): past the cap the largest bodies go first
-                         (`_skipped: "cap"`)
+                         (`_skipped: "cap"`), never the main document's
   <side>-document.html   the main document that side received (after redirects)
+
+Secrets: whatever wrote the HAR (RustKit already leaves them out; Playwright's recordHar does not),
+`slim_har` drops the Cookie, Set-Cookie, Authorization and Proxy-Authorization headers, empties the
+request and response cookie arrays, and drops request POST bodies (`postData` keeps its mimeType).
+Query strings and response bodies are kept whole: replay matches exact URLs and serves the bodies.
+Both browser contexts are fresh (no account), but the archive still holds per-visit identifiers the
+sites put in URLs and pages, so HARs belong in a non-git folder with short retention, not in git.
+The raw, unfiltered recording is removed whatever happens.
 
 and returns what it kept for the site record (`rec["inputs"][side]`). REALSITE_ARCHIVE_INPUTS=0
 turns the recording off.
@@ -45,6 +53,9 @@ from pathlib import Path
 
 DEFAULT_CAP_MB = 50
 MEDIA_PREFIXES = ("image/", "video/", "audio/")
+# Small text that drives layout (viewBox-sized icons): kept like fonts, not dropped as media.
+KEPT_MEDIA = ("image/svg+xml",)
+SECRET_HEADERS = frozenset({"cookie", "set-cookie", "authorization", "proxy-authorization"})
 DEFAULT_SERVER = (
     Path.home() / "Repos/.worktrees/handtest-runs/replay-tools-727/tools/replay/server.py"
 )
@@ -77,26 +88,64 @@ def _body_len(content):
     return len(text.encode("utf-8")) if content.get("encoding") != "base64" else len(text) * 3 // 4
 
 
+def is_media(mime, keep_images=False):
+    """Whether a body of this type is left out: image, video and audio, except SVG (and images when
+    `keep_images`)."""
+    mime = mime.lower().split(";")[0].strip()
+    if not mime.startswith(MEDIA_PREFIXES) or mime in KEPT_MEDIA:
+        return False
+    return not (keep_images and mime.startswith("image/"))
+
+
+def strip_secrets(entry):
+    """Drop cookie and authorization headers, the cookie arrays and the request's POST body."""
+    for part in ("request", "response"):
+        msg = entry.get(part)
+        if not isinstance(msg, dict):
+            continue
+        msg["headers"] = [h for h in msg.get("headers") or []
+                          if str(h.get("name", "")).lower() not in SECRET_HEADERS]
+        msg["cookies"] = []
+    req = entry.get("request")
+    if isinstance(req, dict) and "postData" in req:
+        post = req.pop("postData") or {}
+        req["postData"] = {"mimeType": post.get("mimeType", "")}
+
+
+def _main_document_index(entries):
+    for i, e in enumerate(entries):
+        resp = e.get("response") or {}
+        status = resp.get("status") or 0
+        if 200 <= status < 300 and "html" in _mime(e).lower() and \
+                (resp.get("content") or {}).get("text") is not None:
+            return i
+    return None
+
+
 def slim_har(har, cap_bytes, keep_images=False):
-    """Leave media bodies out and cap the rest; returns (har, stats). Every entry stays."""
+    """Strip secrets, leave media bodies out and cap the rest; returns (har, stats). Every entry
+    stays. The main document's body is never capped."""
     entries = (har.get("log") or {}).get("entries") or []
     stats = {"entries": len(entries), "skipped_media": 0, "skipped_cap": 0, "capped": False}
     kept = []
     for e in entries:
-        content = (e.get("response") or {}).setdefault("content", {})
-        mime = _mime(e).lower()
-        media = mime.startswith(MEDIA_PREFIXES) and not (keep_images and mime.startswith("image/"))
-        if "text" in content and media:
+        strip_secrets(e)
+        content = (e.setdefault("response", {})).setdefault("content", {})
+        if "text" in content and is_media(_mime(e), keep_images):
             content.pop("text", None)
             content.pop("encoding", None)
             content["_skipped"] = "media"
             stats["skipped_media"] += 1
         elif "text" in content:
             kept.append(content)
+    doc = _main_document_index(entries)
+    doc_content = entries[doc]["response"]["content"] if doc is not None else None
     total = sum(_body_len(c) for c in kept)
     for content in sorted(kept, key=_body_len, reverse=True):
         if total <= cap_bytes:
             break
+        if content is doc_content:
+            continue
         total -= _body_len(content)
         content.pop("text", None)
         content.pop("encoding", None)
@@ -109,46 +158,47 @@ def slim_har(har, cap_bytes, keep_images=False):
 
 def main_document(har):
     """(url, text) of the first 2xx HTML answer (redirect hops are passed over), or None."""
-    for e in (har.get("log") or {}).get("entries") or []:
-        resp = e.get("response") or {}
-        status = resp.get("status") or 0
-        if not (200 <= status < 300) or "html" not in _mime(e).lower():
-            continue
-        content = resp.get("content") or {}
-        text = content.get("text")
-        if text is None:
-            continue
-        if content.get("encoding") == "base64":
-            text = base64.b64decode(text).decode("utf-8", errors="replace")
-        return (e.get("request") or {}).get("url"), text
-    return None
+    entries = (har.get("log") or {}).get("entries") or []
+    i = _main_document_index(entries)
+    if i is None:
+        return None
+    content = entries[i]["response"]["content"]
+    text = content["text"]
+    if content.get("encoding") == "base64":
+        text = base64.b64decode(text).decode("utf-8", errors="replace")
+    return (entries[i].get("request") or {}).get("url"), text
 
 
 def archive_inputs(site_dir, side, raw_har, cap_bytes, keep_images=None):
     """Slim and gzip `raw_har` into SITE/<side>.har.gz, write SITE/<side>-document.html, remove the
-    raw file; returns what was kept (or `{"error": ...}`)."""
+    raw file whatever happens; returns what was kept (or `{"error": ...}`)."""
     site_dir, raw_har = Path(site_dir), Path(raw_har)
     if not raw_har.exists():
         return {"error": "no recording"}
-    try:
-        har = json.loads(raw_har.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError) as e:
-        raw_har.unlink(missing_ok=True)
-        return {"error": "unreadable recording: %s" % str(e)[:120]}
-    if keep_images is None:
-        keep_images = globals()["keep_images"]()
-    har, stats = slim_har(har, cap_bytes, keep_images)
     out = site_dir / ("%s.har.gz" % side)
-    with gzip.open(out, "wt", encoding="utf-8", compresslevel=6) as f:
-        json.dump(har, f, separators=(",", ":"))
-    stats["har"] = out.name
-    stats["har_gz_bytes"] = out.stat().st_size
-    doc = main_document(har)
-    if doc:
-        (site_dir / ("%s-document.html" % side)).write_text(doc[1], encoding="utf-8")
-        stats["document"] = doc[0]
-    raw_har.unlink(missing_ok=True)
-    return stats
+    try:
+        try:
+            har = json.loads(raw_har.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"error": "unreadable recording: %s" % str(e)[:120]}
+        if keep_images is None:
+            keep_images = globals()["keep_images"]()
+        har, stats = slim_har(har, cap_bytes, keep_images)
+        try:
+            with gzip.open(out, "wt", encoding="utf-8", compresslevel=6) as f:
+                json.dump(har, f, separators=(",", ":"))
+            stats["har"] = out.name
+            stats["har_gz_bytes"] = out.stat().st_size
+            doc = main_document(har)
+            if doc:
+                (site_dir / ("%s-document.html" % side)).write_text(doc[1], encoding="utf-8")
+                stats["document"] = doc[0]
+        except OSError as e:
+            out.unlink(missing_ok=True)
+            return {"error": "archive not written: %s" % str(e)[:120]}
+        return stats
+    finally:
+        raw_har.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- replay
