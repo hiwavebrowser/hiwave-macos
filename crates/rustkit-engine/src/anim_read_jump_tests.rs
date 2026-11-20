@@ -49,7 +49,7 @@ fn pump(engine: &mut Engine, view: EngineViewId, rt: &tokio::runtime::Runtime, t
     }
 }
 
-/// The numbers in a value, for a comparison within `tolerance`.
+/// The numbers in a value, for `close`.
 fn numbers(value: &str) -> Vec<f64> {
     value
         .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
@@ -57,7 +57,9 @@ fn numbers(value: &str) -> Vec<f64> {
         .collect()
 }
 
-fn close(got: &str, want: &str, tolerance: f64) -> bool {
+/// `got` is `want`, or behind it (a value that only rises here) by at most `behind`, or
+/// ahead by at most `ahead`: one-sided, so a jump ahead never passes as lag.
+fn close(got: &str, want: &str, behind: f64, ahead: f64) -> bool {
     let (g, w) = (numbers(got), numbers(want));
     got.split(|c: char| c.is_ascii_digit() || c == '.' || c == '-')
         .collect::<String>()
@@ -65,7 +67,23 @@ fn close(got: &str, want: &str, tolerance: f64) -> bool {
             .split(|c: char| c.is_ascii_digit() || c == '.' || c == '-')
             .collect::<String>()
         && g.len() == w.len()
-        && g.iter().zip(&w).all(|(a, b)| (a - b).abs() <= tolerance)
+        && g.iter()
+            .zip(&w)
+            .all(|(a, b)| *a >= b - behind && *a <= b + ahead)
+}
+
+/// The load "took" 100 s of real time (`__rk.testRealMs`, a host hook only tests install):
+/// the real clock is far ahead of the virtual one the stepped turns move, and stands still.
+/// A timeline taken from the real clock (the bug) is then 100 s ahead, never a few ms that a
+/// fast machine could hide.
+fn slow_load(engine: &mut Engine, view: EngineViewId) {
+    engine
+        .execute_host_turn(
+            view,
+            "__rk.testRealMs = function () { return 100000; }; return 0;",
+            &[],
+        )
+        .expect("test real clock");
 }
 
 /// One case, sampled with or without `getAnimations()` reads. Returns what differs
@@ -87,6 +105,7 @@ fn run(case: &serde_json::Value, list_too: bool) -> Vec<String> {
     let rt = rt();
     let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
     rt.block_on(engine.load_url(view, url)).expect("load_url");
+    slow_load(&mut engine, view);
     let value =
         format!("getComputedStyle(document.getElementById('d')).getPropertyValue('{prop}')");
     // The style read before and after the class lands starts the transition at the
@@ -102,13 +121,14 @@ fn run(case: &serde_json::Value, list_too: bool) -> Vec<String> {
         "value only"
     };
     let mut failures = Vec::new();
-    // A value moves by 1% of its range (the end value here, from 0) a millisecond: one
-    // 5 ms clock step is 5%; with listings, one frame (17 ms) is 17%.
+    // A value moves by 1% of its range (the end value here, from 0) a millisecond. Value
+    // only, a sample is on its time within one 5 ms clock step either way; with listings,
+    // a task reads the last frame's time, so it may lag by one frame (17 ms), never lead.
     let range = numbers(case["end"].as_str().unwrap())
         .iter()
         .fold(1.0_f64, |m, n| m.max(n.abs()));
     let behind_ms = if list_too { 17.0 } else { 5.0 };
-    let tolerance = |_: &str| range * behind_ms / 100.0 + 0.01;
+    let (behind, ahead) = (range * behind_ms / 100.0 + 0.01, range * 5.0 / 100.0 + 0.01);
     for t in ["25", "50", "75"] {
         pump(&mut engine, view, &rt, 25);
         if list_too {
@@ -120,7 +140,7 @@ fn run(case: &serde_json::Value, list_too: bool) -> Vec<String> {
                  +'@'+Math.round(a.currentTime)}).join()",
             );
             let want = case["listed"][t].as_str().unwrap();
-            if !close(&listed, want, behind_ms) {
+            if !close(&listed, want, behind_ms, 5.0) {
                 failures.push(format!(
                     "{mode}: listed at {t} ms {listed:?}, Chrome {want:?}"
                 ));
@@ -128,14 +148,14 @@ fn run(case: &serde_json::Value, list_too: bool) -> Vec<String> {
         }
         let got = read(&mut engine, view, &value);
         let want = case["at"][t].as_str().unwrap();
-        if !close(&got, want, tolerance(want)) {
+        if !close(&got, want, behind, ahead) {
             failures.push(format!("{mode}: {prop} at {t} ms {got:?}, Chrome {want:?}"));
         }
     }
     pump(&mut engine, view, &rt, 100);
     let end = read(&mut engine, view, &value);
     let want = case["end"].as_str().unwrap();
-    if !close(&end, want, 0.01) {
+    if !close(&end, want, 0.01, 0.01) {
         failures.push(format!("{mode}: end {end:?}, Chrome {want:?}"));
     }
     drop(server);
@@ -181,3 +201,45 @@ fn a_keyframes_animation_is_not_moved_on_by_a_listing() {
     check("width animation");
 }
 
+/// #1359 R1: inside an animation frame, the callback's time is the timeline's time (Chrome
+/// 148: `t === document.timeline.currentTime` in every frame, the receipt's
+/// `raf_t_is_timeline`), in stepped turns too, after a load whose real time is far ahead.
+#[test]
+fn a_frames_time_is_the_timelines_in_a_stepped_turn() {
+    let receipt: serde_json::Value = serde_json::from_str(RECEIPT).unwrap();
+    assert!(receipt["raf_t_is_timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| v.as_bool() == Some(true)));
+    let page = "<!doctype html><div id=d></div><script>window.seen=[];</script>".to_string();
+    let server = serve_routes(vec![("/", "text/html", page)]);
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 200,
+        })
+        .expect("view");
+    let rt = rt();
+    let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
+    rt.block_on(engine.load_url(view, url)).expect("load_url");
+    slow_load(&mut engine, view);
+    read(
+        &mut engine,
+        view,
+        "(function step(t){if(t!==undefined)seen.push(t+'/'+document.timeline.currentTime);\
+         if(seen.length<5)requestAnimationFrame(step);})()",
+    );
+    pump(&mut engine, view, &rt, 120);
+    let seen = read(&mut engine, view, "seen.join()");
+    let frames: Vec<&str> = seen.split(',').filter(|s| !s.is_empty()).collect();
+    assert_eq!(frames.len(), 5, "five frames ran: {seen}");
+    for frame in frames {
+        let (t, tl) = frame.split_once('/').unwrap();
+        assert_eq!(t, tl, "rAF t vs document.timeline.currentTime: {seen}");
+    }
+    drop(server);
+}

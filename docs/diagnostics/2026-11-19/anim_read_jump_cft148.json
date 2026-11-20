@@ -92,5 +92,12 @@
       "end": "100px",
       "after_end": 1
     }
+  ],
+  "raf_t_is_timeline": [
+    true,
+    true,
+    true,
+    true,
+    true
   ]
 }

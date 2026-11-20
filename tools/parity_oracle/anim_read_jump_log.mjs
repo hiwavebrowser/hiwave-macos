@@ -58,7 +58,18 @@ for (const [label, css, prop] of CASES) {
   console.log(label, JSON.stringify(got));
   cases.push({ label, css, prop, ...got });
 }
+// #1359 R1: inside an animation frame, the callback's time is the timeline's time.
+await page.setContent('<!doctype html><div id=d></div>');
+const raf = await page.evaluate(() => new Promise((resolve) => {
+  const out = [];
+  function step(t) {
+    out.push(t === document.timeline.currentTime);
+    if (out.length < 5) requestAnimationFrame(step); else resolve(out);
+  }
+  requestAnimationFrame(step);
+}));
+console.log('raf t === timeline', JSON.stringify(raf));
 await browser.close();
 mkdirSync(dirname(RECEIPT), { recursive: true });
-writeFileSync(RECEIPT, JSON.stringify({ chrome: PIN, duration_ms: 100, times: TIMES, cases }, null, 2) + '\n');
+writeFileSync(RECEIPT, JSON.stringify({ chrome: PIN, duration_ms: 100, times: TIMES, cases, raf_t_is_timeline: raf }, null, 2) + '\n');
 console.log('receipt ' + RECEIPT);
