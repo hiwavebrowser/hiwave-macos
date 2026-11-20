@@ -4311,6 +4311,40 @@ mod tests {
         assert_eq!(gear_emoji, GlyphFace::Fallback { emoji: true });
     }
 
+    /// A run that draws characters from a fallback face unites that face's
+    /// extents into its line (`unite_fallback_extents`), as Chrome does on
+    /// Windows. Chrome for Testing 148.0.7778.216 win64, a `<div>` of the
+    /// text (CSS.getPlatformFontsForNode names the faces): Arial 14px "Plain
+    /// text" 16; with U+1F6E1 (Segoe UI Symbol) or U+1F50D (Segoe UI Emoji)
+    /// 19; Arial 12px with U+2B07 16 (plain 14); Arial 16px with U+1F4F1 21
+    /// (plain 18). The Segoe faces' ascent and descent rounded, united with
+    /// Arial's. RustKit kept Arial's line (16 / 14 / 18).
+    #[cfg(windows)]
+    #[test]
+    fn a_run_drawn_partly_from_a_fallback_face_unites_its_extents() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Arial");
+        let line = |t: &str, size: f32| {
+            let m = shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, size)
+                .unwrap()
+                .metrics;
+            m.ascent.round() + m.descent.round()
+        };
+        for (text, size, chrome) in [
+            ("Plain text", 14.0, 16.0),
+            ("\u{1F6E1} Shield", 14.0, 19.0),
+            ("\u{2699} Gear", 14.0, 19.0),
+            ("\u{1F50D} Search", 14.0, 19.0),
+            ("Plain text", 12.0, 14.0),
+            ("\u{2B07} Down", 12.0, 16.0),
+            ("Plain text", 16.0, 18.0),
+            ("\u{1F4F1} Share", 16.0, 21.0),
+        ] {
+            assert_eq!(line(text, size), chrome, "{text:?} at {size}px");
+        }
+    }
+
     #[test]
     fn test_wrap_text_multiple_lines() {
         let shaper = TextShaper::new();
