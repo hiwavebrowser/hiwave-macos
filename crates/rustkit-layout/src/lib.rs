@@ -4330,6 +4330,23 @@ impl LayoutBox {
             }
         };
 
+        // A drop-down select is `box-sizing: border-box` (the UA's), so an author width sizes its
+        // border box, which is never narrower than its horizontal padding + border: Chrome for
+        // Testing 148 builds `width: 100%` in a 0px block as that floor (chrome.html's collapsed
+        // sidebar: 24, where the intrinsic-width fallback above built 105), and 100% of 10px as
+        // 24 too. An auto width stays intrinsic.
+        let width = match (&control, &self.style.width) {
+            (FormControlType::Select { size, .. }, w) if *size <= 1 && !matches!(w, Length::Auto | Length::Zero) => {
+                let [_, right, _, left] = self.drop_down_edges(font_size);
+                let resolved = match w {
+                    Length::Percent(pct) => pct / 100.0 * width_base,
+                    other => self.length_to_px(other, width_base),
+                };
+                resolved.max(left + right)
+            }
+            _ => width,
+        };
+
         let height = match self.style.height {
             Length::Px(px) if px > 0.0 => px + extra_h,
             // CSS 2.1 §10.5: `auto` under a content-sized parent.
@@ -4576,6 +4593,37 @@ impl LayoutBox {
     /// half-leading + author bottom padding/border. Chrome hangs exactly
     /// this much of a control below the line baseline (bare 19px input:
     /// ~4-5px), where the bottom-edge model hung the whole box + strut.
+    /// A drop-down select's padding + border per side (top, right, bottom, left), from its style:
+    /// both are inside the control's content rect, which is its border box. The UA's are 0
+    /// padding and a 1px border per side unless the author set them; `border-style: none` is no
+    /// border (as `form_control_intrinsic_size` counts them).
+    fn drop_down_edges(&self, font_size: f32) -> [f32; 4] {
+        let st = &self.style;
+        let px = |l: &Length| match l {
+            Length::Percent(_) | Length::Auto => 0.0,
+            other => other.to_px(font_size, 16.0, 0.0),
+        };
+        let edge = |pad: &Length, width: &Length, style: BorderStyle, declared: bool| {
+            let border = if style == BorderStyle::None {
+                0.0
+            } else {
+                let w = px(width);
+                if declared || w > 0.0 {
+                    w
+                } else {
+                    1.0
+                }
+            };
+            px(pad) + border
+        };
+        [
+            edge(&st.padding_top, &st.border_top_width, st.border_top_style, st.border_declared[0]),
+            edge(&st.padding_right, &st.border_right_width, st.border_right_style, st.border_declared[1]),
+            edge(&st.padding_bottom, &st.border_bottom_width, st.border_bottom_style, st.border_declared[2]),
+            edge(&st.padding_left, &st.border_left_width, st.border_left_style, st.border_declared[3]),
+        ]
+    }
+
     fn form_control_baseline_hang(&self) -> f32 {
         let font_size = match self.style.font_size {
             Length::Px(px) => px,
@@ -4594,6 +4642,22 @@ impl LayoutBox {
         } else {
             (font_size * 0.8, font_size * 0.2)
         };
+        // A drop-down (menulist) carries its label line centred in its content box, and Chrome
+        // seats the baseline on it at a whole pixel: floor(top edge + (content - (ascent +
+        // descent)) / 2 + ascent). Chrome for Testing 148, Arial 13px: 20 of 31 with `padding:
+        // 8px 12px; border: none`, 14 of 19 bare. Its padding and border are inside this box's
+        // content rect (a control's content rect is its border box), so read them from the style
+        // as `form_control_intrinsic_size` does: the UA's 0 padding and 1px border per side unless
+        // the author set them (`border-style: none` is no border).
+        if let BoxType::FormControl(FormControlType::Select { size, .. }) = &self.box_type {
+            if *size <= 1 {
+                let [top, _, bottom, _] = self.drop_down_edges(font_size);
+                let height = self.dimensions.content.height;
+                let content = (height - top - bottom).max(0.0);
+                let baseline = (top + (content - (ascent + descent)) / 2.0 + ascent).floor();
+                return (height - baseline).max(0.0) + self.dimensions.margin.bottom;
+            }
+        }
         let half_leading = half_leading(line_height, ascent, descent);
         // A single-line control taller than its text line (author `height`)
         // centres the line in its content box, so half the spare height
@@ -18666,9 +18730,11 @@ mod tests {
                 s,
             )
         };
-        // (block font px, styled select, Chrome's select height, Chrome's line height)
+        // (block font px, styled select, Chrome's select height, Chrome's line height). In the
+        // 24px block the strut's ascent is above the select's: Chrome's line is 28, the select
+        // 8px down it with its baseline at 22 (the line from the block's top, not the select's).
         for (block_px, styled, chrome_select, chrome_line) in
-            [(16.0, true, 31.0, 31.0), (16.0, false, 19.0, 19.0), (13.0, true, 31.0, 31.0), (24.0, false, 19.0, 20.0)]
+            [(16.0, true, 31.0, 31.0), (16.0, false, 19.0, 19.0), (13.0, true, 31.0, 31.0), (24.0, false, 19.0, 28.0)]
         {
             let mut block = LayoutBox::new(BoxType::Block, block_style(block_px));
             block.children.push(select(styled));
