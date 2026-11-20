@@ -3042,14 +3042,15 @@ impl ComputedStyle {
     }
 
     /// Whether `self` and `other` have the same background layers but for gradient images:
-    /// layer by layer the same image, or a gradient on both sides with the rest of the layer
-    /// equal; and both or neither with the legacy single gradient.
+    /// layer by layer the same layer, or a gradient on both sides with the rest of the layer
+    /// equal; and both or neither with the legacy single gradient. A URL layer that changes in
+    /// anything (its image, or its position, size, repeat, origin or clip) is not paint here.
     fn gradient_backgrounds_alike(&self, other: &ComputedStyle) -> bool {
         let gradient = |image: &BackgroundImage| matches!(image, BackgroundImage::Gradient(_));
         self.background_layers.len() == other.background_layers.len()
             && self.background_gradient.is_some() == other.background_gradient.is_some()
             && self.background_layers.iter().zip(&other.background_layers).all(|(a, b)| {
-                a.image == b.image
+                a == b
                     || (gradient(&a.image)
                         && gradient(&b.image)
                         && a.position == b.position
@@ -3062,7 +3063,14 @@ impl ComputedStyle {
 
     /// Whether the properties [`Self::copy_paint_only`] lists are the same
     /// in both, custom properties aside (comparing those flattens both
-    /// sets, hundreds of entries on a themed page).
+    /// sets, hundreds of entries on a themed page). The background layers
+    /// are compared whole: a gradient layer that changed is paint
+    /// (`copy_paint_only` takes it, as a gradient is drawn from its stops
+    /// into the box it is given, with nothing to fetch or decode), while a
+    /// URL layer that changed still costs a layout, because its image has
+    /// to be loaded and decoded before it can be painted, which only the
+    /// build and layout path starts (`differs_only_in_paint` sees the
+    /// difference `copy_paint_only` did not copy).
     pub fn same_paint(&self, other: &ComputedStyle) -> bool {
         self.color == other.color
             && self.background_color == other.background_color
