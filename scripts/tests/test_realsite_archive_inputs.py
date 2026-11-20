@@ -219,6 +219,38 @@ class SecretsTest(unittest.TestCase):
                 self.assertNotIn("postData", back[0]["request"])
 
 
+class RequestHeaderAllowListTest(unittest.TestCase):
+    """Request headers are kept only when replay or diagnosis needs them; every other name goes,
+    whatever credential it carries. Response headers (served by replay) lose only the deny-list."""
+
+    KEPT = [":method", ":path", ":authority", ":scheme", "Host", "Accept", "Accept-Language",
+            "Accept-Encoding", "Content-Type", "Range", "Referer", "User-Agent", "Origin",
+            "Sec-Fetch-Dest", "sec-fetch-mode", "Sec-Fetch-Site", "Sec-Fetch-User"]
+    DROPPED = ["X-CSRF-Token", "x-xsrf-token", "X-Api-Key", "x-auth-token", "X-Amz-Security-Token",
+               "Cookie2", "Cookie", "Authorization", "Proxy-Authorization", "X-Anything-Else"]
+
+    def test_only_allow_listed_request_headers_survive_on_either_side(self):
+        for side in ("chrome", "rustkit"):
+            with self.subTest(side=side), tempfile.TemporaryDirectory() as td:
+                d = Path(td)
+                e = entry("https://a.test/")
+                e["request"]["headers"] = [{"name": n, "value": "v-" + SECRET} for n in self.KEPT + self.DROPPED]
+                e["response"]["headers"] += [
+                    {"name": "Set-Cookie2", "value": "a=" + SECRET},
+                    {"name": "set-cookie", "value": "b=" + SECRET},
+                    {"name": "X-Served-By", "value": "cache-1"},
+                    {"name": "Location", "value": "https://a.test/next"},
+                ]
+                raw = d / ("%s.raw.har" % side)
+                raw.write_text(json.dumps(har(e)))
+                realsite_har.archive_inputs(d, side, raw, cap_bytes=50 * 2**20)
+                with gzip.open(d / ("%s.har.gz" % side), "rt", encoding="utf-8") as f:
+                    back = json.load(f)["log"]["entries"][0]
+                self.assertEqual([h["name"] for h in back["request"]["headers"]], self.KEPT)
+                self.assertEqual([h["name"] for h in back["response"]["headers"]],
+                                 ["content-type", "X-Served-By", "Location"])
+
+
 class CapOrderTest(unittest.TestCase):
     def test_the_main_document_body_is_never_capped(self):
         h = har(
