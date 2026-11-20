@@ -1274,7 +1274,13 @@ from name to position. Bindings are only appended, and a name is added once (`cr
 return the existing binding), so a position never changes and the map answers what the scan for the
 first binding of that name answered. Lookups go through the map; iteration, indices and flags are
 unchanged. The instantiation loops keep their lists (and their order) and test membership in an
-`FxHashSet` kept beside each list.
+`FxHashSet` kept beside each list. The Annex B function checks and the declared-function-name checks
+stay linear scans: they are correct, and their lists are short (one entry per function declaration).
+
+**Re-applying on a Boa update.** Every write to a scope's bindings goes through `Bindings::push`,
+which keeps the index; a new upstream lookup by name must use `find_name` / `find_name_mut`, and any
+new code that adds a binding must call `push` (the `Vec` is not reachable otherwise), or the index
+misses it.
 
 **Measured** (parity profile; `kevlar_base` from the 2026-10-20 YouTube HAR): parse 5,601 -> 1,405 ms,
 compile 6,407 -> 574 ms; the whole script in the engine (HAR replay, script size limit lifted

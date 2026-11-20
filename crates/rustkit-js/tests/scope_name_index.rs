@@ -30,28 +30,43 @@ fn bundle(n: usize) -> String {
     src
 }
 
-/// The fastest of three parse + compile runs of `src`.
+/// One parse + compile of `src`.
 fn parse_and_compile(src: &str) -> Duration {
-    (0..3)
-        .map(|_| {
-            let mut context = Context::default();
-            let start = Instant::now();
-            let script = Script::parse(Source::from_bytes(src.as_bytes()), None, &mut context).expect("parse");
-            script.codeblock(&mut context).expect("compile");
-            start.elapsed()
-        })
-        .min()
-        .unwrap()
+    let mut context = Context::default();
+    let start = Instant::now();
+    let script = Script::parse(Source::from_bytes(src.as_bytes()), None, &mut context).expect("parse");
+    script.codeblock(&mut context).expect("compile");
+    start.elapsed()
+}
+
+/// The fastest of five runs of each, interleaved (small, large, small, ...)
+/// so a busy moment on the host slows both sizes, not one.
+fn fastest_pair(small: &str, large: &str) -> (Duration, Duration) {
+    let (mut s, mut l) = (Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        s = s.min(parse_and_compile(small));
+        l = l.min(parse_and_compile(large));
+    }
+    (s, l)
 }
 
 #[test]
 fn parse_and_compile_time_grows_linearly_with_a_functions_variables() {
     // Four times the variables: linear is about x4, a scan per lookup about
-    // x16 (x13 measured on the scan, debug build).
-    let small = parse_and_compile(&bundle(5_000));
-    let large = parse_and_compile(&bundle(20_000));
-    let ratio = large.as_secs_f64() / small.as_secs_f64();
-    assert!(ratio < 6.0, "5k variables {small:?}, 20k {large:?}: x{ratio:.2}");
+    // x16 (x13 measured on the scan, debug build). The bound sits between,
+    // and a measurement over it is taken again, up to three times, so a
+    // loaded host does not fail it; the scan was over it every time.
+    let (small_src, large_src) = (bundle(5_000), bundle(20_000));
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let (small, large) = fastest_pair(&small_src, &large_src);
+        let ratio = large.as_secs_f64() / small.as_secs_f64();
+        if ratio < 6.0 {
+            return;
+        }
+        seen.push(format!("5k {small:?}, 20k {large:?}: x{ratio:.2}"));
+    }
+    panic!("parse + compile grew faster than linearly: {seen:?}");
 }
 
 /// What the index answers is what the scan answered: the binding of that
