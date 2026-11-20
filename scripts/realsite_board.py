@@ -241,6 +241,10 @@ def hid_idle_seconds():
 
 
 def _pid_alive(pid):
+    """Whether process `pid` is running. os.kill(pid, 0) is the POSIX probe; on
+    Windows signal 0 is CTRL_C_EVENT, not a probe, so ask the process handle."""
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -248,6 +252,31 @@ def _pid_alive(pid):
     except PermissionError:
         return True
     return True
+
+
+def _pid_alive_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    # SYNCHRONIZE lets the handle be waited on; a process's handle is signalled once it has
+    # exited, so a zero-timeout wait is exact (an exit code equal to STILL_ACTIVE, 259, is not).
+    SYNCHRONIZE, PROCESS_QUERY_LIMITED_INFORMATION = 0x00100000, 0x1000
+    WAIT_TIMEOUT, ERROR_ACCESS_DENIED = 0x102, 5
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # No such process; a process we may not open exists, as PermissionError does above.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class OracleLockBusy(RuntimeError):
