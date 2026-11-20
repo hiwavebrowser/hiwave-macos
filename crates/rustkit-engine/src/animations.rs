@@ -3043,6 +3043,23 @@ mod tests {
             ]
         );
     }
+
+    /// TRANS-F: a transition naming a custom property is no engine gap
+    /// (Chrome runs none for an unregistered one, and a registered one
+    /// runs here), so it is not reported as an unsupported API. Tailwind
+    /// v4's `--tw-gradient-from` reported one entry per name on x.com.
+    #[test]
+    fn a_custom_property_in_a_transition_is_not_reported_unsupported() {
+        let mut anims = Animations::default();
+        let no_frames = |_: &str, _: &ComputedStyle| None::<Vec<Frame>>;
+        let mut style = ComputedStyle::new();
+        style.transitions = ["--tw-gradient-from", "--u", "zoom"]
+            .iter()
+            .map(|p| linear_100ms(p).unwrap())
+            .collect();
+        anims.on_style(7, &mut style, &no_frames);
+        assert_eq!(anims.take_unsupported(), ["zoom"]);
+    }
 }
 
 // ------------------------------------------------------------ svg paint
