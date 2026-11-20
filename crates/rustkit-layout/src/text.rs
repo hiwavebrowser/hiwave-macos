@@ -4179,6 +4179,36 @@ mod tests {
         assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
     }
 
+    /// A character with the Emoji property outside `is_emoji`'s ranges still takes
+    /// the presentation its variation selector asks for. The report page's
+    /// "⏱️ Time Saved" is U+23F1 + U+FE0F (Miscellaneous Technical): Chrome for
+    /// Testing 148.0.7778.216 win64 at 12px semibold draws it from Segoe UI Emoji,
+    /// 16.48 wide; bare U+23F1, or + U+FE0E, from Segoe UI Symbol, 10.86
+    /// (CSS.getPlatformFontsForNode + the span's width). RustKit never let U+FE0F
+    /// steer it: U+23F1 was not `is_emoji`, so it kept the primary's .notdef.
+    #[cfg(windows)]
+    #[test]
+    fn an_emoji_property_character_outside_the_emoji_ranges_honours_its_variation_selector() {
+        use rustkit_text::GlyphFace;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Segoe UI");
+        let one = |t: &str| {
+            let s = shaper
+                .shape(t, &chain, FontWeight(600), FontStyle::Normal, FontStretch::Normal, 12.0)
+                .unwrap();
+            (s.metrics.width, s.glyphs[0].face)
+        };
+        for (text, width, emoji) in [
+            ("\u{23F1}", 10.86, false),
+            ("\u{23F1}\u{FE0F}", 16.48, true),
+            ("\u{23F1}\u{FE0E}", 10.86, false),
+        ] {
+            let (w, face) = one(text);
+            assert!((w - width).abs() < 0.02, "{text:?}: RustKit {w}, Chrome {width}");
+            assert_eq!(face, GlyphFace::Fallback { emoji }, "{text:?}");
+        }
+    }
+
     /// A symbol WITHOUT Emoji_Presentation that the primary face lacks is drawn
     /// from a TEXT face, as Chrome's DirectWrite fallback does (Segoe UI
     /// Symbol), and only an Emoji_Presentation character (or one U+FE0F turns
