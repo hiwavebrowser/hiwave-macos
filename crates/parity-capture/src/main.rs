@@ -54,6 +54,14 @@ struct Args {
     #[arg(long)]
     dump_scripts: Option<String>,
 
+    /// Output path for a HAR 1.2 recording of every response the loader answered (decoded bodies;
+    /// image, video and audio bodies left out, SVG kept, images kept with
+    /// REALSITE_HAR_KEEP_IMAGES=1; no cookie or authorization values), written also when the
+    /// capture times out
+    /// (QB-ARCHIVE-INPUT: the real-site board archives it to replay a site offline).
+    #[arg(long)]
+    dump_har: Option<String>,
+
     /// Viewport width
     #[arg(long, default_value = "1280")]
     width: u32,
@@ -894,6 +902,12 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    if args.dump_har.is_some() {
+        // Image bodies only on request (the board's opt-in); video and audio never.
+        let keep_images = std::env::var("REALSITE_HAR_KEEP_IMAGES").is_ok_and(|v| v == "1");
+        rustkit_net::har::start_recording(keep_images);
+    }
+
     // Hard wall-clock limit. A live page can stall the engine anywhere
     // (network, layout, paint) and nothing inside the engine can be trusted
     // to give up, so the limit is enforced from outside the capture thread.
@@ -903,8 +917,11 @@ fn main() {
             "timeout",
             format!("capture exceeded {} ms", args.timeout_ms),
         );
+        let har_path = args.dump_har.clone();
         std::thread::spawn(move || {
             std::thread::sleep(limit);
+            // What was fetched before the stall is the input a replay of the timeout needs.
+            write_har(har_path.as_deref());
             println!("{}", serde_json::to_string(&timeout_result).unwrap());
             std::process::exit(3);
         });
@@ -940,6 +957,7 @@ fn main() {
         Err(_) => CaptureResult::new(&args).failed("error", "worker thread panicked".to_string()),
     };
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
+    write_har(args.dump_har.as_deref());
 
     // Output JSON result
     println!("{}", serde_json::to_string(&result).unwrap());
@@ -949,6 +967,14 @@ fn main() {
         std::process::exit(0);
     } else {
         std::process::exit(1);
+    }
+}
+
+/// `--dump-har`: the loader's recording so far, written to `path` (QB-ARCHIVE-INPUT).
+fn write_har(path: Option<&str>) {
+    let Some(path) = path else { return };
+    if let Err(e) = rustkit_net::har::write(std::path::Path::new(path)) {
+        error!("Failed to write HAR: {:?}", e);
     }
 }
 
