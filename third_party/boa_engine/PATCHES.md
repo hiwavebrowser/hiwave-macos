@@ -1252,3 +1252,41 @@ ComputedPropertyContains rule (only a computed name is looked at).
 Chrome for Testing 148.0.7778.216 (`docs/diagnostics/2026-11-17/class_element_eval_cases.json`). Red
 without the patch: 16 of 21 differed (no answer, a wrong value such as `undefined` for a static
 block's read, or the class instead of the value).
+
+## Patch: name lookups in a scope and in declaration instantiation are not scans (`scope-name-index`)
+
+**Files.** `third_party/boa_ast/src/scope.rs` (`Bindings`, and every lookup by name in `Scope`),
+`third_party/boa_ast/src/scope_analyzer.rs` (function, eval and module declaration instantiation),
+`third_party/boa_engine/src/bytecompiler/declarations.rs` (global, eval and function declaration
+instantiation). Marked `HIWAVE PATCH (scope-name-index)`. The vendored crates' licence is unchanged
+(Unlicense OR MIT); this is HiWave's patch.
+
+**Why.** A scope kept its bindings in a `Vec` and every lookup by name (`get_identifier_reference`,
+`access_binding`, `create_mutable_binding`, `set_mutable_binding` and the rest) scanned it comparing
+strings; declaration instantiation tested `instantiatedVarNames` / `declaredVarNames` with
+`Vec::contains`. A function with n variables and m references therefore parsed and compiled in
+O(n x m). YouTube's `kevlar_base` bundle (10.9 MB, one function with about 9,000 variables) took 5.6 s
+to parse (83% in scope analysis) and 6.4 s to compile (81% in `get_identifier_reference`), and 12.7 s
+in the engine in all.
+
+**What.** `Scope`'s bindings are a `Bindings`: the same list in the same order, plus an `FxHashMap`
+from name to position. Bindings are only appended, and a name is added once (`create_*_binding`
+return the existing binding), so a position never changes and the map answers what the scan for the
+first binding of that name answered. Lookups go through the map; iteration, indices and flags are
+unchanged. The instantiation loops keep their lists (and their order) and test membership in an
+`FxHashSet` kept beside each list. The Annex B function checks and the declared-function-name checks
+stay linear scans: they are correct, and their lists are short (one entry per function declaration).
+
+**Re-applying on a Boa update.** Every write to a scope's bindings goes through `Bindings::push`,
+which keeps the index; a new upstream lookup by name must use `find_name` / `find_name_mut`, and any
+new code that adds a binding must call `push` (the `Vec` is not reachable otherwise), or the index
+misses it.
+
+**Measured** (parity profile; `kevlar_base` from the 2026-10-20 YouTube HAR): parse 5,601 -> 1,405 ms,
+compile 6,407 -> 574 ms; the whole script in the engine (HAR replay, script size limit lifted
+locally) 12,664 -> 3,146 ms. Peak memory is unchanged (about 0.9 GB for the parse).
+
+**Pin.** `crates/rustkit-js/tests/scope_name_index.rs`: parse plus compile of a function with 5k and
+20k variables (each declared, read, and read from a nested function); 4x the variables took x13
+longer before the patch (0.68 s and 8.9 s, debug build) and must take under x6. Name resolution
+(shadowing, a redeclared `var`, parameters, block scopes, closures) is checked to answer as before.
