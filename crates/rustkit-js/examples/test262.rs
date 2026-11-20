@@ -195,13 +195,10 @@ fn install_host(realm: &Realm, context: &mut Context) -> JsResult<JsValue> {
 }
 
 /// The name of the error a script threw: its constructor's `name`, as test262's `negative.type`.
+/// Read from the error object, never from a native error's text: that text is `Kind: message`
+/// with the stack position after it, so an error with no message (`throw new TypeError()`) read
+/// as `TypeError (native)`.
 fn error_name(err: &JsError, context: &mut Context) -> String {
-    if let Ok(native) = err.try_native(context) {
-        let text = native.to_string();
-        if let Some(name) = text.split(':').next() {
-            return name.trim().to_string();
-        }
-    }
     let Ok(value) = err.clone().into_opaque(context) else {
         return "(error could not be made a value)".to_string();
     };
