@@ -101,7 +101,18 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
-    #[cfg(not(target_os = "macos"))]
+    /// Arial first: it is Chrome's `sans-serif` on Windows (Chrome 157, Windows 11: the same width
+    /// as Arial, not Segoe UI, which is `system-ui`).
+    #[cfg(windows)]
+    pub fn sans_serif() -> Self {
+        Self::new("Arial")
+            .with_fallback("Segoe UI")
+            .with_fallback("Microsoft YaHei")
+            .with_fallback("sans-serif")
+    }
+
+    /// Create default font chain for sans-serif.
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn sans_serif() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Arial")
@@ -157,7 +168,17 @@ impl FontFamilyChain {
     pub const UA_DEFAULT_FAMILY: &'static str = "Times";
 
     /// Create default font chain for monospace.
-    #[cfg(not(target_os = "macos"))]
+    /// Consolas first: it is Chrome's `monospace` on Windows (Chrome 157, Windows 11: the same width
+    /// as Consolas; Cascadia Code is not a default Chrome uses).
+    #[cfg(windows)]
+    pub fn monospace() -> Self {
+        Self::new("Consolas")
+            .with_fallback("Courier New")
+            .with_fallback("monospace")
+    }
+
+    /// Create default font chain for monospace.
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn monospace() -> Self {
         Self::new("Cascadia Code")
             .with_fallback("Consolas")
@@ -215,11 +236,19 @@ impl FontFamilyChain {
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
             "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
+            // Chrome's faces on Windows: Comic Sans MS and Impact (Chrome 157, Windows 11). Papyrus
+            // is not Chrome's `fantasy` there even where Office installed it.
+            #[cfg(windows)]
+            "cursive" => Self::new("Comic Sans MS").with_fallback("cursive"),
+            #[cfg(windows)]
+            "fantasy" => Self::new("Impact").with_fallback("fantasy"),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
+            #[cfg(not(windows))]
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
+            #[cfg(not(windows))]
             "fantasy" => Self::new("Papyrus")
                 .with_fallback("Impact")
                 .with_fallback("fantasy"),
@@ -3233,13 +3262,17 @@ mod tests {
         let sans = FontFamilyChain::from_css_value("sans-serif");
         #[cfg(target_os = "macos")]
         assert_eq!(sans.primary, "Helvetica");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        assert_eq!(sans.primary, "Arial");
+        #[cfg(not(any(target_os = "macos", windows)))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
         assert_eq!(mono.primary, "Courier");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        assert_eq!(mono.primary, "Consolas");
+        #[cfg(not(any(target_os = "macos", windows)))]
         assert_eq!(mono.primary, "Cascadia Code");
 
         // Test system-ui and vendor-prefixed variants
@@ -4329,6 +4362,31 @@ mod shape_memo_tests {
         }
         let has_registry = cfg!(any(target_os = "macos", target_os = "linux", windows));
         assert_eq!(changed, has_registry);
+    }
+}
+
+/// The generic families resolve to Chrome's faces on Windows (Chrome 157 on Windows 11, by
+/// width: sans-serif = Arial, serif = Times New Roman, monospace = Consolas, cursive = Comic Sans
+/// MS, fantasy = Impact, system-ui = Segoe UI).
+#[cfg(all(test, windows))]
+mod windows_generic_family_tests {
+    use super::*;
+
+    #[test]
+    fn generic_families_resolve_to_chromes_windows_faces() {
+        for (css, postscript) in [
+            ("sans-serif", "ArialMT"),
+            ("serif", "TimesNewRomanPSMT"),
+            ("monospace", "Consolas"),
+            ("cursive", "ComicSansMS"),
+            ("fantasy", "Impact"),
+            ("system-ui", "SegoeUI"),
+        ] {
+            let chain = FontFamilyChain::from_css_value(css);
+            let resolved = resolve_windows_face(&chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal)
+                .map(|(_, _, ps)| ps);
+            assert_eq!(resolved.as_deref(), Some(postscript), "`{css}` resolves to {resolved:?} (chain {chain:?})");
+        }
     }
 }
 
