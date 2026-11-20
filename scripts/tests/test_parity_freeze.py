@@ -120,9 +120,18 @@ class RafDrivenDrawingReachesItsLastFrame(unittest.TestCase):
         self.assertEqual(self.log.get("dateAgain"), FROZEN_TIME)
         ts = self.log.get("timestamps") or []
         self.assertEqual(len(ts), 60)
-        self.assertAlmostEqual(ts[0], FROZEN_TIME + FRAME_MS, places=6)
+        # delta: a double near 1.7e12 resolves to ~2.4e-4 ms.
+        self.assertAlmostEqual(ts[0], FROZEN_TIME + FRAME_MS, delta=1e-3)
         for prev, cur in zip(ts, ts[1:]):
-            self.assertAlmostEqual(cur - prev, FRAME_MS, places=6)
+            self.assertAlmostEqual(cur - prev, FRAME_MS, delta=1e-3)
+
+    def test_frame_callbacks_run_before_the_resize_observation_of_the_same_update(self):
+        # Chart.js's line chart is never drawn if its animator's frames run
+        # ahead of the resize observation (#1361); frames must be Chrome's own.
+        self.assertEqual(self.log.get("order"), ["A1", "ro"] + [f"A{i}" for i in range(2, 11)])
+
+    def test_the_capture_waited_for_the_frames_to_finish(self):
+        self.assertEqual(self.record.get("animation_frames", {}).get("settled"), True)
 
     def test_a_cancelled_callback_never_runs(self):
         self.assertIs(self.log.get("cancelledRan"), False)

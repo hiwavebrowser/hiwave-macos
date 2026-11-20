@@ -16,6 +16,7 @@
 <body>
 <canvas id="byFrames" width="200" height="100"></canvas>
 <canvas id="byClock" width="200" height="100"></canvas>
+<div id="observed" style="display:none; position:absolute; top:130px; width:50px; height:10px"></div>
 <script>
   const log = { dateAtLoad: Date.now(), dateAgain: Date.now(), timestamps: [], cancelledRan: false };
   window.__hiwaveBoard = { calls: () => [log], errors: [] };
@@ -54,6 +55,27 @@
     else { log.framesByClock = m; log.dateAtEnd = Date.now(); }
   }
   requestAnimationFrame(byClock);
+
+  // Chrome's order within one rendering update: animation frame callbacks,
+  // then ResizeObserver deliveries (#1361 pinned "A1 ro A2 ... " on Chrome 148).
+  // Chart.js resizes from a ResizeObserver; its animator runs on rAF.
+  // Started after load, as the report page's period click is: a frame
+  // round asked for, then the observed box shown, in one task.
+  log.order = [];
+  let k = 0;
+  function orderLoop() {
+    k += 1;
+    log.order.push('A' + k);
+    if (k < 10) requestAnimationFrame(orderLoop);
+  }
+  const observed = document.getElementById('observed');
+  new ResizeObserver((entries) => {
+    if (entries[0].contentRect.width > 0) log.order.push('ro');
+  }).observe(observed);
+  window.addEventListener('load', () => setTimeout(() => {
+    requestAnimationFrame(orderLoop);
+    observed.style.display = 'block';
+  }, 30));
 
   // A cancelled frame callback never runs.
   const id = requestAnimationFrame(() => { log.cancelledRan = true; });
