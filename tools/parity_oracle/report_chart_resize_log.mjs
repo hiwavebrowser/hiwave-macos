@@ -11,7 +11,10 @@
  *
  * The pages are the ones in rustkit-engine `load_geometry_read_tests.rs`
  * (`a_resize_observation_waits_for_the_frame_already_asked_for`,
- * `real_chart_js_built_hidden_resizes_both_charts_when_shown`); keep them equal.
+ * `real_chart_js_built_hidden_resizes_both_charts_when_shown`,
+ * `a_resize_observation_under_an_endless_frame_loop_is_delivered_in_the_load`); keep them equal.
+ * `iframe` is Chrome's answer to whether a frame tree's frame callbacks hold the top document's
+ * observations (they do: one rendering update for the tree).
  */
 import { chromium } from 'playwright';
 import { readFileSync } from 'fs';
@@ -34,6 +37,30 @@ export const ORDER_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{
   "new ResizeObserver(function(es){var r=es[0].contentRect;L('ro='+r.width+'x'+r.height);" +
   "requestAnimationFrame(function(){L('B');});}).observe(document.getElementById('cc'));" +
   "document.getElementById('content').style.display='block';});});" +
+  "</script></body></html>";
+
+// R1 (#1361): an endless frame loop (a spinner, a canvas loop) running when the observed box
+// is shown: the observation is still delivered, after the loop's next frame.
+export const ENDLESS_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>" +
+  "<div id=content style='display:none'><div id=cc></div></div><div id=out>x</div><script>" +
+  "var frames=0;function A(){frames++;requestAnimationFrame(A);}requestAnimationFrame(A);" +
+  "new ResizeObserver(function(es){var r=es[0].contentRect;" +
+  "document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height+' after '+(frames>0?'a frame':'no frame');" +
+  "}).observe(document.getElementById('cc'));" +
+  "document.getElementById('content').style.display='block';" +
+  "</script></body></html>";
+
+// R1 nit (#1361): a same-origin iframe's frame loop and the top document's observation are one
+// rendering update: does the top document's resize observation come after the iframe's frame
+// callbacks of that update?
+export const IFRAME_PAGE = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>" +
+  "<div id=content style='display:none'><div id=cc></div></div><div id=out>x</div>" +
+  "<iframe id=f srcdoc='<p>f</p>'></iframe><script>" +
+  "var log=[];function L(s){log.push(s);document.getElementById('out').textContent='R:'+log.join(' ');}" +
+  "addEventListener('load',function(){var w=document.getElementById('f').contentWindow;" +
+  "var n=0;function F(){n++;L('F'+n);if(n<3)w.requestAnimationFrame(F);}w.requestAnimationFrame(F);" +
+  "new ResizeObserver(function(es){var r=es[0].contentRect;L('ro='+r.width+'x'+r.height);}).observe(document.getElementById('cc'));" +
+  "document.getElementById('content').style.display='block';});" +
   "</script></body></html>";
 
 export function chartPage(chart) {
@@ -60,7 +87,7 @@ export function chartPage(chart) {
 
 const browser = await chromium.launch({ ...getDeterministicLaunchOptions(), headless: true });
 const out = { version: browser.version(), viewport: '800x600' };
-for (const [name, html] of [['order', ORDER_PAGE], ['chart', chartPage(CHART)]]) {
+for (const [name, html] of [['order', ORDER_PAGE], ['chart', chartPage(CHART)], ['endless', ENDLESS_PAGE], ['iframe', IFRAME_PAGE]]) {
   const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
   await page.setContent(html);
   await page.waitForTimeout(600);

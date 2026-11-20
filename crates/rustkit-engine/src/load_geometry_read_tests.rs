@@ -288,3 +288,23 @@ fn real_chart_js_built_hidden_resizes_both_charts_when_shown() {
         "Chrome 148 at 800x600"
     );
 }
+
+/// R1 on #1361: an endless frame loop (a spinner, a canvas loop) running while the observed box
+/// is shown. The observation waits for the loop's frame, and the load runs that frame (its
+/// timers), so a load-only capture (no live turn after it: the board, the campaign) still has
+/// it delivered, after a frame, as Chrome does. Chrome for Testing 148.0.7778.216 at 800x600
+/// (`report_chart_resize_cft148.json` `endless`). The frames the load runs counted no round, so
+/// the observation waited for one that never came.
+#[test]
+fn a_resize_observation_under_an_endless_frame_loop_is_delivered_in_the_load() {
+    let page = "<!doctype html><html><head><style>body{margin:0} #cc{height:300px}</style></head><body>\
+        <div id=content style='display:none'><div id=cc></div></div><div id=out>x</div><script>\
+        var frames=0;function A(){frames++;requestAnimationFrame(A);}requestAnimationFrame(A);\
+        new ResizeObserver(function(es){var r=es[0].contentRect;\
+        document.getElementById('out').textContent='R:ro='+r.width+'x'+r.height+' after '+(frames>0?'a frame':'no frame');\
+        }).observe(document.getElementById('cc'));\
+        document.getElementById('content').style.display='block';\
+        </script></body></html>";
+    let (mut engine, view) = load_html(page);
+    assert_eq!(out(&mut engine, view), "R:ro=800x300 after a frame", "Chrome 148 at 800x600, load only");
+}
