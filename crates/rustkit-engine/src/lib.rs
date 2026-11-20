@@ -720,6 +720,8 @@ mod css_transitions_visibility_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_property_tests;
 #[cfg(all(test, feature = "headless"))]
+mod registered_transition_fastpath_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_transitions_lists_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_grid_tests;
@@ -739,6 +741,8 @@ mod media_fetch_tests;
 mod media_host_tests;
 #[cfg(all(test, feature = "headless"))]
 mod replaced_float_avoid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod form_control_float_avoid_tests;
 #[cfg(all(test, feature = "headless"))]
 mod anim_read_jump_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -11566,7 +11570,28 @@ impl Engine {
             .get(&id)
             .is_some_and(|view| view.lay.scrolled_in_task.replace(false));
         let mut script_note = "-".to_string();
-        if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
+        // REG-TRANS-FASTPATH: an animation frame whose registered custom property transitions
+        // took no paint-only frame names the elements that animate; a relayout the animations
+        // alone asked for restyles only those (and what is under them) on the same short path.
+        let animation_roots = self
+            .views
+            .get(&id)
+            .and_then(|view| view.lay.animation_roots.borrow_mut().take())
+            .filter(|_| {
+                !causes.counts.is_empty()
+                    && causes.counts.iter().all(|(kind, _)| kind == "animation")
+                    && causes.mutations.is_empty()
+                    && dirty.as_ref().is_none_or(|d| d.full.is_none() && d.nodes.is_empty())
+                    && !scrolled_in_task
+            });
+        if let (true, Some(roots)) =
+            (script_restyle_enabled() && pointer_restyle.is_none() && !cooling, animation_roots)
+        {
+            if let Some(view) = self.views.get(&id) {
+                view.lay.script_idle.set(0);
+                *view.lay.script_roots.borrow_mut() = Some(roots);
+            }
+        } else if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
             match script_restyle_roots(&causes, dirty.as_ref(), scrolled_in_task) {
                 Ok(roots) => {
                     if let Some(view) = self.views.get(&id) {
@@ -17574,10 +17599,13 @@ impl layout_ctx::LayoutCtx {
                 style.display = rustkit_css::Display::Block;
                 style.margin_left = rustkit_css::Length::Px(2.0);
                 style.margin_right = rustkit_css::Length::Px(2.0);
-                style.padding_top = rustkit_css::Length::Px(8.0); // 0.35em
-                style.padding_bottom = rustkit_css::Length::Px(10.0); // 0.625em
-                style.padding_left = rustkit_css::Length::Px(12.0); // 0.75em
-                style.padding_right = rustkit_css::Length::Px(12.0);
+                // Chrome's html.css: 0.35em 0.75em 0.625em, of the fieldset's own
+                // font size (5.6px, not 8, at 16px: row FORM-CONTROL-FLOAT-AVOID's
+                // UA-style case).
+                style.padding_top = rustkit_css::Length::Em(0.35);
+                style.padding_bottom = rustkit_css::Length::Em(0.625);
+                style.padding_left = rustkit_css::Length::Em(0.75);
+                style.padding_right = rustkit_css::Length::Em(0.75);
                 style.border_top_width = rustkit_css::Length::Px(2.0);
                 style.border_right_width = rustkit_css::Length::Px(2.0);
                 style.border_bottom_width = rustkit_css::Length::Px(2.0);

@@ -398,6 +398,22 @@ impl LayoutCtx {
             // TRANS-F: what reads a registered custom property (`var()`)
             // is known only to a cascade.
             if anims.custom_running() {
+                // REG-TRANS-FASTPATH: every element that animates (a frame's values move on all
+                // of them), for the relayout's short path to restyle alone: what reads a moving
+                // registered value through `var()` is its own declarations or, for an
+                // `inherits: true` property, its subtree's.
+                let mut roots: Vec<usize> = anims
+                    .record_nodes()
+                    .into_iter()
+                    // Script-layer entries unfiltered: one on an element no build reaches
+                    // (detached, `display: none`) is a root the short path cannot find, a miss
+                    // and the full build, as now.
+                    .chain(script.keys().copied())
+                    .map(|key| crate::animations::split_key(key).0)
+                    .collect();
+                roots.sort_unstable();
+                roots.dedup();
+                *lay.animation_roots.borrow_mut() = Some(roots);
                 return Err("a registered custom property animates".into());
             }
             if let Some(node) = anims
@@ -772,6 +788,14 @@ pub(crate) struct ViewLayout {
     /// such restyle's build went into.
     pub(crate) script_roots: RefCell<Option<Vec<usize>>>,
     pub(crate) script_walked: Cell<Option<usize>>,
+    /// REG-TRANS-FASTPATH: a registered custom property's transition runs, so the animation frame
+    /// took no paint-only path (`animation_frame`); the elements that animate (raw NodeIds), for
+    /// the coming relayout to restyle alone on the LPF1 short path (`Engine::relayout`). Under
+    /// each the build restyles its subtree, which is where an `inherits: true` value reaches (a
+    /// host's shadow tree included). Set by a refused frame and taken by the next relayout, which
+    /// keeps it only when every cause is `animation` with nothing else dirty: a list left from an
+    /// earlier frame is at worst a superset of what animates, and only costs a wider restyle.
+    pub(crate) animation_roots: RefCell<Option<Vec<usize>>>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank

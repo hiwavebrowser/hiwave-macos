@@ -1,5 +1,5 @@
 test262 @ 2e58f87d8350ad51224617a041c6e041d52f8444  area=test
-runs 103352  pass 95697 (92.59%)  not passing 7655
+runs 103352  pass 96520 (93.39%)  not passing 6832
   test/annexB/built-ins                                       76/482     15.77%
   test/annexB/language                                       208/895     23.24%
   test/built-ins/AbstractModuleSource                          0/8        0.00%
@@ -35,7 +35,7 @@ runs 103352  pass 95697 (92.59%)  not passing 7655
   test/built-ins/Number                                      678/680     99.71%
   test/built-ins/Object                                     6802/6802   100.00%
   test/built-ins/Promise                                    1280/1458    87.79%
-  test/built-ins/Proxy                                       606/607     99.84%
+  test/built-ins/Proxy                                       607/607    100.00%
   test/built-ins/Reflect                                     306/306    100.00%
   test/built-ins/RegExp                                     3748/3756    99.79%
   test/built-ins/RegExpStringIteratorPrototype                34/34     100.00%
@@ -49,7 +49,7 @@ runs 103352  pass 95697 (92.59%)  not passing 7655
   test/built-ins/Symbol                                      192/192    100.00%
   test/built-ins/Temporal                                   9226/9232    99.94%
   test/built-ins/ThrowTypeError                               28/28     100.00%
-  test/built-ins/TypedArray                                 2844/2890    98.41%
+  test/built-ins/TypedArray                                 2866/2890    99.17%
   test/built-ins/TypedArrayConstructors                     1442/1446    99.72%
   test/built-ins/Uint8Array                                   16/140     11.43%
   test/built-ins/WeakMap                                     248/281     88.26%
@@ -96,23 +96,23 @@ runs 103352  pass 95697 (92.59%)  not passing 7655
   test/language/directive-prologue                            62/62     100.00%
   test/language/eval-code                                    454/454    100.00%
   test/language/export                                         3/3      100.00%
-  test/language/expressions                                20688/21394   96.70%
+  test/language/expressions                                21303/21394   99.57%
   test/language/function-code                                281/281    100.00%
   test/language/future-reserved-words                         85/85     100.00%
   test/language/global-code                                   75/75     100.00%
   test/language/identifier-resolution                         21/22      95.45%
   test/language/identifiers                                  535/535    100.00%
-  test/language/import                                        17/135     12.59%
+  test/language/import                                        30/135     22.22%
   test/language/keywords                                      50/50     100.00%
   test/language/line-terminators                              82/82     100.00%
   test/language/literals                                    1037/1041    99.62%
-  test/language/module-code                                  434/602     72.09%
+  test/language/module-code                                  572/602     95.02%
   test/language/punctuators                                   22/22     100.00%
   test/language/reserved-words                                53/53     100.00%
   test/language/rest-parameters                               22/22     100.00%
   test/language/source-text                                    2/2      100.00%
   test/language/statementList                                160/160    100.00%
-  test/language/statements                                 17810/18119   98.29%
+  test/language/statements                                 17830/18119   98.40%
   test/language/types                                        211/211    100.00%
   test/language/white-space                                  134/134    100.00%
   test/staging                                                 8/8      100.00%
@@ -120,8 +120,8 @@ runs 103352  pass 95697 (92.59%)  not passing 7655
   test/staging/Uint8Array                                      0/2        0.00%
   test/staging/built-ins                                      12/16      75.00%
   test/staging/decorators                                     10/14      71.43%
-  test/staging/explicit-resource-management                   14/105     13.33%
+  test/staging/explicit-resource-management                   16/105     15.24%
   test/staging/set-methods                                     6/6      100.00%
-  test/staging/sm                                           2439/2631    92.70%
-  test/staging/source-phase-imports                            0/4        0.00%
-  test/staging/top-level-await                                 0/1        0.00%
+  test/staging/sm                                           2448/2631    93.04%
+  test/staging/source-phase-imports                            2/4       50.00%
+  test/staging/top-level-await                                 1/1      100.00%
