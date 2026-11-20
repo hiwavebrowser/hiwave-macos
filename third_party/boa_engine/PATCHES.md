@@ -1290,3 +1290,39 @@ locally) 12,664 -> 3,146 ms. Peak memory is unchanged (about 0.9 GB for the pars
 20k variables (each declared, read, and read from a nested function); 4x the variables took x13
 longer before the patch (0.68 s and 8.9 s, debug build) and must take under x6. Name resolution
 (shadowing, a redeclared `var`, parameters, block scopes, closures) is checked to answer as before.
+
+## Patch: static source phase imports parse and fail at link (`source-phase-import`)
+
+**Files.** `third_party/boa_parser/src/parser/statement/declaration/import.rs`
+(`ImportDeclaration::is_source_phase`, `parse`), `third_party/boa_ast/src/declaration/import.rs`
+(`ImportKind::Source`, `ImportName::Source`), `third_party/boa_ast/src/module_item_list/mod.rs`
+(`import_entries`), `third_party/boa_engine/src/module/source.rs` (`SourceTextModule::new` export
+entries, `initialize_environment`).
+
+**What.** `import source x from "m"` (the source-phase-imports proposal, test262 feature
+`source-phase-imports`) parses, with line terminators allowed between the tokens and the binding
+allowed to be named `source` or `from`. `import source from "m"` and `import source, ...` stay
+default imports of a binding named `source`. The declaration makes an import entry whose import
+name is *source*; linking it calls GetModuleSource of the imported module, which for a Source Text
+Module Record always throws a SyntaxError, and every module Boa loads here is one. So the module
+loads its dependencies (a dependency that cannot be loaded fails first, with the host's error) and
+then fails at link with a SyntaxError. Before, the parser read `source` as a default binding and
+wanted `from`, so the whole module was a parse-time SyntaxError and its dependencies were never
+requested.
+
+Chrome for Testing 148.0.7778.216 does not parse the form by default (a parse-time SyntaxError, as
+before this patch); with `--js-flags=--js-source-phase-imports` it answers exactly as this patch does
+on all 14 cases. Either way a page using the form fails to run that module with a SyntaxError; the
+difference is whether dependencies are fetched first.
+
+**Not changed.** No module has a source phase representation (no `%AbstractModuleSource%`, no
+WebAssembly module sources), so a source phase import never succeeds. An exported source phase
+import (`import source x from "m"; export { x }`) stays a local export instead of becoming an
+indirect export with import name *source*; the exporting module fails at link anyway.
+
+**Pin.** `crates/rustkit-js/tests/import_source_phase.rs`: 14 cases
+(`docs/diagnostics/2026-11-20/import_source_phase_cases.json`) against Chrome for Testing
+148.0.7778.216 with the flag (`import_source_phase_cft148_flag.json`; without it,
+`import_source_phase_cft148.json`). Red without the patch: 5 of 14 (the `import source <binding>`
+forms were parse errors). An escaped `sour\u0063e` is not the keyword: `import sour\u0063e x from "m"` stays a parse-time SyntaxError, in Chrome with and without the flag. test262: `test/language/module-code/source-phase-import/import-source.js`
+(sloppy and strict) passes.

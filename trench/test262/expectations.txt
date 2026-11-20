@@ -6230,7 +6230,6 @@ FAIL	test/language/literals/regexp/S7.8.5_A2.4_T2.js	sloppy
 FAIL	test/language/literals/regexp/S7.8.5_A2.4_T2.js	strict
 FAIL	test/language/module-code/ambiguous-export-bindings/namespace-unambiguous-if-import-source-and-export.js	module
 FAIL	test/language/module-code/eval-export-dflt-expr-cls-name-meth.js	module
-FAIL	test/language/module-code/eval-rqstd-abrupt.js	module
 FAIL	test/language/module-code/eval-self-once.js	module
 FAIL	test/language/module-code/instn-iee-bndng-cls.js	module
 FAIL	test/language/module-code/instn-iee-bndng-const.js	module
@@ -6255,11 +6254,8 @@ FAIL	test/language/module-code/namespace/internals/object-hasOwnProperty-binding
 FAIL	test/language/module-code/namespace/internals/object-keys-binding-uninit.js	module
 FAIL	test/language/module-code/namespace/internals/object-propertyIsEnumerable-binding-uninit.js	module
 FAIL	test/language/module-code/namespace/internals/super-access-to-tdz-binding.js	module
-FAIL	test/language/module-code/source-phase-import/import-source.js	sloppy
-FAIL	test/language/module-code/source-phase-import/import-source.js	strict
 FAIL	test/language/module-code/source-phase-import/reexport-source-binding-named-import.js	module
 FAIL	test/language/module-code/source-phase-import/reexport-source-binding-namespace-get.js	module
-FAIL	test/language/module-code/top-level-await/module-import-rejection-tick.js	module
 FAIL	test/language/module-code/top-level-await/module-self-import-async-resolution-ticks.js	module
 FAIL	test/language/module-code/verify-dfs.js	module
 FAIL	test/language/statements/await-using/Symbol.asyncDispose-getter.js	sloppy

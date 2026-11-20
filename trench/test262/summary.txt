@@ -1,5 +1,5 @@
 test262 @ 2e58f87d8350ad51224617a041c6e041d52f8444  area=test
-runs 103352  pass 96516 (93.39%)  not passing 6836
+runs 103352  pass 96520 (93.39%)  not passing 6832
   test/annexB/built-ins                                       76/482     15.77%
   test/annexB/language                                       208/895     23.24%
   test/built-ins/AbstractModuleSource                          0/8        0.00%
@@ -106,7 +106,7 @@ runs 103352  pass 96516 (93.39%)  not passing 6836
   test/language/keywords                                      50/50     100.00%
   test/language/line-terminators                              82/82     100.00%
   test/language/literals                                    1037/1041    99.62%
-  test/language/module-code                                  568/602     94.35%
+  test/language/module-code                                  572/602     95.02%
   test/language/punctuators                                   22/22     100.00%
   test/language/reserved-words                                53/53     100.00%
   test/language/rest-parameters                               22/22     100.00%
