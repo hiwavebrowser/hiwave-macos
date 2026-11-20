@@ -84,7 +84,7 @@ fn tab_url(state: &Arc<Mutex<AppState>>) -> String {
 
 #[test]
 fn about_blank_shows_an_empty_page_not_the_new_tab_page() {
-    for url in ["about:blank", "about:blank#top", "about:blank?q=x", "ABOUT:BLANK"] {
+    for url in ["about:blank", "about:blank#top", "about:blank?q=x", "ABOUT:blank"] {
         let (state, _dir) = state_with_tab(PAGE);
         let content = Loads::default();
         let bar = Bar::default();
