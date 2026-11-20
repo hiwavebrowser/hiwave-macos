@@ -2634,8 +2634,11 @@ fn navigate_content(
         info!(url = %crate::page_url_for_log(&url), "Not navigating the tab to a data URL");
         return;
     }
-    if let Some(blank) = parsed.filter(|u| u.scheme() == "about" && u.path() == "blank") {
-        // An empty document at about:blank, as in Chrome; not the new tab page.
+    if let Some(blank) = parsed.filter(|u| u.scheme() == "about" && u.path().eq_ignore_ascii_case("blank")) {
+        // An empty document at about:blank, as in Chrome; not the new tab
+        // page. `about:BLANK` is about:blank too, written that way.
+        let blank = url::Url::parse(&format!("about:blank{}", &blank.as_str()["about:".len() + blank.path().len()..]))
+            .unwrap_or(blank);
         set_active_tab_url(state, blank.as_str());
         let _ = content.load_html(BLANK_HTML);
         chrome_url(chrome, blank.as_str());
