@@ -150,6 +150,15 @@ pub fn default_user_agent() -> String {
 #[cfg(not(feature = "native-tls"))]
 fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     static ROOTS: RootsCache = std::sync::Mutex::new(None);
+    // NET-LAZY-TLS test seam: a thread that set a failing platform answers with it, outside the
+    // process cache.
+    if let Some((reason, loads)) = ROOTS_OVERRIDE.with(|o| o.borrow().clone()) {
+        let fresh: RootsCache = std::sync::Mutex::new(None);
+        return roots_cached(&fresh, || {
+            loads.set(loads.get() + 1);
+            (tokio_rustls::rustls::RootCertStore::empty(), reason.clone())
+        });
+    }
     roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
         let loaded = rustls_native_certs::load_native_certs();
@@ -178,6 +187,44 @@ fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpErro
 }
 
 type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
+
+type RootsOverride = Option<(String, std::rc::Rc<std::cell::Cell<usize>>)>;
+
+thread_local! {
+    /// NET-LAZY-TLS test seam: on this thread, loading the platform roots fails with this reason
+    /// and counts the attempts (`fail_platform_roots_on_this_thread`).
+    static ROOTS_OVERRIDE: std::cell::RefCell<RootsOverride> = const { std::cell::RefCell::new(None) };
+}
+
+/// The attempts to load the platform roots on this thread since
+/// [`fail_platform_roots_on_this_thread`]; the override ends when this is dropped.
+#[doc(hidden)]
+pub struct PlatformRootsProbe {
+    loads: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl PlatformRootsProbe {
+    /// How many times the platform roots were loaded on this thread.
+    pub fn loads(&self) -> usize {
+        self.loads.get()
+    }
+}
+
+impl Drop for PlatformRootsProbe {
+    fn drop(&mut self) {
+        ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = None);
+    }
+}
+
+/// Test seam (NET-LAZY-TLS): until the returned probe is dropped, every load of the platform
+/// roots on this thread finds none and fails with `reason` (the keychain read that flakes under
+/// load), and is counted. For tests of what touches the platform roots and when.
+#[doc(hidden)]
+pub fn fail_platform_roots_on_this_thread(reason: &str) -> PlatformRootsProbe {
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = Some((reason.to_string(), loads.clone())));
+    PlatformRootsProbe { loads }
+}
 
 fn roots_cached(
     cache: &RootsCache,
@@ -1487,6 +1534,72 @@ mod tests {
         .to_string();
         assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
         assert!(err.contains("no usable platform root certificates"), "{err}");
+    }
+
+    /// NET-LAZY-TLS: a client is built without the platform roots: a `data:`, `blob:`, `file:`
+    /// or `about:` load (and plain http) never needs them, and on macOS the keychain read they
+    /// take fails now and then (batch 119: 2 of 7 rustkit-net runs, "no usable platform root
+    /// certificates (... failed to load user trust settings: I/O error)").
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn a_client_is_built_without_loading_the_platform_roots() {
+        let probe = fail_platform_roots_on_this_thread("failed to load user trust settings: I/O error");
+        let built = Client::new();
+        assert!(built.is_ok(), "the client is built: {:?}", built.err().map(|e| e.to_string()));
+        assert_eq!(probe.loads(), 0, "building a client loads no roots");
+    }
+
+    /// NET-LAZY-TLS: the first https request loads the roots; a failed load is the request's
+    /// error, says why, and is not kept: the next request loads them again.
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn the_first_https_request_loads_the_roots_and_a_failure_is_not_kept() {
+        let probe = fail_platform_roots_on_this_thread("keychain busy");
+        let client = Client::new().expect("a client");
+        assert_eq!(probe.loads(), 0);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                std::thread::sleep(Duration::from_millis(500));
+                drop(stream);
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let url = format!("https://127.0.0.1:{port}/");
+        let err = rt.block_on(client.get(&url)).err().expect("no roots, no handshake").to_string();
+        assert!(err.contains("no usable platform root certificates") && err.contains("keychain busy"), "{err}");
+        let first = probe.loads();
+        assert!(first >= 1, "the https request loaded the roots");
+        let _ = rt.block_on(client.get(&url));
+        assert!(probe.loads() > first, "a failed load is tried again by the next request");
+    }
+
+    /// NET-LAZY-TLS: one load tries the platform again before it fails (the keychain read flakes
+    /// once in a while), and a store that loaded is kept for the process.
+    #[test]
+    fn a_failed_root_load_is_tried_again_before_it_fails() {
+        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
+        use tokio_rustls::rustls::RootCertStore;
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let mut loads = 0;
+        let got = roots_cached(&cache, || {
+            loads += 1;
+            if loads < 3 {
+                return (RootCertStore::empty(), "keychain busy".to_string());
+            }
+            let roots = RootCertStore {
+                roots: vec![TrustAnchor {
+                    subject: Der::from_slice(b"subject"),
+                    subject_public_key_info: Der::from_slice(b"spki"),
+                    name_constraints: None,
+                }],
+            };
+            (roots, String::new())
+        });
+        assert!(got.is_ok(), "the third try loads: {:?}", got.err().map(|e| e.to_string()));
+        assert_eq!(loads, 3);
+        assert!(roots_cached(&cache, || unreachable!("kept")).is_ok());
     }
 
     #[test]
