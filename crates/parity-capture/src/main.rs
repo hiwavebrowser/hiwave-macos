@@ -1937,6 +1937,16 @@ fn execute_actions(
                     a_res.error = Some("resize requires width and height".to_string());
                 }
             }
+            "scroll" => {
+                let offset = (a.x.unwrap_or(0.0), a.y.unwrap_or(0.0));
+                let result = engine.get_scroll_offset(view_id).and_then(|current| {
+                    engine.scroll_view(view_id, offset.0 - current.0, current.1 - offset.1)
+                });
+                if let Err(err) = result {
+                    a_res.status = "error".to_string();
+                    a_res.error = Some(format!("scroll failed: {err:?}"));
+                }
+            }
             "capture" => {
                 if let Some(ref frame) = a.frame {
                     let frame_path = match actions_out_dir {

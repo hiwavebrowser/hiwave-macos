@@ -26250,7 +26250,7 @@ impl Engine {
         self.presenter
             .as_mut()
             .unwrap()
-            .capture_frame(viewhost_id, display_list.as_deref(), path)
+            .capture_frame(viewhost_id, display_list.as_deref(), view.scroll_offset, path)
     }
 
     /// Export the layout tree for a view as JSON.
@@ -30402,6 +30402,7 @@ fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
     match parse_length(v) {
         Some(rustkit_css::Length::Px(px)) => rustkit_css::FlexBasis::Length(px),
         Some(rustkit_css::Length::Percent(pct)) => rustkit_css::FlexBasis::Percent(pct),
+        Some(rustkit_css::Length::Calc(sum)) => rustkit_css::FlexBasis::Calc(*sum),
         // A unitless `0` is a length (`flex: 1 1 0`, `flex-basis: 0`).
         // Falling to Auto sized the item to its content, so two basis-0
         // siblings split the free space unevenly.
@@ -54880,6 +54881,62 @@ mod script_selector_tests {
         assert_eq!(js("getComputedStyle(document.head).display"), "none");
         // Script writes show through before the next layout.
         assert_eq!(js("var a = document.getElementById('a'); a.style.display = 'inline'; getComputedStyle(a).display"), "inline");
+    }
+
+    #[test]
+    fn computed_content_exposes_the_desktop_form_breakpoint() {
+        let (mut engine, view) = loaded(
+            r#"<style>#signup { content: '1' }
+                @media (min-width: 300px) { #signup { content: '2' } }
+                #signup > div { display: flex; flex-direction: column }
+                #signup[data-split="false"] > div { flex-direction: row }
+                </style><div id="signup"><div><input type="email"><button>Start</button></div></div>"#,
+        );
+        assert_eq!(
+            eval(&mut engine, view, r#"var signup = document.getElementById('signup');
+                var content = getComputedStyle(signup).content;
+                signup.setAttribute('data-split', String(parseInt((content || '').replace(/\D+/g, '') || '1', 10) === 1));
+                [content === '"2"', getComputedStyle(signup.firstElementChild).flexDirection].join('|')"#),
+            "true|row"
+        );
+    }
+
+    #[test]
+    fn calculated_flex_basis_keeps_four_cards_on_one_line() {
+        let (mut engine, view) = loaded(
+            r#"<style>body { margin: 0 } .cards { width: 400px; display: flex; flex-wrap: wrap }
+                .cards > div { flex: var(--basis); margin-left: 1rem; height: 50px }
+                </style><div class="cards" style="--basis: 0 0 calc(25% - 1rem)">
+                <div></div><div></div><div></div><div></div></div>"#,
+        );
+        assert_eq!(
+            eval(&mut engine, view, r#"Array.from(document.querySelectorAll('.cards > div'), e => {
+                var box = e.getBoundingClientRect();
+                return [box.x, box.y, box.width].join(',');
+            }).join('|')"#),
+            "16,0,84|116,0,84|216,0,84|316,0,84"
+        );
+    }
+
+    #[test]
+    fn fit_content_width_in_a_flex_column_uses_intrinsic_width() {
+        let (mut engine, view) = loaded(
+            r#"<style>
+                .outer { width: 320px }
+                .section { display: inline-flex; flex-direction: column; flex-wrap: wrap; width: 100% }
+                .item { display: inline-flex; flex-wrap: wrap; width: fit-content }
+                h2 { font: bold 20px/24px Arial; margin: 0 }
+                </style><div class="outer"><div class="section"><div class="item">
+                <h2>Frequently Asked Questions</h2></div></div></div>"#,
+        );
+        assert_eq!(
+            eval(&mut engine, view, r#"(() => {
+                const item = document.querySelector('.item').getBoundingClientRect();
+                const title = document.querySelector('h2').getBoundingClientRect();
+                return item.width >= title.width && item.width < 320 && title.height === 24;
+            })()"#),
+            "true"
+        );
     }
 
     #[test]

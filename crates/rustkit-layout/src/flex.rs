@@ -328,14 +328,9 @@ fn definite_height_px(b: &LayoutBox, l: &Length) -> Option<f32> {
 /// `min-height: 100vh` with `justify-content: center` is the centring idiom
 /// on `new_tab`'s body and on real landing pages (css-sizing-3 §5.1).
 fn min_inner_main_size(container: &LayoutBox) -> f32 {
-    match container.style.min_height {
-        Length::Px(px) => inner_main_from_spec(container, px),
-        Length::Vh(vh) => inner_main_from_spec(container, vh / 100.0 * container.viewport.1),
-        ref l if crate::grid::is_font_or_viewport_relative(l) => {
-            inner_main_from_spec(container, container.length_to_px(l, 0.0))
-        }
-        _ => 0.0,
-    }
+    definite_height_px(container, &container.style.min_height)
+        .map(|height| inner_main_from_spec(container, height))
+        .unwrap_or(0.0)
 }
 
 /// The `max-height` ceiling on a vertical main size, as an inner size, or
@@ -1731,14 +1726,7 @@ fn layout_flex_container_at(
             match definite_height_px(container, &container.style.height) {
                 Some(v) => inner_from_spec(v),
                 None => {
-                    let min = match container.style.min_height {
-                        Length::Px(px) => inner_from_spec(px),
-                        Length::Vh(vh) => inner_from_spec(vh / 100.0 * container.viewport.1),
-                        ref l if crate::grid::is_font_or_viewport_relative(l) => {
-                            inner_from_spec(container.length_to_px(l, 0.0))
-                        }
-                        _ => 0.0,
-                    };
+                    let min = min_inner_main_size(container);
                     // Step 12 has already written the flowed extent here; the
                     // passed box still carries the pre-pass stack.
                     container.dimensions.content.height.max(min)
@@ -2023,12 +2011,23 @@ fn create_flex_item<'a>(
         // A percentage of an indefinite main size is `content`
         // (css-flexbox-1 §7.2.3): `flex: 1` (a basis of 0%) in an
         // auto-height column is as tall as what it holds.
-        FlexBasis::Percent(_) if !main_is_definite => {
+        basis if !main_is_definite
+            && (matches!(basis, FlexBasis::Percent(_))
+                || matches!(basis, FlexBasis::Calc(sum) if sum.percent != 0.0)) => {
             main_size_from_content = content_sized_box;
             content_basis = true;
             get_intrinsic_main_size(layout_box, main_axis, definite_inner_cross) + main_pb
         }
         FlexBasis::Percent(pct) => spec_main_to_border_box(pct / 100.0 * container_main),
+        FlexBasis::Calc(sum) => {
+            let font_px = match layout_box.style.font_size {
+                Length::Px(px) => px,
+                _ => 16.0,
+            };
+            let (vw, vh) = layout_box.viewport;
+            let basis = sum.to_px_with_viewport(font_px, 16.0, container_main, vw, vh);
+            spec_main_to_border_box(basis.max(0.0))
+        }
     };
 
     // Get min/max constraints from CSS
@@ -2197,6 +2196,11 @@ fn create_flex_item<'a>(
     };
     let explicit_cross_size = match explicit_cross_length {
         rustkit_css::Length::Auto => None,
+        Length::FitContent if main_axis == Axis::Vertical => {
+            let available = definite_inner_cross.unwrap_or(container_cross);
+            let available = (available - cross_margin_start - cross_margin_end).max(0.0);
+            Some(fit_content_cross_width(layout_box, available, cross_pb))
+        }
         // css-sizing-3 §5.1: a percentage resolves against the containing
         // block's corresponding size when that size is DEFINITE, and behaves
         // as `auto` when it is not. The containing block here is the flex
@@ -5484,6 +5488,26 @@ mod tests {
             (r1_top - (r0_top + 71.0 + 6.0)).abs() < 0.5,
             "row 2 sits one gap below the grown row 1: r0_top={r0_top} r1_top={r1_top}"
         );
+    }
+
+    #[test]
+    fn test_calculated_min_height_centres_a_flex_column() {
+        let mut style = ComputedStyle::new();
+        style.display = rustkit_css::Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.justify_content = JustifyContent::Center;
+        style.min_height = rustkit_css::parse_length("min(80vh, 45rem)").unwrap();
+        let mut body = LayoutBox::new(BoxType::Block, style);
+        body.set_viewport(1280.0, 800.0);
+        let mut child = ComputedStyle::new();
+        child.height = Length::Px(100.0);
+        body.children.push(LayoutBox::new(BoxType::Block, child));
+        let containing = Dimensions {
+            content: Rect::new(0.0, 0.0, 1280.0, 800.0),
+            ..Default::default()
+        };
+        layout_flex_container(&mut body, &containing);
+        assert_eq!(body.children[0].dimensions.content.y, 270.0);
     }
 
     #[test]
