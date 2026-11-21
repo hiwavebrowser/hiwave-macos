@@ -26,7 +26,7 @@ use url::Url;
 
 mod addr;
 pub mod cookies;
-pub use cookies::{CookieJar, CookieSource};
+pub use cookies::{CookieChange, CookieChanges, CookieJar, CookieSource, CookieSubscription};
 pub use addr::{is_local_name, is_public_ip, AddressPolicy, Resolve, ResolveFuture, SystemResolver};
 
 /// HTTP client errors.
