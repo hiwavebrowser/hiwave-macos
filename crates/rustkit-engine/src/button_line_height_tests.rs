@@ -181,13 +181,22 @@ fn a_line_holding_only_a_button_is_the_buttons_height() {
         <div id=l2><button id=b2 style='padding:8px 12px;font-size:14px'>Clear Data</button></div>\
         <div id=l3><button id=b3>Clear Data</button></div>\
         <div id=l4><button id=b4 style='font-size:16px'>Clear Data</button></div>\
+        <div id=l5><button id=b5 style='min-height:50px'>Clear Data</button></div>\
+        <div id=l6><button id=b6 style='padding:.6rem 1rem;font-size:.85rem;font-weight:500;\
+        border:1px solid transparent;min-height:50px'>Clear Data</button></div>\
+        <div id=l7><input id=b7 type=button value='Clear Data'></div>\
+        <div id=l8><input id=b8 type=submit value='Clear Data'></div>\
+        <div id=l9><input id=b9 type=reset value='Clear Data'></div>\
+        <div id=l10><input id=b10 type=button value='Clear Data' style='padding:.6rem 1rem;\
+        font-size:.85rem;font-weight:500;border:1px solid transparent'></div>\
+\
         </body></html>";
     let mut engine = Engine::new(EngineConfig::default()).expect("engine");
     let view = engine
         .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 400 })
         .expect("view");
     engine.load_html(view, PAGE).expect("load_html");
-    let ids = ["l1", "b1", "l2", "b2", "l3", "b3", "l4", "b4"];
+    let ids: Vec<String> = (1..=10).flat_map(|i| [format!("l{i}"), format!("b{i}")]).collect();
     let expr = ids
         .iter()
         .map(|id| format!("document.getElementById('{id}').getBoundingClientRect().height"))
@@ -196,14 +205,31 @@ fn a_line_holding_only_a_button_is_the_buttons_height() {
     let out = engine.execute_script(view, &format!("String({expr})")).unwrap();
     let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out).to_string();
     let h: Vec<f64> = text.split(',').map(|n| n.parse().unwrap_or(f64::NAN)).collect();
-    // Chrome: (line, button) per row.
-    let chrome = [(36.1875, 36.1875), (36.0, 36.0), (21.0, 21.0), (24.0, 24.0)];
+    // Chrome: (line, button) per row. Rows 5-6 (0-based 4-5): a `min-height` above the intrinsic
+    // height (#1414 R1 nit 1); rows 7-10: the `<input>` buttons, bare and with the `.btn` style
+    // (nit 2). A `max-height` below the intrinsic height is not here: RustKit does not clamp a
+    // button's box to it at all (Chrome: a 10px box on a 19px line; RustKit 21 on 21), a
+    // separate row (BUTTON-MAX-HEIGHT).
+    let chrome = [
+        (36.1875, 36.1875),
+        (36.0, 36.0),
+        (21.0, 21.0),
+        (24.0, 24.0),
+        (50.0, 50.0),
+        (50.0, 50.0),
+        (21.0, 21.0),
+        (21.0, 21.0),
+        (21.0, 21.0),
+        (36.1875, 36.1875),
+    ];
+    let mut wrong = Vec::new();
     for (row, (line, button)) in chrome.iter().enumerate() {
         let (got_line, got_button) = (h[2 * row], h[2 * row + 1]);
-        assert!((got_button - button).abs() < 0.05, "row {row}: the button is {button} in Chrome, got {got_button}");
-        assert!(
-            (got_line - line).abs() < 0.05,
-            "row {row}: the line holding only the button is {line} in Chrome (the button's height), got {got_line}"
-        );
+        if (got_button - button).abs() >= 0.05 || (got_line - line).abs() >= 0.05 {
+            wrong.push(format!("row {}: Chrome line {line} / button {button}, got {got_line} / {got_button}", row + 1));
+        }
     }
+    assert!(wrong.is_empty(), "lines holding only a button:
+{}", wrong.join("
+"));
 }

@@ -22,6 +22,17 @@ const BUTTONS = [
   ['padding 8px 12px, 14px', 'padding:8px 12px;font-size:14px'],
   ['bare', ''],
   ['bare 16px', 'font-size:16px'],
+  // #1414 R1 nit 1: a used height above the intrinsic one centres the label, as `height` does.
+  ['min-height 50px', 'min-height:50px'],
+  ['settings .btn, min-height 50px', 'padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent;min-height:50px'],
+  ['max-height 10px', 'max-height:10px'],
+];
+// #1414 R1 nit 2: the <input> buttons, bare and with the settings .btn style.
+const INPUTS = [
+  ['input type=button', 'button', ''],
+  ['input type=submit', 'submit', ''],
+  ['input type=reset', 'reset', ''],
+  ['input type=button, settings .btn', 'button', 'padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent'],
 ];
 
 const browser = await chromium.launch({
@@ -47,6 +58,20 @@ try {
       });
       console.log(family, label, JSON.stringify(got));
       cases.push({ family, label, style, ...got });
+    }
+    for (const [label, type, style] of INPUTS) {
+      await page.setContent('<!doctype html><style>*{box-sizing:border-box}body{margin:0}' +
+        `div{font:16px ${family};width:400px}</style><div id=l><input id=b type=${type} value="Clear Data" style="${style}"></div>`);
+      const got = await page.evaluate(() => {
+        const b = document.getElementById('b');
+        return {
+          line: document.getElementById('l').getBoundingClientRect().height,
+          button: b.getBoundingClientRect().height,
+          button_font: getComputedStyle(b).fontFamily + ' ' + getComputedStyle(b).fontSize,
+        };
+      });
+      console.log(family, label, JSON.stringify(got));
+      cases.push({ family, label, style, input_type: type, ...got });
     }
   }
 } finally {

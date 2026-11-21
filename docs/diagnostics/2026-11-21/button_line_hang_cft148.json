@@ -35,6 +35,66 @@
       "button_font": "Arial 16px"
     },
     {
+      "family": "Arial",
+      "label": "min-height 50px",
+      "style": "min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "settings .btn, min-height 50px",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent;min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "Arial",
+      "label": "max-height 10px",
+      "style": "max-height:10px",
+      "line": 19,
+      "button": 10,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "input type=button",
+      "style": "",
+      "input_type": "button",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "input type=submit",
+      "style": "",
+      "input_type": "submit",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "input type=reset",
+      "style": "",
+      "input_type": "reset",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "input type=button, settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "input_type": "button",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
+    },
+    {
       "family": "'Segoe UI'",
       "label": "settings .btn",
       "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
@@ -67,6 +127,66 @@
       "button_font": "Arial 16px"
     },
     {
+      "family": "'Segoe UI'",
+      "label": "min-height 50px",
+      "style": "min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "settings .btn, min-height 50px",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent;min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "max-height 10px",
+      "style": "max-height:10px",
+      "line": 21,
+      "button": 10,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "input type=button",
+      "style": "",
+      "input_type": "button",
+      "line": 23,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "input type=submit",
+      "style": "",
+      "input_type": "submit",
+      "line": 23,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "input type=reset",
+      "style": "",
+      "input_type": "reset",
+      "line": 23,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "input type=button, settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "input_type": "button",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
+    },
+    {
       "family": "'Times New Roman'",
       "label": "settings .btn",
       "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
@@ -97,6 +217,66 @@
       "line": 24,
       "button": 24,
       "button_font": "Arial 16px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "min-height 50px",
+      "style": "min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "settings .btn, min-height 50px",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent;min-height:50px",
+      "line": 50,
+      "button": 50,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "max-height 10px",
+      "style": "max-height:10px",
+      "line": 19,
+      "button": 10,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "input type=button",
+      "style": "",
+      "input_type": "button",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "input type=submit",
+      "style": "",
+      "input_type": "submit",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "input type=reset",
+      "style": "",
+      "input_type": "reset",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "input type=button, settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "input_type": "button",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
     }
   ]
 }
