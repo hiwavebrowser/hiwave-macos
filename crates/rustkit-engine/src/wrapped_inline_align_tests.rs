@@ -18,11 +18,28 @@ const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-21/wrapped_in
 const CHROME: &str =
     include_str!("../../../docs/diagnostics/2026-11-21/wrapped_inline_align_cft148.txt");
 
-/// Cases still off, for a reason outside this row: a right- or center-aligned line whose slack
-/// is not a whole 1/64 px lands 0.01 px from Chrome, which places lines on its 1/64 px grid. Bare
-/// text (`bare-right`, `bare-three`) is off the same way, so the wrapped inline matches bare text.
-/// They must still DIFFER: one that matches comes off the list.
-const KNOWN: &[&str] = &["right: ", "three: ", "bare-right: ", "bare-three: "];
+/// Chrome lays lines out on a 1/64 px grid and rounds the widths it centers with; the layout
+/// here keeps unrounded widths, so a right- or center-aligned line whose slack is not a whole
+/// 1/64 px lands up to ~0.02 px away (bare text too: `bare-right`, `bare-three`). Each number
+/// may differ from Chrome's by this much; the case, the line count and the text nodes must match.
+const TOLERANCE_PX: f64 = 0.05;
+
+/// The numbers of one report line (`id: x,y,w; x,y,w | x,y,w`), with its id and shape.
+fn parse(line: &str) -> (String, String, Vec<f64>) {
+    let (id, rest) = line.split_once(": ").unwrap_or((line, ""));
+    let shape: String = rest.chars().filter(|c| matches!(c, ';' | '|' | ',')).collect();
+    let nums = rest
+        .split(|c| matches!(c, ';' | '|' | ','))
+        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .collect();
+    (id.to_string(), shape, nums)
+}
+
+fn close(have: &str, want: &str) -> bool {
+    let (hid, hshape, h) = parse(have);
+    let (wid, wshape, w) = parse(want);
+    hid == wid && hshape == wshape && h.len() == w.len() && h.iter().zip(&w).all(|(a, b)| (a - b).abs() <= TOLERANCE_PX)
+}
 
 #[test]
 fn a_wrapped_inline_aligns_each_line_like_bare_text() {
@@ -42,14 +59,10 @@ fn a_wrapped_inline_aligns_each_line_like_bare_text() {
     let wrong: Vec<String> = expected
         .iter()
         .enumerate()
-        .filter_map(|(i, want)| {
-            let listed = KNOWN.iter().any(|k| want.starts_with(k));
-            match got.get(i) {
-                Some(have) if (have == want) != listed => None,
-                Some(have) if listed => Some(format!("  {have}\n    matches Chromium now: take it off KNOWN")),
-                Some(have) => Some(format!("  {have}\n    Chromium: {want}")),
-                None => Some(format!("  (missing)\n    Chromium: {want}")),
-            }
+        .filter_map(|(i, want)| match got.get(i) {
+            Some(have) if close(have, want) => None,
+            Some(have) => Some(format!("  {have}\n    Chromium: {want}")),
+            None => Some(format!("  (missing)\n    Chromium: {want}")),
         })
         .collect();
     assert!(wrong.is_empty(), "{} of {} cases differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
