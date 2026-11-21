@@ -6260,6 +6260,34 @@ impl LayoutBox {
     }
 
     /// Calculate block width.
+    /// The content width an in-flow block's `aspect-ratio` gives its auto
+    /// width from a definite height (css-sizing-4 §5.1), or None to fill.
+    /// Definite here means a plain length: a percentage height (or a
+    /// function that may hold one) is left to fill, since its containing
+    /// block's height may be indefinite. Under
+    /// `border-box` the ratio is the border box's, so this box's horizontal
+    /// padding and border (`padding_border_w`) come off the derived width.
+    fn aspect_ratio_width_from_height(&self, containing_block: &Dimensions, padding_border_w: f32) -> Option<f32> {
+        let ratio = self.style.aspect_ratio?;
+        if !(ratio > 0.0) || !ratio.is_finite() || !matches!(self.box_type, BoxType::Block) {
+            return None;
+        }
+        // Lengths only; min()/max()/clamp()/calc() may hold a percentage.
+        if !matches!(
+            self.style.height,
+            Length::Px(_) | Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_)
+                | Length::Vmin(_) | Length::Vmax(_) | Length::Zero
+        ) {
+            return None;
+        }
+        let height = self.length_to_px(&self.style.height, containing_block.content.height);
+        Some(if self.style.box_sizing == BoxSizing::BorderBox {
+            (height * ratio - padding_border_w).max(0.0)
+        } else {
+            height * ratio
+        })
+    }
+
     fn calculate_block_width(&mut self, containing_block: &Dimensions) {
         let style = &self.style;
 
@@ -6326,6 +6354,15 @@ impl LayoutBox {
                     // An auto-width table does too (§17.5.2.2: its max-content
                     // width, clamped to the containing block).
                     shrink_to_fit_content_width(self, available)
+                } else if let Some(width) = self.aspect_ratio_width_from_height(
+                    containing_block,
+                    border_left + border_right + padding_left + padding_right,
+                ) {
+                    // css-sizing-4 §5.1: with a definite height, the ratio
+                    // gives the auto width instead of the fill (Chrome 148:
+                    // `height:100px; aspect-ratio:1` is 100 wide, and a ratio
+                    // of 10 is 1000 wide in a 600px parent: not clamped to it).
+                    width
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
