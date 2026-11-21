@@ -6744,8 +6744,6 @@ FAIL	test/staging/sm/class/innerBinding.js	sloppy
 FAIL	test/staging/sm/class/innerBinding.js	strict
 FAIL	test/staging/sm/class/methDefn.js	sloppy
 FAIL	test/staging/sm/class/methDefn.js	strict
-FAIL	test/staging/sm/class/parenExprToString.js	sloppy
-FAIL	test/staging/sm/class/parenExprToString.js	strict
 FAIL	test/staging/sm/class/strictExecution.js	sloppy
 FAIL	test/staging/sm/class/stringConstructor.js	sloppy
 FAIL	test/staging/sm/class/stringConstructor.js	strict
