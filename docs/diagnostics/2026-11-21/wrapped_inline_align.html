@@ -16,11 +16,13 @@ body { margin: 0; font: 16px/20px Menlo, monospace; }
 <div class="c" id="edges" style="text-align:center"><span class="pad">Start watching videos to help us build a feed of videos you'll love.</span></div>
 <div class="c" id="flex" style="display:flex;flex-direction:column;align-items:center"><div style="text-align:center"><span>Start watching videos to help us build a feed of videos you'll love.</span></div></div>
 <div class="c" id="bare" style="text-align:center">Start watching videos to help us build a feed of videos you'll love.</div>
+<div class="c" id="bare-right" style="text-align:right">Start watching videos to help us build a feed of videos you'll love.</div>
+<div class="c" id="bare-three" style="text-align:center">one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen</div>
 <div class="c" id="left" style="text-align:left"><span>Start watching videos to help us build a feed of videos you'll love.</span></div>
 <script>
 window.report = function () {
   var r2 = function (v) { return Math.round(v * 100) / 100; };
-  return ['center', 'right', 'nested', 'custom', 'three', 'edges', 'flex', 'bare', 'left'].map(function (id) {
+  return ['center', 'right', 'nested', 'custom', 'three', 'edges', 'flex', 'bare', 'bare-right', 'bare-three', 'left'].map(function (id) {
     var root = document.getElementById(id);
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     var t = walker.nextNode();

@@ -7367,13 +7367,22 @@ impl LayoutBox {
         // Apply text-align to all recorded lines
         let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
+        let mut prev_range = None;
         for (start, end, width, (_, band_width)) in lines {
-            Self::apply_text_align_offset(
-                &mut self.children[start..end],
-                width,
-                band_width,
-                text_align,
-            );
+            // YT-CARD-SUBTITLE: a wrapped inline alone on its lines is
+            // recorded once per visual line with the same range; it aligns
+            // all its lines on the first record and must not move again.
+            let repeat = prev_range == Some((start, end))
+                && Self::is_lone_wrapped_inline(&self.children[start..end], text_align);
+            prev_range = Some((start, end));
+            if !repeat {
+                Self::apply_text_align_offset(
+                    &mut self.children[start..end],
+                    width,
+                    band_width,
+                    text_align,
+                );
+            }
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
@@ -7662,7 +7671,26 @@ impl LayoutBox {
             return;
         }
 
+        // YT-CARD-SUBTITLE: how many in-flow boxes share this line record.
+        let in_flow_on_line = children
+            .iter()
+            .filter(|c| c.float == Float::None && !matches!(c.position, Position::Absolute | Position::Fixed))
+            .count();
+
         for child in children {
+            // YT-CARD-SUBTITLE: a non-atomic inline that is alone on its
+            // lines and holds one wrapped text run (`<span>`, `<b><span>`,
+            // a custom element) aligns each visual line on its own, as bare
+            // text does below. Moving the whole inline by one offset left
+            // every line at the inline's left edge (Chromium 148: line 0 at
+            // 7.34 and line 1 at 69.95 in a 400px centered block).
+            if in_flow_on_line == 1
+                && matches!(text_align, TextAlign::Right | TextAlign::Center)
+                && child.float == Float::None
+                && Self::align_wrapped_inline_lines(child, container_width, text_align)
+            {
+                continue;
+            }
             // A wrapped text run aligns each VISUAL line independently
             // against the container. Only Right/Center write offsets: under
             // Left/Justify any existing x_offset is a FLOW offset from the
@@ -7714,6 +7742,100 @@ impl LayoutBox {
                 crate::flex::translate_subtree(child, offset, 0.0);
             }
         }
+    }
+
+    /// YT-CARD-SUBTITLE: the child-index path from the non-atomic inline `b`
+    /// down to the one wrapped text run it holds, through inlines that each
+    /// hold exactly one in-flow box. `None` when `b` is not such an inline,
+    /// when the run fits on one line, or when it is a phase-5 mid-line split
+    /// (aligned by `align_split_close` and the split branch instead).
+    fn wrapped_text_path(b: &LayoutBox) -> Option<Vec<usize>> {
+        if !matches!(b.box_type, BoxType::Inline) || b.style.display.is_atomic_inline() {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut cur = b;
+        loop {
+            if matches!(cur.box_type, BoxType::Text(_)) {
+                let wrapped = cur.text_flow_first_offset.is_none()
+                    && cur.text_lines.as_ref().is_some_and(|t| t.len() > 1);
+                return wrapped.then_some(path);
+            }
+            if !matches!(cur.box_type, BoxType::Inline) || cur.style.display.is_atomic_inline() {
+                return None;
+            }
+            let mut in_flow = cur.children.iter().enumerate().filter(|(_, c)| {
+                c.float == Float::None && !matches!(c.position, Position::Absolute | Position::Fixed)
+            });
+            let (i, only) = in_flow.next()?;
+            if in_flow.next().is_some() {
+                return None;
+            }
+            path.push(i);
+            cur = only;
+        }
+    }
+
+    /// YT-CARD-SUBTITLE: `line` (one line record's boxes) is a single in-flow
+    /// non-atomic inline holding one wrapped text run, which
+    /// `apply_text_align_offset` aligns line by line under Center/Right.
+    fn is_lone_wrapped_inline(line: &[LayoutBox], text_align: TextAlign) -> bool {
+        if !matches!(text_align, TextAlign::Right | TextAlign::Center) {
+            return false;
+        }
+        let mut in_flow = line
+            .iter()
+            .filter(|c| c.float == Float::None && !matches!(c.position, Position::Absolute | Position::Fixed));
+        match (in_flow.next(), in_flow.next()) {
+            (Some(only), None) => Self::wrapped_text_path(only).is_some(),
+            _ => false,
+        }
+    }
+
+    /// YT-CARD-SUBTITLE: align, line by line, the wrapped text run inside the
+    /// non-atomic inline `child` that is alone on its lines (css-text-3 §7.1).
+    /// The inline's left edges (margin, border, padding of every inline on the
+    /// path) count on its first line and its right edges on its last, as the
+    /// fragments carry them. The inline moves by line 0's offset; the other
+    /// lines' `x_offset` place them from there. Returns false (nothing done)
+    /// when `child` holds no such run.
+    fn align_wrapped_inline_lines(
+        child: &mut LayoutBox,
+        container_width: f32,
+        text_align: TextAlign,
+    ) -> bool {
+        let Some(path) = Self::wrapped_text_path(child) else {
+            return false;
+        };
+        let outer = child.dimensions.margin_box();
+        let text = path.iter().fold(&*child, |b, &i| &b.children[i]);
+        let Some(lines) = text.text_lines.as_ref() else {
+            return false;
+        };
+        let n = lines.len();
+        let lead = text.dimensions.content.x - outer.x;
+        let trail =
+            (outer.x + outer.width - (text.dimensions.content.x + text.dimensions.content.width)).max(0.0);
+        let align_in = |w: f32| match text_align {
+            TextAlign::Right => (container_width - w).max(0.0),
+            TextAlign::Center => ((container_width - w) / 2.0).max(0.0),
+            _ => 0.0,
+        };
+        let o0 = align_in(lead + lines[0].width);
+        let rest: Vec<f32> = (1..n)
+            .map(|k| {
+                let w = lines[k].width + if k == n - 1 { trail } else { 0.0 };
+                align_in(w) - o0 - lead
+            })
+            .collect();
+        crate::flex::translate_subtree(child, o0, 0.0);
+        let text = path.iter().fold(child, |b, &i| &mut b.children[i]);
+        if let Some(lines) = text.text_lines.as_mut() {
+            for (tl, x) in lines.iter_mut().skip(1).zip(rest) {
+                tl.x_offset = x;
+            }
+        }
+        true
     }
 
     /// IFC Slice B2: align the CLOSED visual lines of a phase-5 mid-line
@@ -8504,13 +8626,22 @@ impl LayoutBox {
         // Apply text-align to all recorded lines
         let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
+        let mut prev_range = None;
         for (start, end, width, (_, band_width)) in lines {
-            Self::apply_text_align_offset(
-                &mut self.children[start..end],
-                width,
-                band_width,
-                text_align,
-            );
+            // YT-CARD-SUBTITLE: a wrapped inline alone on its lines is
+            // recorded once per visual line with the same range; it aligns
+            // all its lines on the first record and must not move again.
+            let repeat = prev_range == Some((start, end))
+                && Self::is_lone_wrapped_inline(&self.children[start..end], text_align);
+            prev_range = Some((start, end));
+            if !repeat {
+                Self::apply_text_align_offset(
+                    &mut self.children[start..end],
+                    width,
+                    band_width,
+                    text_align,
+                );
+            }
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
