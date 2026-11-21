@@ -15777,7 +15777,14 @@ mod tests {
         small.font_size = Length::Px(12.0);
         small.font_weight = rustkit_css::FontWeight::NORMAL;
 
-        assert_eq!(LayoutBox::text_line_box_extents(&big).0, 28.0, "32px bold strut seat");
+        // Windows: the stack is Arial there (Chrome does not know
+        // BlinkMacSystemFont), measured in Chrome for Testing 148 win64 with a
+        // zero-height inline-block on each baseline: the 32px bold seat is 27
+        // (round ascent 29, half-leading floor(-2) = -2), the 12px seat 10, the
+        // 12px span 14 tall at half-leading floor(-1) = -1, its rect 16 below the
+        // line on baseline 27, so its text slot at 117 and its rect at 116.
+        let (seat, content_area, slot) = if cfg!(windows) { (27.0, (14.0, -1.0), 117.0) } else { (28.0, (15.0, -2.0), 118.0) };
+        assert_eq!(LayoutBox::text_line_box_extents(&big).0, seat, "32px bold strut seat");
         assert_eq!(LayoutBox::text_line_box_extents(&small).0, 10.0, "12px seat in a 12px line");
 
         let mut text = LayoutBox::new(BoxType::Text("0".to_string()), big.clone());
@@ -15790,14 +15797,14 @@ mod tests {
         span.dimensions.content.y = 100.0;
         span.children.push(inner);
         let (content, half_leading) = span.inline_content_area();
-        assert_eq!((content, half_leading), (15.0, -2.0), "Chrome 148: 15 tall, floor(-1.5)");
+        assert_eq!((content, half_leading), content_area, "Chrome 148: 15 tall, floor(-1.5) (Windows: 14, floor(-1))");
         span.shift_inline_content_area(half_leading);
 
         let mut line = vec![text, span];
         LayoutBox::apply_vertical_align(&mut line, &big);
 
         assert_eq!(line[0].dimensions.content.y, 100.0, "the strut-font text stays");
-        assert_eq!(line[1].children[0].dimensions.content.y, 118.0, "span text slot: baseline 128 - 10");
+        assert_eq!(line[1].children[0].dimensions.content.y, slot, "span text slot: baseline 128 - 10 (Windows 127 - 10)");
         assert_eq!(line[1].dimensions.content.y, 116.0, "span rect: baseline 128 - 12");
     }
 
