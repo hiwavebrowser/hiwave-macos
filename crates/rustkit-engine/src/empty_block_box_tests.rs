@@ -72,3 +72,40 @@ fn an_empty_block_between_inline_content_breaks_the_line() {
     assert_eq!(rect(&root, "wrap"), (0.0, 0.0, 400.0, 40.0));
     assert_eq!(rect(&root, "mid"), (0.0, 20.0, 400.0, 0.0));
 }
+
+/// Keeping the box adds no space: an empty block's margins (and its
+/// neighbours' and parent's) still collapse through it, and the box sits at
+/// the top of what follows. Chrome:
+/// - a 10px block with margin-bottom 20, an unstyled empty block, a block
+///   with margin-top 15: empty at y=30, next at y=30;
+/// - the same with the empty block's own margins 30/10: empty and next at
+///   y=40 (the largest of 20, 30, 10, 15);
+/// - an empty first child: the parent's top margin collapses through it with
+///   the next child's 20px, so parent, empty block and child all start at
+///   5 + 20 = 25.
+#[test]
+fn margins_still_collapse_through_a_kept_empty_block() {
+    let root = laid_out(
+        r#"<!doctype html><html><body style="margin:0"><div style="width:400px">
+<div id="a1" style="height:10px;margin-bottom:20px"></div><div id="e1"></div><div id="b1" style="height:10px;margin-top:15px"></div>
+</div></body></html>"#,
+    );
+    assert_eq!(rect(&root, "e1"), (0.0, 30.0, 400.0, 0.0));
+    assert_eq!(rect(&root, "b1"), (0.0, 30.0, 400.0, 10.0));
+
+    let root = laid_out(
+        r#"<!doctype html><html><body style="margin:0"><div style="width:400px">
+<div id="a2" style="height:10px;margin-bottom:20px"></div><div id="e2" style="margin-top:30px;margin-bottom:10px"></div><div id="b2" style="height:10px;margin-top:15px"></div>
+</div></body></html>"#,
+    );
+    assert_eq!(rect(&root, "e2"), (0.0, 40.0, 400.0, 0.0));
+    assert_eq!(rect(&root, "b2"), (0.0, 40.0, 400.0, 10.0));
+
+    let root = laid_out(
+        r#"<!doctype html><html><body style="margin:0"><div id="top" style="height:5px"></div><div id="p3" style="width:400px"><div id="e3"></div><div id="c3" style="margin-top:20px;height:10px"></div></div>
+</body></html>"#,
+    );
+    assert_eq!(rect(&root, "p3"), (0.0, 25.0, 400.0, 10.0));
+    assert_eq!(rect(&root, "e3"), (0.0, 25.0, 400.0, 0.0));
+    assert_eq!(rect(&root, "c3"), (0.0, 25.0, 400.0, 10.0));
+}
