@@ -3,7 +3,7 @@
 //!
 //! `Statement` was 464 bytes because `ForInLoop` and `ForOfLoop` (456) were stored inline, and every
 //! statement in a script is a `Box<Statement>`: YouTube's 10.9 MB kevlar_base.js has 199k of them
-//! (88 MB) and about 3k for-in, for-of and switch statements.
+//! (88 MB) and about 1,100 for-in, for-of and switch statements.
 use boa_engine::ast::scope::Scope;
 use boa_engine::ast::Statement;
 use boa_engine::interner::{Interner, ToInternedString};

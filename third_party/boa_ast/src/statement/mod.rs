@@ -42,7 +42,7 @@ use super::{declaration::VarDeclaration, expression::Expression};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 // HIWAVE PATCH (statement-box): `ForInLoop`, `ForOfLoop` (456 bytes) and `Switch` (224) are boxed,
-// so every statement no longer takes their size: 464 -> 216 bytes. They are rare (about 3k of
+// so every statement no longer takes their size: 464 -> 216 bytes. They are rare (about 1,100 of
 // 199k statements in a 10.9 MB bundle).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
