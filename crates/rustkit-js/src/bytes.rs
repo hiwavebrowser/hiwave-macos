@@ -574,4 +574,70 @@ mod tests {
         assert_eq!(utf8_encode(JsStr::utf16(&units)), b"a\xEF\xBF\xBDb");
         assert_eq!(utf8_encode(JsStr::latin1(b"\xE9")), "é".as_bytes());
     }
+
+    fn store_with_named_blobs() -> BlobStore {
+        let mut store = BlobStore::default();
+        store.random = Some(|n| Some(vec![7u8; n]));
+        store
+    }
+
+    /// Opaque (`"null"`) origins only reach their own realm's blobs: two
+    /// different opaque realms must not share a URL even though both report
+    /// origin `"null"` (File API §8.3 / `reaches` short-circuit).
+    #[test]
+    fn two_opaque_realms_do_not_share_a_blob_url() {
+        let mut store = store_with_named_blobs();
+        store.set_origin(1, "null");
+        store.set_origin(2, "null");
+        let (url, kept) = store.make(1, Some((b"a".to_vec(), "text/plain".into())));
+        assert!(kept, "realm 1 kept its blob");
+        assert!(store.get(1, &url).is_some(), "maker still reads it");
+        assert!(
+            store.get(2, &url).is_none(),
+            "a different opaque realm must not read it"
+        );
+    }
+
+    #[test]
+    fn same_opaque_realm_still_reads_its_own() {
+        let mut store = store_with_named_blobs();
+        store.set_origin(1, "null");
+        let (url, kept) = store.make(1, Some((b"own".to_vec(), "text/plain".into())));
+        assert!(kept);
+        assert_eq!(
+            store.get(1, &url).map(|r| r.bytes.as_slice()),
+            Some(b"own".as_slice())
+        );
+    }
+
+    /// Same HTTP origin across realms still shares; opaque isolation must
+    /// not break the non-null arm of `reaches`.
+    #[test]
+    fn same_http_origin_realms_still_share_a_blob_url() {
+        let mut store = store_with_named_blobs();
+        store.set_origin(1, "https://example.test");
+        store.set_origin(2, "https://example.test");
+        let (url, kept) = store.make(1, Some((b"shared".to_vec(), "text/plain".into())));
+        assert!(kept);
+        assert_eq!(
+            store.get(2, &url).map(|r| r.bytes.as_slice()),
+            Some(b"shared".as_slice())
+        );
+    }
+
+    #[test]
+    fn drop_realm_frees_held_bytes_for_the_quota() {
+        let mut store = store_with_named_blobs();
+        store.limit = Some(16);
+        store.set_origin(1, "null");
+        let (url, kept) = store.make(1, Some((vec![1u8; 10], "application/octet-stream".into())));
+        assert!(kept);
+        assert_eq!(store.held, 10);
+        store.drop_realm(1);
+        assert!(store.get(1, &url).is_none());
+        assert_eq!(store.held, 0);
+        store.set_origin(1, "null");
+        let (_, kept_again) = store.make(1, Some((vec![2u8; 10], "application/octet-stream".into())));
+        assert!(kept_again, "quota freed by drop_realm");
+    }
 }

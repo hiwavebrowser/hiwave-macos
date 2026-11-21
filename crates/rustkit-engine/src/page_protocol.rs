@@ -2056,7 +2056,10 @@ pub(crate) fn coalesce(batch: Vec<PageCmd>) -> Vec<PageCmd> {
     kept
 }
 
-fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {
+/// Document-scroll delta for an unhandled key (Arrow / Page / Space / Home /
+/// End). `pub(crate)` so portable units in `scroll_key_dy_tests` pin the map
+/// without a headed page.
+pub(crate) fn scroll_dy_for_unhandled_key(key_code: u32, key: &str) -> Option<f32> {
     match (key_code, key) {
         (0x28, _) => Some(-40.0),
         (0x26, _) => Some(40.0),
