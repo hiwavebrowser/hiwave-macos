@@ -101,6 +101,30 @@ impl LayoutCtx {
     }
 }
 
+#[cfg(test)]
+mod image_generation_tests {
+    use super::*;
+
+    /// #1304 follow-up: an SVG image's arrival bumps `svg_images`, so
+    /// `image_generation` moves even when the raster cache is still. The sole prior
+    /// pin is headless `retained_style_tests::an_svg_image_that_arrived_since_the_kept_build_is_not_spliced_stale`.
+    #[test]
+    fn an_svg_image_arrival_moves_image_generation() {
+        let ctx = LayoutCtx::default();
+        let before = ctx.image_generation();
+        assert_eq!(before, 0);
+        ctx.svg_images.set(1);
+        assert_eq!(ctx.image_generation(), 1);
+        ctx.svg_images.set(u64::MAX);
+        assert_eq!(
+            ctx.image_generation(),
+            ctx.image_manager
+                .cache_generation()
+                .wrapping_add(u64::MAX)
+        );
+    }
+}
+
 /// What a build reads of the view it is for, taken by the engine when the
 /// build starts.
 ///

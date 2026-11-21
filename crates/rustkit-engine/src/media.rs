@@ -868,6 +868,18 @@ pub(crate) fn can_play_type(mime: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// MEDIA-AVF M1.3: frame keys name the node and player so the presenter uploads
+    /// under the right box; a non-video key is refused.
+    #[test]
+    fn video_keys_name_the_node_and_player() {
+        assert_eq!(video_key(42, 7), "rustkit-video:42@7");
+        assert!(is_video_key("rustkit-video:42@7"));
+        assert!(is_video_key(&video_key(0, 0)));
+        assert!(!is_video_key("rustkit-noratio:video:1"));
+        assert!(!is_video_key("rustkit-video"));
+        assert!(!is_video_key(""));
+    }
+
     /// #1344 delta R1: a hostile `Content-Range` near u64::MAX is a bad response, not
     /// an overflow.
     #[test]
