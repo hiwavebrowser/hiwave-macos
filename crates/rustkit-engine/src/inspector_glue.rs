@@ -232,11 +232,21 @@ pub(crate) fn drain_reports(
         log.push(ScriptRecord {
             source: source.to_string(),
             bytes: 0,
-            elapsed_ms: if nth == 0 { elapsed_ms } else { 0 },
+            elapsed_ms: report_elapsed_ms(nth, elapsed_ms),
             outcome: ScriptOutcome::Threw(message),
         });
     }
     drain_quiet(bindings, inspector, source);
+}
+
+/// SCRIPT-TIME-DUP: the first error record of a step carries its wall time; later ones are 0 so a
+/// total over the log counts the step once.
+pub(crate) fn report_elapsed_ms(nth: usize, step_ms: u64) -> u64 {
+    if nth == 0 {
+        step_ms
+    } else {
+        0
+    }
 }
 
 /// After the page's script `script` ran: what its listeners and callbacks

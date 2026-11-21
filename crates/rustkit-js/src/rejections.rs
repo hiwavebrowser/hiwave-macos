@@ -81,7 +81,9 @@ pub(crate) struct RejectionHooks {
     drop_logged: Cell<bool>,
 }
 
-fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, max: usize) {
+/// Drop the oldest when `queue` is already at `max`, then push. Used for pending/outstanding/
+/// reported rejection queues so a flood cannot grow without bound.
+pub(crate) fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, max: usize) {
     if queue.len() >= max {
         queue.pop_front();
     }
@@ -222,5 +224,33 @@ pub(crate) fn reason_of(object: &JsObject) -> Option<JsValue> {
     match JsPromise::from_object(object.clone()).ok()?.state() {
         PromiseState::Rejected(reason) => Some(reason),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_bounded;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn push_bounded_keeps_the_newest_at_the_cap() {
+        let mut q = VecDeque::new();
+        push_bounded(&mut q, 1, 3);
+        push_bounded(&mut q, 2, 3);
+        push_bounded(&mut q, 3, 3);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        push_bounded(&mut q, 4, 3);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4]);
+        push_bounded(&mut q, 5, 3);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn a_zero_cap_holds_only_the_latest() {
+        let mut q = VecDeque::new();
+        push_bounded(&mut q, "a", 0);
+        // len >= 0 is always true once non-empty, so each push drops then adds.
+        push_bounded(&mut q, "b", 0);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec!["b"]);
     }
 }
