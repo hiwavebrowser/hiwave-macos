@@ -2056,7 +2056,7 @@ mod tab_navigation_tests {
         }
         let mut restored = AppState::new(config).unwrap();
         assert!(restored.load_workspace_state().unwrap());
-        assert_eq!(restored.shell.get_active_tab().unwrap().id.0, first_id);
+        assert_eq!(restored.shell.get_active_tab().unwrap().url.as_str(), "http://127.0.0.1/first");
         assert!(success(handle_close_tab(&state, &second))["next_tab"].is_null());
         assert_eq!(success(handle_close_tab(&state, &first))["next_tab"], third.parse::<u64>().unwrap());
         assert!(success(handle_close_tab(&state, &third))["next_tab"].is_null());
