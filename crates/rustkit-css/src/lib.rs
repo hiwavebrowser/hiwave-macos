@@ -4013,6 +4013,8 @@ mod color_syntax_tests;
 #[cfg(test)]
 mod unreadable_color_tests;
 #[cfg(test)]
+mod paint_only_gradient_layer_tests;
+#[cfg(test)]
 mod opacity_parse_tests;
 #[cfg(test)]
 mod monospace_size_unit_tests;
