@@ -315,7 +315,7 @@ pub const UA_BUTTON_BORDER_H: f32 = 4.0;
 pub(crate) fn button_box_sides(style: &ComputedStyle, font_size: f32) -> ([f32; 4], [f32; 4]) {
     let px = |l: &Length| match l {
         Length::Percent(_) | Length::Auto => 0.0,
-        other => other.to_px(font_size, 16.0, 0.0),
+        other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
     };
     let author_pad = [&style.padding_top, &style.padding_right, &style.padding_bottom, &style.padding_left];
     let author_border =
@@ -453,7 +453,7 @@ pub(crate) fn form_control_intrinsic_size(
     let (author_pad_v, author_border_v) = {
         let px = |l: &Length| match l {
             Length::Percent(_) | Length::Auto => 0.0,
-            other => other.to_px(font_size, 16.0, 0.0),
+            other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
         };
         (
             px(&style.padding_top) + px(&style.padding_bottom),
@@ -554,7 +554,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // does not have (a border width cannot be a percentage).
                 let px_h = |l: &Length| match l {
                     Length::Percent(_) | Length::Auto => 0.0,
-                    other => other.to_px(font_size, 16.0, 0.0),
+                    other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
                 };
                 // Sides are [top, right, bottom, left]; a side nobody
                 // declared keeps the UA's value, each on its own: with
@@ -652,7 +652,7 @@ pub(crate) fn form_control_intrinsic_size(
                 // `appearance`, and the old +24 assumed the well too.)
                 let px = |l: &Length| match l {
                     Length::Percent(_) | Length::Auto => 0.0,
-                    other => other.to_px(font_size, 16.0, 0.0),
+                    other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
                 };
                 let pb_h = px(&style.padding_left)
                     + px(&style.padding_right)
@@ -698,7 +698,7 @@ pub(crate) fn form_control_intrinsic_size(
                     // Testing 148: 23 with `border-top-width: 5px` alone).
                     let px = |l: &Length| match l {
                         Length::Percent(_) | Length::Auto => 0.0,
-                        other => other.to_px(font_size, 16.0, 0.0),
+                        other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
                     };
                     let side = |declared: bool, value: f32| if declared || value > 0.0 { value } else { 1.0 };
                     let border_v = side(style.border_declared[0], px(&style.border_top_width))
@@ -3111,33 +3111,33 @@ impl LayoutBox {
         let d = &mut self.dimensions;
         let container_width = containing_block.content.width;
 
-        d.margin.left = self.style.margin_left.to_px(16.0, 16.0, container_width);
-        d.margin.right = self.style.margin_right.to_px(16.0, 16.0, container_width);
+        d.margin.left = self.style.margin_left.to_px(16.0, rustkit_css::root_font_px(), container_width);
+        d.margin.right = self.style.margin_right.to_px(16.0, rustkit_css::root_font_px(), container_width);
         // Vertical margins don't apply to inline elements
         d.margin.top = 0.0;
         d.margin.bottom = 0.0;
 
-        d.padding.left = self.style.padding_left.to_px(16.0, 16.0, container_width);
-        d.padding.right = self.style.padding_right.to_px(16.0, 16.0, container_width);
-        d.padding.top = self.style.padding_top.to_px(16.0, 16.0, container_width);
-        d.padding.bottom = self.style.padding_bottom.to_px(16.0, 16.0, container_width);
+        d.padding.left = self.style.padding_left.to_px(16.0, rustkit_css::root_font_px(), container_width);
+        d.padding.right = self.style.padding_right.to_px(16.0, rustkit_css::root_font_px(), container_width);
+        d.padding.top = self.style.padding_top.to_px(16.0, rustkit_css::root_font_px(), container_width);
+        d.padding.bottom = self.style.padding_bottom.to_px(16.0, rustkit_css::root_font_px(), container_width);
 
         d.border.left = self
             .style
             .border_left_width
-            .to_px(16.0, 16.0, container_width);
+            .to_px(16.0, rustkit_css::root_font_px(), container_width);
         d.border.right = self
             .style
             .border_right_width
-            .to_px(16.0, 16.0, container_width);
+            .to_px(16.0, rustkit_css::root_font_px(), container_width);
         d.border.top = self
             .style
             .border_top_width
-            .to_px(16.0, 16.0, container_width);
+            .to_px(16.0, rustkit_css::root_font_px(), container_width);
         d.border.bottom = self
             .style
             .border_bottom_width
-            .to_px(16.0, 16.0, container_width);
+            .to_px(16.0, rustkit_css::root_font_px(), container_width);
 
         // Position at containing block's content area
         d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
@@ -3256,13 +3256,13 @@ impl LayoutBox {
         let letter_spacing = match self.style.letter_spacing {
             Length::Px(px) => px,
             Length::Em(em) => em * font_size,
-            Length::Rem(rem) => rem * 16.0,
+            Length::Rem(rem) => rem * rustkit_css::root_font_px(),
             _ => 0.0,
         };
         let word_spacing = match self.style.word_spacing {
             Length::Px(px) => px,
             Length::Em(em) => em * font_size,
-            Length::Rem(rem) => rem * 16.0,
+            Length::Rem(rem) => rem * rustkit_css::root_font_px(),
             _ => 0.0,
         };
         measure_text_with_spacing(
@@ -3307,13 +3307,13 @@ impl LayoutBox {
         let letter_spacing = match self.style.letter_spacing {
             Length::Px(px) => px,
             Length::Em(em) => em * font_size,
-            Length::Rem(rem) => rem * 16.0, // Root font size assumed 16px
+            Length::Rem(rem) => rem * rustkit_css::root_font_px(),
             _ => 0.0,
         };
         let word_spacing = match self.style.word_spacing {
             Length::Px(px) => px,
             Length::Em(em) => em * font_size,
-            Length::Rem(rem) => rem * 16.0,
+            Length::Rem(rem) => rem * rustkit_css::root_font_px(),
             _ => 0.0,
         };
 
@@ -4600,7 +4600,7 @@ impl LayoutBox {
         let st = &self.style;
         let px = |l: &Length| match l {
             Length::Percent(_) | Length::Auto => 0.0,
-            other => other.to_px(font_size, 16.0, 0.0),
+            other => other.to_px(font_size, rustkit_css::root_font_px(), 0.0),
         };
         let edge = |pad: &Length, width: &Length, style: BorderStyle, declared: bool| {
             let border = if style == BorderStyle::None {
@@ -8793,7 +8793,7 @@ impl LayoutBox {
                 };
                 em * font_size
             }
-            Length::Rem(rem) => rem * 16.0,
+            Length::Rem(rem) => rem * rustkit_css::root_font_px(),
             _ => return None,
         };
         let content = if self.style.box_sizing == BoxSizing::BorderBox {
@@ -8921,7 +8921,7 @@ impl LayoutBox {
                 };
             }
             Length::Rem(rem) => {
-                let specified = rem * 16.0; // Root font size
+                let specified = rem * rustkit_css::root_font_px();
                 self.dimensions.content.height = if is_border_box {
                     (specified - padding_border_height).max(0.0)
                 } else {
@@ -9099,7 +9099,7 @@ impl LayoutBox {
         };
         length.to_px_with_viewport(
             font_size,
-            16.0,
+            rustkit_css::root_font_px(),
             container_size,
             self.viewport.0,
             self.viewport.1,
@@ -9573,8 +9573,8 @@ impl LayoutBox {
         let border_box = self.dimensions.border_box();
         let m = transform.to_matrix(border_box.width, border_box.height);
         let origin = &self.style.transform_origin;
-        let ox = border_box.x + origin.x.to_px(16.0, 16.0, border_box.width);
-        let oy = border_box.y + origin.y.to_px(16.0, 16.0, border_box.height);
+        let ox = border_box.x + origin.x.to_px(16.0, rustkit_css::root_font_px(), border_box.width);
+        let oy = border_box.y + origin.y.to_px(16.0, rustkit_css::root_font_px(), border_box.height);
         // T(origin) · m · T(-origin)
         Some([
             m[0],
@@ -12133,13 +12133,9 @@ impl DisplayList {
     }
 
     fn for_root(root: &LayoutBox) -> Self {
-        // Extract root font size from root element
-        let root_font_size = match root.style.font_size {
-            Length::Px(px) => px,
-            Length::Em(em) => em * 16.0, // Relative to browser default
-            Length::Rem(rem) => rem * 16.0, // Relative to browser default
-            _ => 16.0,
-        };
+        // ROOT-REM: `rem` is the root element's computed font-size. The layout root is the
+        // anonymous viewport box, not <html>; the engine publishes <html>'s size.
+        let root_font_size = rustkit_css::root_font_px();
         DisplayList {
             commands: Vec::new(),
             root_font_size,
@@ -12390,13 +12386,13 @@ impl DisplayList {
                     .style
                     .transform_origin
                     .x
-                    .to_px(16.0, 16.0, border_box.width);
+                    .to_px(16.0, rustkit_css::root_font_px(), border_box.width);
             let origin_y = border_box.y
                 + layout_box
                     .style
                     .transform_origin
                     .y
-                    .to_px(16.0, 16.0, border_box.height);
+                    .to_px(16.0, rustkit_css::root_font_px(), border_box.height);
             self.commands.push(DisplayCommand::PushTransform {
                 matrix,
                 origin: (origin_x, origin_y),
@@ -15163,13 +15159,13 @@ fn shape_line(
     let letter_spacing = match style.letter_spacing {
         Length::Px(px) => px,
         Length::Em(em) => em * font_size,
-        Length::Rem(rem) => rem * 16.0,
+        Length::Rem(rem) => rem * rustkit_css::root_font_px(),
         _ => 0.0,
     };
     let word_spacing = match style.word_spacing {
         Length::Px(px) => px,
         Length::Em(em) => em * font_size,
-        Length::Rem(rem) => rem * 16.0,
+        Length::Rem(rem) => rem * rustkit_css::root_font_px(),
         _ => 0.0,
     };
     let shaper = TextShaper::new();
