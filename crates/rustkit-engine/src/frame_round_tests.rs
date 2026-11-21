@@ -187,8 +187,8 @@ requestAnimationFrame(tick);
     assert_eq!(ticks, vec![1; 8], "the page's rAF loop per presented turn");
 }
 
-/// Off (the default until the frame documents' CSS animation clock follows the deferred frame),
-/// a late turn of a frame tree still runs the loop twice: what `HIWAVE_RAF_ONE_ROUND=1` changes.
+/// Off (`HIWAVE_RAF_ONE_ROUND=0`, the behaviour before RAF-ONE-ROUND), a late turn of a frame
+/// tree still runs the loop twice.
 #[test]
 fn with_the_switch_off_a_late_turn_of_a_frame_tree_runs_two_rounds() {
     let mut tree = Tree::load_switched(PAGE, LOOP_CHILD, false);
