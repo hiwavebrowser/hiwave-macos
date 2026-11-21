@@ -206,6 +206,8 @@ enum NavOutcome {
 #[allow(dead_code)]
 enum UserEvent {
     Navigate(String, NavInitiator),
+    ShowSelectedTab(u64),
+    PersistTabSelection(u64),
     GoBack,
     GoForward,
     Reload,
@@ -1252,38 +1254,27 @@ fn handle_chrome_ipc(
             IpcMessage::CloseTab { .. } => {
                 let response = ipc::commands::handle_message(&chrome_state, msg);
                 info!("Close tab response: {}", ipc_log_shape(body, &response));
-                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
-                // Navigate to the new active tab after closing
-                if let Ok(s) = chrome_state.lock() {
-                    if let Some(active_tab) = s.shell.get_active_tab() {
-                        let url = active_tab.url.to_string();
-                        info!("Navigating to new active tab after close: {}", crate::page_url_for_log(&url));
-                        let _ = chrome_proxy.send_event(UserEvent::Navigate(url, NavInitiator::Browser));
+                if let ipc::IpcResponse::Success { data } = response {
+                    if let Some(id) = data["next_tab"].as_u64() {
+                        let _ = chrome_proxy.send_event(UserEvent::ShowSelectedTab(id));
                     }
                 }
+                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                let _ = chrome_proxy.send_event(UserEvent::SyncWorkspaces);
             }
             IpcMessage::ActivateTab { ref id } => {
-                let _tab_id = id.clone();
-                let already_active = chrome_state
-                    .lock()
-                    .ok()
-                    .and_then(|s| s.shell.get_active_tab().map(|tab| tab.id.0))
-                    .map(|active_id| id.parse::<u64>().ok() == Some(active_id))
-                    .unwrap_or(false);
+                let selected = id.parse::<u64>().ok();
                 let response = ipc::commands::handle_message(&chrome_state, msg);
                 info!("Tab activation response: {}", ipc_log_shape(body, &response));
-                let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
-                if !already_active {
-                    if let ipc::IpcResponse::Success { data } = response {
-                        if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                            info!("Navigating to tab URL: {}", crate::page_url_for_log(&url));
-                            let _ = chrome_proxy
-                                .send_event(UserEvent::Navigate(url.to_string(), NavInitiator::Browser));
-                        }
+                if let ipc::IpcResponse::Success { data } = response {
+                    if let Some(id) = data["next_tab"].as_u64() {
+                        let _ = chrome_proxy.send_event(UserEvent::ShowSelectedTab(id));
+                        let _ = chrome_proxy.send_event(UserEvent::SyncZoomLevel);
                     }
-                    // Sync zoom level for the newly activated tab
-                    let _ = chrome_proxy.send_event(UserEvent::SyncZoomLevel);
+                    let _ = chrome_proxy.send_event(UserEvent::SyncTabs);
+                    if let Some(id) = selected {
+                        let _ = chrome_proxy.send_event(UserEvent::PersistTabSelection(id));
+                    }
                 }
             }
             IpcMessage::ExecuteCommand { ref id } => {
@@ -4543,6 +4534,22 @@ fn main() {
                     UserEvent::Navigate(url, initiator) => {
                         navigate_content(url, initiator, &state_for_events, &*content_for_events, &*chrome_for_events);
                     }
+                    UserEvent::ShowSelectedTab(id) => {
+                        // An intervening shortcut or close may already have selected another tab.
+                        let url = state_for_events.lock().ok().and_then(|mut s| s.take_selected_tab_url(id));
+                        if let Some(url) = url {
+                            navigate_content(url, NavInitiator::Browser, &state_for_events, &*content_for_events, &*chrome_for_events);
+                        }
+                    }
+                    UserEvent::PersistTabSelection(id) => {
+                        if let Ok(s) = state_for_events.lock() {
+                            if s.tab_selection_save_pending.get().map(|tab| tab.0) == Some(id) {
+                                if let Err(err) = s.save_workspace_state() {
+                                    warn!("Failed to persist tab selection: {err}");
+                                }
+                            }
+                        }
+                    }
                     UserEvent::GoBack => {
                         info!("Going back");
                         #[cfg(target_os = "macos")]
@@ -4647,13 +4654,13 @@ fn main() {
                         if !trimmed.is_empty() {
                             if let Ok(mut s) = state_for_events.lock() {
                                 let active_tab_id = s.shell.get_active_tab().map(|tab| tab.id);
-                                if let Some(tab_id) = active_tab_id {
-                                    if let Some(tab) = s.shell.get_tab_mut(tab_id) {
+                                if let Some(tab) = active_tab_id.and_then(|id| s.shell.get_tab_mut(id)) {
+                                    if tab.title.as_deref() != Some(trimmed) {
                                         tab.title = Some(trimmed.to_string());
+                                        if let Err(e) = s.save_workspace_state() {
+                                            error!("Failed to persist workspace state: {}", e);
+                                        }
                                     }
-                                }
-                                if let Err(e) = s.save_workspace_state() {
-                                    error!("Failed to persist workspace state: {}", e);
                                 }
                             }
                             chrome_title(&*chrome_for_events, &title);

@@ -372,6 +372,7 @@ fn handle_close_tab(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse {
     let workspace_id = state.shell.get_tab(tab_id)
         .map(|tab| tab.workspace_id.0.to_string());
 
+    let was_visible = state.shell.get_active_tab().map(|tab| tab.id) == Some(tab_id);
     match state.shell.close_tab(tab_id) {
         Ok(_) => {
             info!("Closed tab: {:?}", tab_id);
@@ -384,7 +385,13 @@ fn handle_close_tab(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse {
             if let Err(e) = state.save_workspace_state() {
                 warn!("Failed to persist workspace state: {}", e);
             }
-            IpcResponse::success(serde_json::json!({ "closed": true }))
+            let next_tab = if was_visible {
+                state.tab_to_show = state.shell.get_active_tab().map(|tab| tab.id);
+                state.tab_to_show.map(|id| id.0)
+            } else {
+                None
+            };
+            IpcResponse::success(serde_json::json!({ "closed": true, "next_tab": next_tab }))
         }
         Err(e) => IpcResponse::error(format!("Failed to close tab: {}", e)),
     }
@@ -398,16 +405,19 @@ fn handle_activate_tab(state: &Arc<Mutex<AppState>>, id: &str) -> IpcResponse {
         Err(_) => return IpcResponse::error("Invalid tab ID"),
     };
 
+    let changed = state.shell.get_active_tab().map(|tab| tab.id) != Some(tab_id);
     match state.shell.set_active_tab(tab_id) {
         Ok(Some(tab)) => {
             let url = tab.url.to_string();
             info!("Activated tab: {:?}, navigating to {}", tab_id, crate::page_url_for_log(&url));
             crate::tab_shortcuts::activation_landed(&mut state, tab_id);
-            if let Err(e) = state.save_workspace_state() {
-                warn!("Failed to persist workspace state: {}", e);
+            if changed {
+                state.tab_to_show = Some(tab_id);
             }
+            state.tab_selection_save_pending.set(Some(tab_id));
             IpcResponse::success(serde_json::json!({
                 "activated": true,
+                "next_tab": changed.then_some(tab_id.0),
                 "url": url,
                 "tab_id": id
             }))
@@ -1997,6 +2007,59 @@ fn handle_reset_analytics_data(state: &Arc<Mutex<AppState>>) -> IpcResponse {
             }))
         }
         Err(e) => IpcResponse::error(format!("Failed to archive analytics data: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tab_navigation_tests {
+    use super::*;
+
+    fn success(response: IpcResponse) -> serde_json::Value {
+        match response {
+            IpcResponse::Success { data } => data,
+            other => panic!("tab command failed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selecting_and_closing_tabs_only_loads_a_new_visible_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::state::AppConfig {
+            data_dir: dir.path().to_path_buf(),
+            download_dir: dir.path().join("downloads"),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(AppState::new(config.clone()).unwrap()));
+        let create = |url| {
+            success(handle_create_tab(&state, Some(url)))["tab_id"].as_str().unwrap().to_owned()
+        };
+        let first = create("http://127.0.0.1/first");
+        let second = create("http://127.0.0.1/second");
+        let third = create("http://127.0.0.1/third");
+        let path = dir.path().join("workspace_state.json");
+        let before = std::fs::read(&path).unwrap();
+        let first_id = first.parse::<u64>().unwrap();
+        assert_eq!(success(handle_activate_tab(&state, &first))["next_tab"], first_id);
+        let second_id = second.parse::<u64>().unwrap();
+        assert_eq!(success(handle_activate_tab(&state, &second))["next_tab"], second_id);
+        assert_eq!(success(handle_activate_tab(&state, &first))["next_tab"], first_id);
+        assert!(success(handle_activate_tab(&state, &first))["next_tab"].is_null());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.take_selected_tab_url(second_id).is_none());
+            assert_eq!(s.take_selected_tab_url(first_id).as_deref(), Some("http://127.0.0.1/first"));
+            assert!(s.take_selected_tab_url(first_id).is_none());
+            assert_eq!(s.tab_selection_save_pending.get(), Some(TabId(first_id)));
+            s.save_workspace_state().unwrap();
+            assert!(s.tab_selection_save_pending.get().is_none());
+        }
+        let mut restored = AppState::new(config).unwrap();
+        assert!(restored.load_workspace_state().unwrap());
+        assert_eq!(restored.shell.get_active_tab().unwrap().id.0, first_id);
+        assert!(success(handle_close_tab(&state, &second))["next_tab"].is_null());
+        assert_eq!(success(handle_close_tab(&state, &first))["next_tab"], third.parse::<u64>().unwrap());
+        assert!(success(handle_close_tab(&state, &third))["next_tab"].is_null());
     }
 }
 

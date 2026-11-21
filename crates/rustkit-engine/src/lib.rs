@@ -22206,15 +22206,14 @@ impl Engine {
             .map(|link| link.url.clone())
             .collect();
 
-        // Fetch concurrently, but keep DOCUMENT ORDER in the result: the
-        // cascade depends on stylesheet order, so `buffered` (ordered) is
-        // load-bearing here where images use `buffer_unordered`.
+        // link_sheets reconstructs the cascade from the links in document order.
+        // Refill a network slot as soon as any sheet completes.
         use futures::stream::StreamExt;
         const MAX_CONCURRENT_CSS_LOADS: usize = 6;
 
         let deadline = self.subresource_deadline();
         let referrer = self.subresource_referrer(id);
-        let fetches: Vec<_> = urls
+        let fetches = urls
             .into_iter()
             .map(|url| {
                 let mut fetch: script_net::LiveFuture<Option<Stylesheet>> = Box::pin(Self::fetch_stylesheet(
@@ -22233,13 +22232,11 @@ impl Engine {
                         }
                     }
                 }
-            })
-            .collect();
+            });
         let fetched: Vec<_> = futures::stream::iter(fetches)
-            .buffered(MAX_CONCURRENT_CSS_LOADS)
+            .buffer_unordered(MAX_CONCURRENT_CSS_LOADS)
             .collect()
             .await;
-
         let mut sheets = std::collections::HashMap::new();
         let mut late = Vec::new();
         for (url, outcome) in fetched {
@@ -23487,9 +23484,11 @@ impl Engine {
         // Web fonts: faces declared in the external sheets that just arrived
         // (plus any inline data: faces not yet loaded), then the network ones.
         let fonts = wgate::bucket(wgate::HoldBucket::Fonts);
-        let local_fonts = self.load_local_web_fonts(id);
+        let rules = self.view_font_face_rules(id);
+        let base = self.views.get(&id).and_then(|v| v.url.as_ref());
+        let local_fonts = self.load_local_web_fonts_from(base, &rules);
         let Some(remote_fonts) =
-            nav_cancel::unless_cancelled(watch, self.load_remote_web_fonts(id)).await
+            nav_cancel::unless_cancelled(watch, self.load_remote_web_fonts(id, rules)).await
         else {
             return Ok(());
         };
@@ -23664,25 +23663,29 @@ impl Engine {
     }
 
     /// Fetch the view's http(s)-sourced faces. Returns how many newly loaded.
-    async fn load_remote_web_fonts(&mut self, id: EngineViewId) -> usize {
+    async fn load_remote_web_fonts(
+        &self,
+        id: EngineViewId,
+        rules: Vec<rustkit_css::FontFaceRule>,
+    ) -> usize {
         let base = self.views.get(&id).and_then(|v| v.url.clone());
         let partition = Self::font_partition(base.as_ref());
         let mut targets = Vec::new();
-        for rule in self.view_font_face_rules(id) {
+        for rule in rules {
             let face = Self::layout_font_face(&rule);
             let key = rustkit_layout::FontCacheKey::new(partition.clone(), &face);
             if self.lctx.font_loader.is_loaded_key(&key) || self.lctx.font_loader.is_failed(&key) {
                 continue;
             }
             if let FontSource::Remote(url) = resolve_font_source(base.as_ref(), &rule.src) {
-                targets.push((key, rule.family.clone(), url));
+                targets.push((key, rule.family, url));
             }
         }
 
         // Fetch concurrently. One at a time, YouTube's 135 declared faces
         // took 23s — most of the page's 31s and past the real-site board's
-        // 30s LOADS budget. `buffered` (not unordered) keeps results in rule
-        // order, so the cache is filled exactly as the sequential loop did.
+        // 30s LOADS budget. Collect in completion order to keep the slots busy,
+        // then apply in declaration order (several faces can share a cache key).
         use futures::stream::{self, StreamExt};
         const MAX_IN_FLIGHT: usize = 16;
         let loader = &self.loader;
@@ -23691,7 +23694,7 @@ impl Engine {
         let referrer = &referrer;
         let inspector = self.views.get(&id).map(|v| v.inspector.clone());
         let inspector = &inspector;
-        let fetched: Vec<_> = stream::iter(targets.into_iter().map(|(key, family, url)| async move {
+        let fetches = targets.into_iter().enumerate().map(|(index, (key, family, url))| async move {
             info!(%family, url = %url_for_log(&url), "Loading web font");
             let load = async {
                 let guard = inspector
@@ -23731,14 +23734,16 @@ impl Engine {
             let outcome = tokio::time::timeout_at(deadline, load)
                 .await
                 .unwrap_or_else(|_| Err("Web font over the subresource budget".to_string()));
-            (key, family, url, outcome)
-        }))
-        .buffered(MAX_IN_FLIGHT)
-        .collect()
-        .await;
+            (index, key, family, url, outcome)
+        });
+        let mut fetched: Vec<_> = stream::iter(fetches)
+            .buffer_unordered(MAX_IN_FLIGHT)
+            .collect()
+            .await;
 
+        fetched.sort_unstable_by_key(|entry| entry.0);
         let mut loaded = 0;
-        for (key, family, url, outcome) in fetched {
+        for (_, key, family, url, outcome) in fetched {
             match outcome {
                 Ok(bytes) => {
                     self.lctx.font_loader.insert_loaded(key, bytes);
@@ -44808,7 +44813,8 @@ mod remote_font_tests {
             .build()
             .unwrap();
         let started = Instant::now();
-        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let rules = engine.view_font_face_rules(view);
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view, rules));
         let elapsed = started.elapsed();
 
         assert_eq!(loaded, FACES, "every face should be fetched");
@@ -45278,7 +45284,7 @@ document.currentScript.remove();
             .build()
             .unwrap();
         let started = std::time::Instant::now();
-        let loaded = rt.block_on(engine.load_remote_web_fonts(view));
+        let loaded = rt.block_on(engine.load_remote_web_fonts(view, rules));
         let took = started.elapsed();
 
         assert_eq!(loaded, 0, "a stalled face must not count as loaded");

@@ -4,6 +4,7 @@
 //! including the browser shell, ad blocker, password vault, and configuration.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -688,9 +689,14 @@ pub struct AppState {
     /// from it, so two fast presses reach two tabs. Runtime only.
     pub tab_select_pending: Option<crate::tab_shortcuts::PendingSelect>,
 
+    /// A selection has changed the model and the window still needs to show its page.
+    pub(crate) tab_to_show: Option<TabId>,
+
     /// Set when the saved session could not be read and could not be moved aside: saving is
     /// refused for the rest of the run, so the unreadable file is never overwritten.
     workspace_state_save_blocked: bool,
+    /// The most recent activation to persist after the window dispatches its navigation.
+    pub(crate) tab_selection_save_pending: std::cell::Cell<Option<TabId>>,
 
     /// Small state files whose saves are refused for this run because the file could not be
     /// read or moved aside (`settings.json`, `focus_mode.json`, `user-blocklist.json`,
@@ -783,6 +789,8 @@ impl AppState {
             recent_popups: Vec::new(),
             tab_select_pending: None,
             workspace_state_save_blocked: false,
+            tab_selection_save_pending: std::cell::Cell::new(None),
+            tab_to_show: None,
             blocked_state_files,
             tab_zoom_levels: HashMap::new(),
             tab_audio_playing: HashMap::new(),
@@ -1247,9 +1255,9 @@ impl AppState {
         })?;
         if let Ok(snapshot) = serde_json::from_str::<WorkspaceStateSnapshot>(contents) {
             self.shell.load_snapshot(snapshot.shell)?;
-            self.shelves = snapshot.shelves;
-            self.cellar = snapshot.cellar;
-            self.downloads = snapshot.downloads;
+            self.shelves = snapshot.shelves.into_owned();
+            self.cellar = snapshot.cellar.into_owned();
+            self.downloads = snapshot.downloads.into_owned();
             self.next_download_id = self
                 .downloads
                 .iter()
@@ -1272,6 +1280,14 @@ impl AppState {
         Ok(())
     }
 
+    pub(crate) fn take_selected_tab_url(&mut self, id: u64) -> Option<String> {
+        if self.tab_to_show != Some(TabId(id)) {
+            return None;
+        }
+        self.tab_to_show = None;
+        self.shell.get_active_tab().filter(|tab| tab.id.0 == id).map(|tab| tab.url.to_string())
+    }
+
     pub fn save_workspace_state(&self) -> HiWaveResult<()> {
         if self.workspace_state_save_blocked {
             return Err(hiwave_core::HiWaveError::Config(
@@ -1281,14 +1297,15 @@ impl AppState {
         let path = self.workspace_state_path();
         let snapshot = WorkspaceStateSnapshot {
             shell: self.shell.snapshot(),
-            shelves: self.shelves.clone(),
-            cellar: self.cellar.clone(),
-            downloads: self.downloads.clone(),
+            shelves: Cow::Borrowed(&self.shelves),
+            cellar: Cow::Borrowed(&self.cellar),
+            downloads: Cow::Borrowed(&self.downloads),
         };
-        let data = serde_json::to_string_pretty(&snapshot).map_err(|err| {
+        let data = serde_json::to_vec(&snapshot).map_err(|err| {
             hiwave_core::HiWaveError::Config(format!("Failed to save workspace state: {}", err))
         })?;
-        write_atomic(&path, data.as_bytes())?;
+        write_atomic(&path, &data)?;
+        self.tab_selection_save_pending.set(None);
         Ok(())
     }
 
@@ -1769,13 +1786,13 @@ pub struct CellarItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkspaceStateSnapshot {
+struct WorkspaceStateSnapshot<'a> {
     shell: ShellSnapshot,
-    shelves: HashMap<String, Vec<ShelfItem>>,
+    shelves: Cow<'a, HashMap<String, Vec<ShelfItem>>>,
     #[serde(default)]
-    cellar: Vec<CellarItem>,
+    cellar: Cow<'a, [CellarItem]>,
     #[serde(default)]
-    downloads: Vec<DownloadItem>,
+    downloads: Cow<'a, [DownloadItem]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
