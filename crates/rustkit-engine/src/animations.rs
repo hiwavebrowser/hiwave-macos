@@ -44,7 +44,7 @@ use rustkit_css::{
     GridTemplate, Length, LineHeight, TimingFunction, TrackDefinition, TrackRepeat, TrackSize,
     TransformList, TransformOp, TransitionItem, TypedValue, Visibility,
 };
-use rustkit_css::registered_property::{LengthPercentage, Typed};
+use rustkit_css::registered_property::{LengthPercentage, Multiplier, Typed};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -3245,6 +3245,58 @@ mod tests {
             .collect();
         anims.on_style(7, &mut style, &no_frames);
         assert_eq!(anims.take_unsupported(), ["zoom"]);
+    }
+
+    /// TRANS-F: `interpolate_typed` for registered `<color>` / `<length-percentage>`
+    /// / `<integer>` (and a length mismatch → discrete). Engine oracles for
+    /// `@property` transitions are headless; these pins run on default `--lib`.
+    fn typed(items: Vec<Typed>) -> TypedValue {
+        TypedValue {
+            items,
+            multiplier: Multiplier::One,
+        }
+    }
+
+    #[test]
+    fn interpolate_typed_colours_and_integers() {
+        let a = typed(vec![Typed::Color(SVG_BLUE)]);
+        let b = typed(vec![Typed::Color(SVG_RED)]);
+        let mid = interpolate_typed(&a, &b, 0.5).expect("color mid");
+        match &mid.items[..] {
+            [Typed::Color(c)] => assert_eq!((c.r, c.g, c.b), (128, 0, 128)),
+            other => panic!("expected one colour, got {other:?}"),
+        }
+        assert_eq!(interpolate_typed(&a, &b, 1.0).unwrap().items, b.items);
+
+        let a = typed(vec![Typed::Integer(1.0)]);
+        let b = typed(vec![Typed::Integer(4.0)]);
+        let mid = interpolate_typed(&a, &b, 0.5).expect("integer mid");
+        assert_eq!(mid.items, vec![Typed::Integer(3.0)]); // 2.5 rounds to 3
+    }
+
+    #[test]
+    fn interpolate_typed_length_percentage_mixes_and_refuses_a_shape_mismatch() {
+        let a = typed(vec![Typed::LengthPercentage(LengthPercentage::Px(0.0))]);
+        let b = typed(vec![Typed::LengthPercentage(LengthPercentage::Percent(100.0))]);
+        let mid = interpolate_typed(&a, &b, 0.5).expect("calc mix");
+        assert_eq!(
+            mid.items,
+            vec![Typed::LengthPercentage(LengthPercentage::Calc {
+                percent: 50.0,
+                px: 0.0,
+            })]
+        );
+
+        let a = typed(vec![Typed::Color(SVG_BLUE)]);
+        let b = typed(vec![Typed::Color(SVG_BLUE), Typed::Color(SVG_RED)]);
+        assert!(
+            interpolate_typed(&a, &b, 0.5).is_none(),
+            "list length mismatch is discrete"
+        );
+
+        let a = typed(vec![Typed::Ident("auto".into())]);
+        let b = typed(vec![Typed::Ident("none".into())]);
+        assert!(interpolate_typed(&a, &b, 0.5).is_none(), "idents are discrete");
     }
 }
 

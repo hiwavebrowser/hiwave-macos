@@ -699,6 +699,8 @@ mod ancestor_attribute_query_tests;
 #[cfg(test)]
 mod font_family_serialization_tests;
 #[cfg(test)]
+mod svgs_holding_animated_tests;
+#[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
@@ -21992,7 +21994,7 @@ impl layout_ctx::LayoutCtx {
     /// Every `<svg>` element (raw NodeId) at or above an element whose
     /// paint map entry holds a moving svg paint value: the svgs whose
     /// markup, and so cache key, changes each frame.
-    fn svgs_holding_animated(
+    pub(crate) fn svgs_holding_animated(
         document: &Document,
         paint: &HashMap<usize, SvgPaintStyle>,
     ) -> std::collections::HashSet<usize> {

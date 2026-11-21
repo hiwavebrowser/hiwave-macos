@@ -92,6 +92,8 @@ mod percent_height_definite_tests;
 mod form_control_content_box_tests;
 #[cfg(test)]
 mod form_control_appearance_tests;
+#[cfg(test)]
+mod form_control_float_avoid_unit_tests;
 
 #[cfg(test)]
 mod replaced_size_unit_tests;
@@ -6641,7 +6643,7 @@ impl LayoutBox {
     /// Block-level form controls and `fieldset` avoid floats too (row
     /// FORM-CONTROL-FLOAT-AVOID): Chrome 148 lays them out as their own formatting
     /// context, like replaced boxes.
-    fn avoids_floats(child: &LayoutBox) -> bool {
+    pub(crate) fn avoids_floats(child: &LayoutBox) -> bool {
         if child.float != Float::None || matches!(child.position, Position::Absolute | Position::Fixed) {
             return false;
         }
