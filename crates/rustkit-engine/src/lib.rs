@@ -33352,6 +33352,7 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
 fn svg_shape_children_json(
     layout_box: &LayoutBox,
     shapes: &HashMap<String, InlineSvgShapes>,
+    effective_transform: Option<[f32; 6]>,
 ) -> Option<Vec<serde_json::Value>> {
     let identity = layout_box.identity()?;
     if identity.tag != "svg" {
@@ -33397,13 +33398,10 @@ fn svg_shape_children_json(
             .shapes
             .iter()
             .map(|shape| {
-                let rect = serde_json::json!({
-                    "x": origin_x + shape.x * scale_x,
-                    "y": origin_y + shape.y * scale_y,
-                    "width": shape.width * scale_x,
-                    "height": shape.height * scale_y,
-                });
-                serde_json::json!({
+                let (x, y, w, h) =
+                    (origin_x + shape.x * scale_x, origin_y + shape.y * scale_y, shape.width * scale_x, shape.height * scale_y);
+                let rect = serde_json::json!({ "x": x, "y": y, "width": w, "height": h });
+                let mut shape_json = serde_json::json!({
                     // NOT a CSS box, and named so no reader treats it as one.
                     "type": "svg_shape",
                     "tag": shape.tag,
@@ -33413,7 +33411,20 @@ fn svg_shape_children_json(
                     // falls back to `rect`, and the two must not disagree.
                     "rect": rect,
                     "border_box": rect,
-                })
+                });
+                // The `<svg>`'s transform (its own composed with its ancestors') applies to its
+                // shapes too, and `getBoundingClientRect()` on a shape is post-transform, so a
+                // shape gets the same `visual_border_box` a transformed CSS box gets
+                // (SVG-SHAPE-TRANSFORM: the inspector's rotated DOM toggle, Chrome for Testing
+                // 148: its 2.5x5 path reads 5x2.5).
+                if let (Some(m), Some(object)) = (effective_transform, shape_json.as_object_mut()) {
+                    let (vx, vy, vw, vh) = transformed_bounds(m, x, y, w, h);
+                    object.insert(
+                        "visual_border_box".into(),
+                        serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
+                    );
+                }
+                shape_json
             })
             .collect(),
     )
@@ -33450,7 +33461,7 @@ fn layout_box_to_json_under(
     // because that is what they are — a join key plus the geometry the paint
     // lane will use. See `SvgShapeBox`.
     if let (Some(children), Some(object)) = (
-        svg_shape_children_json(layout_box, svg_shapes),
+        svg_shape_children_json(layout_box, svg_shapes, effective),
         value.as_object_mut(),
     ) {
         if !children.is_empty() {
