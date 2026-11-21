@@ -531,6 +531,11 @@ mod html1_noscript_serialize_tests;
 mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
+// Menlo: the expected boxes are Chrome's on macOS.
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod root_rem_tests;
+#[cfg(all(test, feature = "headless"))]
+mod root_rem_cross_view_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -13122,7 +13127,7 @@ impl Engine {
             let px = |l: &Option<rustkit_css::Length>| match l {
                 Some(rustkit_css::Length::Px(v)) => Some(*v),
                 Some(rustkit_css::Length::Zero) => Some(0.0),
-                Some(rustkit_css::Length::Rem(rem)) => Some(rem * 16.0),
+                Some(rustkit_css::Length::Rem(rem)) => Some(rem * rustkit_css::root_font_px()),
                 Some(rustkit_css::Length::Em(em)) => {
                     let fs = match style.font_size {
                         rustkit_css::Length::Px(p) => p,
@@ -13454,6 +13459,9 @@ impl layout_ctx::LayoutCtx {
         bounds: (u32, u32),
     ) -> LayoutBox {
         let lay = building.lay.clone();
+        // ROOT-REM: this view's `rem` (from its last build) until this build styles `<html>`:
+        // a reused or kept tree is laid out with it.
+        rustkit_css::set_root_font_px(lay.as_ref().and_then(|l| l.root_font_px.get()).unwrap_or(16.0));
         // INC5 stage 2: a script-mutation relayout whose dirty set changed no
         // style and no box (`relayout`) keeps the last layout without a build.
         let skip_hint = lay.as_ref().is_some_and(|l| l.incremental_skip_build.replace(false));
@@ -13832,7 +13840,12 @@ impl layout_ctx::LayoutCtx {
         // full anyway and compares.
         use incremental_layout::Mode as IncMode;
         let inc_mode = if lay.is_some() { incremental_layout::mode() } else { IncMode::Off };
-        let mut inc_key = incremental_layout::Key { bounds, cb_width, fonts: rustkit_layout::webfonts::generation() };
+        let mut inc_key = incremental_layout::Key {
+            bounds,
+            cb_width,
+            fonts: rustkit_layout::webfonts::generation(),
+            root_font: rustkit_css::root_font_px().to_bits(),
+        };
         let mut incremental: Option<LayoutBox> = None;
         let mut unchanged = false;
         let mut diffed = false;
@@ -14062,6 +14075,7 @@ impl layout_ctx::LayoutCtx {
             bounds,
             cb_width: bounds.0 as f32,
             fonts: rustkit_layout::webfonts::generation(),
+            root_font: lay.root_font_px.get().unwrap_or(16.0).to_bits(),
         };
         if retained.key != key {
             return None;
@@ -14455,6 +14469,21 @@ impl layout_ctx::LayoutCtx {
                 None
             }
         });
+        // ROOT-REM: `<html>`'s font-size is absolute from here (against the initial value), and
+        // it is what `rem` is for everything below it and for this view's layout.
+        let html_style = html_style.map(|mut style| {
+            let px = absolutize_root_font_size(&mut style, self.building_viewport());
+            rustkit_css::set_root_font_px(px);
+            let before = self.with_building_lay(|lay| lay.root_font_px.replace(Some(px))).flatten();
+            if before.is_some_and(|b| b != px) {
+                forget_styles_for_root_font();
+            }
+            style
+        });
+        if html_style.is_none() {
+            rustkit_css::set_root_font_px(16.0);
+            self.with_building_lay(|lay| lay.root_font_px.set(Some(16.0)));
+        }
         // `<html>` has no layout box (the walk starts at body). Publish its
         // computed style anyway, or `getComputedStyle(documentElement)`
         // reads `display: none` from the "no box" path.
@@ -15246,7 +15275,7 @@ impl layout_ctx::LayoutCtx {
                     rustkit_css::Length::Percent(pct) => {
                         rustkit_css::Length::Px(pct / 100.0 * parent_font_px)
                     }
-                    rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+                    rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * rustkit_css::root_font_px()),
                     // `font-size: 0` parses to `Zero`, which is not `Px`:
                     // layout read it as 16px. A line holding only a 10px
                     // inline-block was 18 tall (Chromium 143: 10) and text
@@ -15272,7 +15301,7 @@ impl layout_ctx::LayoutCtx {
                                 other
                                     .to_px_with_viewport(
                                         parent_font_px,
-                                        16.0,
+                                        rustkit_css::root_font_px(),
                                         parent_font_px,
                                         vw,
                                         vh,
@@ -16870,7 +16899,7 @@ impl layout_ctx::LayoutCtx {
         };
         let px = |l: &rustkit_css::Length| match l {
             rustkit_css::Length::Auto => None,
-            other => Some(other.to_px(font_px, 16.0, 0.0)),
+            other => Some(other.to_px(font_px, rustkit_css::root_font_px(), 0.0)),
         };
         let to_part = |s: &ComputedStyle| {
             let radius = [
@@ -17195,7 +17224,7 @@ impl layout_ctx::LayoutCtx {
         pseudo_style.font_size = match pseudo_style.font_size {
             rustkit_css::Length::Em(em) => rustkit_css::Length::Px(em * parent_font_px),
             rustkit_css::Length::Percent(pct) => rustkit_css::Length::Px(pct / 100.0 * parent_font_px),
-            rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * 16.0),
+            rustkit_css::Length::Rem(rem) => rustkit_css::Length::Px(rem * rustkit_css::root_font_px()),
             rustkit_css::Length::Zero => rustkit_css::Length::Px(0.0),
             other => other,
         };
@@ -19175,7 +19204,7 @@ impl layout_ctx::LayoutCtx {
                         // Rem - convert to multiplier (assuming 16px root font)
                         rustkit_css::Length::Rem(rem) => {
                             // This is approximate - ideally we'd track actual root font size
-                            style.line_height = rustkit_css::LineHeight::Px(rem * 16.0);
+                            style.line_height = rustkit_css::LineHeight::Px(rem * rustkit_css::root_font_px());
                         }
                         _ => {}
                     }
@@ -19655,7 +19684,7 @@ impl layout_ctx::LayoutCtx {
                         rustkit_css::Length::Px(px) => px,
                         _ => 16.0,
                     };
-                    style.border_spacing = (h.to_px(font, 16.0, 0.0), v.to_px(font, 16.0, 0.0));
+                    style.border_spacing = (h.to_px(font, rustkit_css::root_font_px(), 0.0), v.to_px(font, rustkit_css::root_font_px(), 0.0));
                 }
             }
             "border-collapse" => match value.trim().to_ascii_lowercase().as_str() {
@@ -23790,6 +23819,12 @@ impl Engine {
     fn install_web_fonts(&self, id: EngineViewId) {
         let base = self.views.get(&id).and_then(|v| v.url.as_ref());
         self.lctx.install_web_fonts_for(&Self::font_partition(base));
+        // ROOT-REM (R1 nit 2 on #1408): `rem` is per thread too. The frames that paint over boxes
+        // already laid out (an animation frame, an element scroll) and the glyph raster come here
+        // without a layout, after another view's layout set its own `rem`.
+        if let Some(view) = self.views.get(&id) {
+            install_view_root_font(&view.lay);
+        }
     }
 
 }
@@ -30221,7 +30256,7 @@ fn parse_box_shadow(value: &str) -> Option<rustkit_css::BoxShadow> {
     for part in parts {
         // Try as length first
         if let Some(length) = parse_length(part) {
-            lengths.push(length.to_px(16.0, 16.0, 0.0));
+            lengths.push(length.to_px(16.0, rustkit_css::root_font_px(), 0.0));
         } else {
             // Must be a color
             if let Some(c) = parse_color(part) {
@@ -30407,7 +30442,7 @@ fn parse_flex_basis(value: &str) -> rustkit_css::FlexBasis {
         // siblings split the free space unevenly.
         Some(rustkit_css::Length::Zero) => rustkit_css::FlexBasis::Length(0.0),
         // Same 16px root the rest of the cascade assumes for rem.
-        Some(rustkit_css::Length::Rem(rem)) => rustkit_css::FlexBasis::Length(rem * 16.0),
+        Some(rustkit_css::Length::Rem(rem)) => rustkit_css::FlexBasis::Length(rem * rustkit_css::root_font_px()),
         _ => rustkit_css::FlexBasis::Auto,
     }
 }
@@ -31326,7 +31361,7 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
             let content = &value[12..12 + close];
             if let Some(length) = parse_length(content) {
                 return Some(rustkit_css::TrackSize::FitContent(
-                    length.to_px(16.0, 16.0, 0.0),
+                    length.to_px(16.0, rustkit_css::root_font_px(), 0.0),
                 ));
             }
         }
@@ -31339,7 +31374,7 @@ fn parse_track_size(value: &str) -> Option<rustkit_css::TrackSize> {
         // A bare `0` parses to `Px(0.0)` (CH2.B14); `Zero` kept for safety.
         rustkit_css::Length::Px(px) => Some(rustkit_css::TrackSize::Px(px)),
         rustkit_css::Length::Zero => Some(rustkit_css::TrackSize::Px(0.0)),
-        rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * 16.0)),
+        rustkit_css::Length::Rem(rem) => Some(rustkit_css::TrackSize::Px(rem * rustkit_css::root_font_px())),
         _ => None,
     }
 }
@@ -31824,13 +31859,13 @@ fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
             .style
             .transform_origin
             .x
-            .to_px(16.0, 16.0, border_box.width);
+            .to_px(16.0, rustkit_css::root_font_px(), border_box.width);
     let oy = border_box.y
         + layout_box
             .style
             .transform_origin
             .y
-            .to_px(16.0, 16.0, border_box.height);
+            .to_px(16.0, rustkit_css::root_font_px(), border_box.height);
     let to_origin = [1.0, 0.0, 0.0, 1.0, -ox, -oy];
     let from_origin = [1.0, 0.0, 0.0, 1.0, ox, oy];
     Some(compose_affine(from_origin, compose_affine(m, to_origin)))
@@ -31971,6 +32006,11 @@ fn publish_animations(bindings: &DomBindings, lay: &layout_ctx::ViewLayout) {
     bindings.share_animated_styles(lay.animated.clone());
 }
 
+/// ROOT-REM: make the view's `rem` (its `<html>` font-size at its last build) the thread's.
+fn install_view_root_font(lay: &layout_ctx::ViewLayout) {
+    rustkit_css::set_root_font_px(lay.root_font_px.get().unwrap_or(16.0));
+}
+
 /// The root element's font size for `rem`, as `geometry_with_root` sets it.
 fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layout_ctx::ViewLayout) {
     let boxless = lay.boxless_styles.borrow();
@@ -31979,6 +32019,7 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
         .map(|b| &*b.box_.style)
         .unwrap_or(&*layout.style);
     computed_read::set_root_font(root_style);
+    install_view_root_font(lay);
 }
 
 /// An `<input>`'s `size` attribute as a number of characters (HTML
@@ -32499,6 +32540,8 @@ fn computed_lines_source(
             .map(|b| &*b.box_.style)
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
+        // The rows read `rustkit_css::root_font_px` too, on a read that lays nothing out.
+        install_view_root_font(&lay);
         let index = index.get_or_init(|| style_box_index(&layout));
         let box_at = |node: usize| -> Option<&LayoutBox> {
             let (path, _) = index.get(&node)?;
@@ -32629,7 +32672,7 @@ fn root_element_geometry(root: &LayoutBox) -> rustkit_bindings::BoxGeometry {
         None | Some(rustkit_css::Length::Auto) | Some(rustkit_css::Length::FitContent) => {
             content_bottom - bb.y
         }
-        Some(l) => l.to_px_with_viewport(16.0, 16.0, vh, vw, vh).max(0.0) + edges,
+        Some(l) => l.to_px_with_viewport(16.0, rustkit_css::root_font_px(), vh, vw, vh).max(0.0) + edges,
     };
     let bottom = content_bottom;
     rustkit_bindings::BoxGeometry {
@@ -32708,7 +32751,7 @@ fn corner_radii_px(
 /// `size`, as before (computed reads have no viewport).
 fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
     use rustkit_css::Length;
-    let resolved = || css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0));
+    let resolved = || css_px(length.to_px(font_px, rustkit_css::root_font_px(), finite_f32(size)).max(0.0));
     match length {
         Length::Percent(p) => format!("{}%", finite_f32(p.max(0.0))),
         Length::Calc(sum) if sum.vw == 0.0 && sum.vh == 0.0 && sum.vmin == 0.0 && sum.vmax == 0.0 => {
@@ -32795,7 +32838,7 @@ fn computed_style_lines(b: &LayoutBox) -> String {
     };
     let offset = |l: &Option<rustkit_css::Length>, size: f32| match l {
         None | Some(rustkit_css::Length::Auto) => "auto".to_string(),
-        Some(l) => css_px(l.to_px(font_px, 16.0, size)),
+        Some(l) => css_px(l.to_px(font_px, rustkit_css::root_font_px(), size)),
     };
     let line_height = match s.line_height {
         rustkit_css::LineHeight::Normal => "normal".to_string(),
@@ -50744,6 +50787,60 @@ impl Drop for StyleMemoBuild {
                 }
             }
         });
+    }
+}
+
+/// ROOT-REM: `<html>`'s font-size moved since this view's last build. Retained entries were
+/// cascaded under the old `rem` (a `line-height: 1.5rem` is resolved in the cascade), so this
+/// build cascades every element afresh and records again.
+fn forget_styles_for_root_font() {
+    STYLE_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+                memo.in_build = Some(MemoUse::Record);
+            }
+            memo.styles.clear();
+            memo.pseudos.clear();
+            memo.stale.clear();
+            memo.forget_tree();
+        }
+    });
+}
+
+/// ROOT-REM: absolutize the root element's own `font-size` against the initial value (16px):
+/// `em`, `%` and `rem` on `<html>` all refer to it (css-values-4 §6.1.1), viewport units and
+/// math functions to the viewport when the build knows it. Returns the px.
+fn absolutize_root_font_size(style: &mut ComputedStyle, viewport: Option<(f32, f32)>) -> f32 {
+    use rustkit_css::Length;
+    const INITIAL: f32 = 16.0;
+    let px = match &style.font_size {
+        Length::Px(px) => Some(*px),
+        Length::Em(v) | Length::Rem(v) => Some(v * INITIAL),
+        Length::Percent(p) => Some(p / 100.0 * INITIAL),
+        Length::Zero => Some(0.0),
+        other @ (Length::Vw(_)
+        | Length::Vh(_)
+        | Length::Vmin(_)
+        | Length::Vmax(_)
+        | Length::Min(_)
+        | Length::Max(_)
+        | Length::Clamp(_)
+        | Length::Calc(_)) => viewport.map(|(vw, vh)| {
+            other.to_px_with_viewport(INITIAL, INITIAL, INITIAL, vw, vh).max(0.0)
+        }),
+        other => {
+            // Keywords, `smaller`/`larger` and the rest are px or em by now; a form not listed
+            // above would keep its length as written and publish 16px.
+            debug_assert!(false, "root font-size not absolutized: {other:?}");
+            None
+        }
+    };
+    match px {
+        Some(px) => {
+            style.font_size = Length::Px(px);
+            px
+        }
+        None => INITIAL,
     }
 }
 

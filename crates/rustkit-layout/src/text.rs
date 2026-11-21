@@ -876,7 +876,7 @@ impl TextDecoration {
             Length::Auto => None,
             Length::Px(px) => Some(px),
             Length::Em(em) => Some(em * font_size),
-            Length::Rem(rem) => Some(rem * 16.0),
+            Length::Rem(rem) => Some(rem * rustkit_css::root_font_px()),
             _ => None,
         };
 
