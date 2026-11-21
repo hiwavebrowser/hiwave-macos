@@ -1,5 +1,5 @@
 test262 @ 2e58f87d8350ad51224617a041c6e041d52f8444  area=test
-runs 103352  pass 96520 (93.39%)  not passing 6832
+runs 103352  pass 96522 (93.39%)  not passing 6830
   test/annexB/built-ins                                       76/482     15.77%
   test/annexB/language                                       208/895     23.24%
   test/built-ins/AbstractModuleSource                          0/8        0.00%
@@ -122,6 +122,6 @@ runs 103352  pass 96520 (93.39%)  not passing 6832
   test/staging/decorators                                     10/14      71.43%
   test/staging/explicit-resource-management                   16/105     15.24%
   test/staging/set-methods                                     6/6      100.00%
-  test/staging/sm                                           2448/2631    93.04%
+  test/staging/sm                                           2450/2631    93.12%
   test/staging/source-phase-imports                            2/4       50.00%
   test/staging/top-level-await                                 1/1      100.00%
