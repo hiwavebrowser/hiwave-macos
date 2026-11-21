@@ -23819,6 +23819,12 @@ impl Engine {
     fn install_web_fonts(&self, id: EngineViewId) {
         let base = self.views.get(&id).and_then(|v| v.url.as_ref());
         self.lctx.install_web_fonts_for(&Self::font_partition(base));
+        // ROOT-REM (R1 nit 2 on #1408): `rem` is per thread too. The frames that paint over boxes
+        // already laid out (an animation frame, an element scroll) and the glyph raster come here
+        // without a layout, after another view's layout set its own `rem`.
+        if let Some(view) = self.views.get(&id) {
+            install_view_root_font(&view.lay);
+        }
     }
 
 }
@@ -32000,6 +32006,11 @@ fn publish_animations(bindings: &DomBindings, lay: &layout_ctx::ViewLayout) {
     bindings.share_animated_styles(lay.animated.clone());
 }
 
+/// ROOT-REM: make the view's `rem` (its `<html>` font-size at its last build) the thread's.
+fn install_view_root_font(lay: &layout_ctx::ViewLayout) {
+    rustkit_css::set_root_font_px(lay.root_font_px.get().unwrap_or(16.0));
+}
+
 /// The root element's font size for `rem`, as `geometry_with_root` sets it.
 fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layout_ctx::ViewLayout) {
     let boxless = lay.boxless_styles.borrow();
@@ -32008,6 +32019,7 @@ fn set_root_font_for(layout: &LayoutBox, root_element: Option<usize>, lay: &layo
         .map(|b| &*b.box_.style)
         .unwrap_or(&*layout.style);
     computed_read::set_root_font(root_style);
+    install_view_root_font(lay);
 }
 
 /// An `<input>`'s `size` attribute as a number of characters (HTML
@@ -32528,6 +32540,8 @@ fn computed_lines_source(
             .map(|b| &*b.box_.style)
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
+        // The rows read `rustkit_css::root_font_px` too, on a read that lays nothing out.
+        install_view_root_font(&lay);
         let index = index.get_or_init(|| style_box_index(&layout));
         let box_at = |node: usize| -> Option<&LayoutBox> {
             let (path, _) = index.get(&node)?;
@@ -50814,7 +50828,12 @@ fn absolutize_root_font_size(style: &mut ComputedStyle, viewport: Option<(f32, f
         | Length::Calc(_)) => viewport.map(|(vw, vh)| {
             other.to_px_with_viewport(INITIAL, INITIAL, INITIAL, vw, vh).max(0.0)
         }),
-        _ => None,
+        other => {
+            // Keywords, `smaller`/`larger` and the rest are px or em by now; a form not listed
+            // above would keep its length as written and publish 16px.
+            debug_assert!(false, "root font-size not absolutized: {other:?}");
+            None
+        }
     };
     match px {
         Some(px) => {
