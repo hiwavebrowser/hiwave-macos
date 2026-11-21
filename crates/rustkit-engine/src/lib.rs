@@ -14943,6 +14943,16 @@ impl Engine {
     /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
     fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
         match child.box_type {
+            // An element's block keeps its box even when empty, as in Chrome: it breaks
+            // the line between inline content (`aaa<div></div>bbb` is two lines) and has
+            // a rect scripts and the geometry oracle read. Its margins still collapse
+            // through it. The boxes left to drop are anonymous ones and the stand-ins
+            // that carry no element: `display: none`, and head/script/style content.
+            BoxType::Block
+                if child.node_id.is_some() && child.style.display != rustkit_css::Display::None =>
+            {
+                true
+            }
             BoxType::Block | BoxType::AnonymousBlock => {
                 !child.children.is_empty()
                     || Engine::has_visible_styling(&child.style)
