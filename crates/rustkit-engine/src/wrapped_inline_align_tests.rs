@@ -8,8 +8,9 @@
 //!
 //! Expected lines: docs/diagnostics/2026-11-21/wrapped_inline_align_cft148.txt, `window.report()`
 //! of the page beside it in Chrome for Testing 148.0.7778.216 at 800x600 (Menlo 16px/20px), from
-//! tools/parity_oracle/wrapped_inline_align_log.mjs. Each line is a case: the text node's line
-//! rects (x, y, width).
+//! tools/parity_oracle/wrapped_inline_align_log.mjs. Each line is a case: each text node's line
+//! rects (x, y, width). The `shared-*` cases (R1 on #1407) put content after the inline on its last
+//! line (` B`, a link, another span): that line aligns as one, the inline's tail with what follows.
 
 use super::*;
 
@@ -37,7 +38,7 @@ fn a_wrapped_inline_aligns_each_line_like_bare_text() {
     let got: String = serde_json::from_str(&got).expect("a JSON string");
     let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
     let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
-    assert_eq!(expected.len(), 11, "the Chrome report has 11 cases");
+    assert_eq!(expected.len(), 15, "the Chrome report has 15 cases");
     let wrong: Vec<String> = expected
         .iter()
         .enumerate()
