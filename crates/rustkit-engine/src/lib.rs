@@ -534,6 +534,8 @@ mod spd3_range_rects_tests;
 // Menlo: the expected boxes are Chrome's on macOS.
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod root_rem_tests;
+#[cfg(all(test, feature = "headless"))]
+mod root_rem_cross_view_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
