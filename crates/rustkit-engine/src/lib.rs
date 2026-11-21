@@ -311,6 +311,8 @@ mod svg_computed;
 mod media;
 mod console_log;
 pub mod console_file;
+#[cfg(test)]
+mod console_file_setting_tests;
 mod relayout_cause;
 mod selection;
 mod focus_pseudo;
