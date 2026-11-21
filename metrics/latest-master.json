@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-11-15T02:02:40.305784",
-  "commit": "21a6b7d9e385772c5d19e46bf3aeb75df810c04e",
+  "timestamp": "2026-11-21T05:20:36.119796",
+  "commit": "52bfb9b7d5fab43bd5fd725011ae66f4ab0b8a1c",
   "branch": "master",
   "total": 26,
   "passed": 26,
   "failed": 0,
   "not_measured": 0,
   "measured": 26,
-  "average_diff": 0.4051251406267886,
+  "average_diff": 0.4051922479985835,
   "worst_case": {
     "name": "article-typography",
     "diff": 3.49482421875
@@ -25,7 +25,7 @@
     },
     {
       "name": "form-controls",
-      "diff": 2.6706250000000002,
+      "diff": 2.6704166666666667,
       "threshold": 12,
       "passed": true,
       "type": "micro",
@@ -95,7 +95,7 @@
     },
     {
       "name": "card-grid",
-      "diff": 0.24316406250000003,
+      "diff": 0.24511718749999997,
       "threshold": 15,
       "passed": true,
       "type": "websuite",
