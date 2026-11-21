@@ -150,6 +150,15 @@ pub fn default_user_agent() -> String {
 #[cfg(not(feature = "native-tls"))]
 fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     static ROOTS: RootsCache = std::sync::Mutex::new(None);
+    // NET-LAZY-TLS test seam: a thread that set a failing platform answers with it, outside the
+    // process cache.
+    if let Some((reason, loads)) = ROOTS_OVERRIDE.with(|o| o.borrow().clone()) {
+        let fresh: RootsCache = std::sync::Mutex::new(None);
+        return roots_cached(&fresh, || {
+            loads.set(loads.get() + 1);
+            (tokio_rustls::rustls::RootCertStore::empty(), reason.clone())
+        });
+    }
     roots_cached(&ROOTS, || {
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
         let loaded = rustls_native_certs::load_native_certs();
@@ -179,9 +188,53 @@ fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpErro
 
 type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
 
+type RootsOverride = Option<(String, std::rc::Rc<std::cell::Cell<usize>>)>;
+
+thread_local! {
+    /// NET-LAZY-TLS test seam: on this thread, loading the platform roots fails with this reason
+    /// and counts the attempts (`fail_platform_roots_on_this_thread`).
+    static ROOTS_OVERRIDE: std::cell::RefCell<RootsOverride> = const { std::cell::RefCell::new(None) };
+}
+
+/// The attempts to load the platform roots on this thread since
+/// [`fail_platform_roots_on_this_thread`]; the override ends when this is dropped.
+#[doc(hidden)]
+pub struct PlatformRootsProbe {
+    loads: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl PlatformRootsProbe {
+    /// How many times the platform roots were loaded on this thread.
+    pub fn loads(&self) -> usize {
+        self.loads.get()
+    }
+}
+
+impl Drop for PlatformRootsProbe {
+    fn drop(&mut self) {
+        ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = None);
+    }
+}
+
+/// Test seam (NET-LAZY-TLS): until the returned probe is dropped, every load of the platform
+/// roots on this thread finds none and fails with `reason` (the keychain read that flakes under
+/// load), and is counted. For tests of what touches the platform roots and when.
+#[doc(hidden)]
+pub fn fail_platform_roots_on_this_thread(reason: &str) -> PlatformRootsProbe {
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = Some((reason.to_string(), loads.clone())));
+    PlatformRootsProbe { loads }
+}
+
+/// NET-LAZY-TLS: how many times one load asks the platform before it fails, and the pauses
+/// between: the macOS keychain read behind the roots fails now and then under load
+/// ("failed to load user trust settings: I/O error") and answers on a second try.
+const ROOT_LOAD_ATTEMPTS: usize = 3;
+const ROOT_LOAD_RETRY_PAUSE: Duration = Duration::from_millis(50);
+
 fn roots_cached(
     cache: &RootsCache,
-    load: impl FnOnce() -> (tokio_rustls::rustls::RootCertStore, String),
+    mut load: impl FnMut() -> (tokio_rustls::rustls::RootCertStore, String),
 ) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(roots) = slot.as_ref() {
@@ -189,7 +242,14 @@ fn roots_cached(
     }
     // Only a usable store is cached: a transient platform failure (keychain
     // busy under load) must not turn every later handshake into an error.
-    let (roots, diagnostics) = load();
+    let (mut roots, mut diagnostics) = load();
+    for attempt in 1..ROOT_LOAD_ATTEMPTS {
+        if !roots.is_empty() {
+            break;
+        }
+        std::thread::sleep(ROOT_LOAD_RETRY_PAUSE * attempt as u32);
+        (roots, diagnostics) = load();
+    }
     let roots = Arc::new(roots);
     if roots.is_empty() {
         return Err(HttpError::TlsError(if diagnostics.is_empty() {
@@ -243,8 +303,11 @@ pub struct Client {
     /// Where `Set-Cookie` goes and `Cookie` comes from, at every hop; `None`
     /// sends and keeps no cookies.
     cookies: Option<Arc<CookieJar>>,
+    /// NET-LAZY-TLS: built on the first https connection (`tls_connector`), shared by the
+    /// client's clones: a client that never speaks TLS (data:, blob:, file:, about:, plain http)
+    /// never reads the platform roots.
     #[cfg(not(feature = "native-tls"))]
-    tls_connector: TlsConnector,
+    tls_connector: Arc<std::sync::Mutex<Option<TlsConnector>>>,
     #[cfg(feature = "native-tls")]
     tls_connector: tokio_native_tls::TlsConnector,
 }
@@ -309,6 +372,25 @@ impl Client {
         // currently keep speaking HTTP/1.1 only when the peer permits it —
         // see `connect_tls`, which records the negotiated protocol so the
         // caller can refuse mismatches loudly instead of desyncing.
+        Ok(Self {
+            config,
+            address_policy: AddressPolicy::default(),
+            resolver: Arc::new(SystemResolver),
+            max_body: None,
+            cookies: None,
+            tls_connector: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// NET-LAZY-TLS: the client's TLS connector, built on first use from the platform roots
+    /// (loaded once per process, `platform_roots`). A failed load is this connection's error and
+    /// is not kept: the next https connection tries again.
+    #[cfg(not(feature = "native-tls"))]
+    fn tls_connector(&self) -> Result<TlsConnector, HttpError> {
+        let mut slot = self.tls_connector.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(connector) = slot.as_ref() {
+            return Ok(connector.clone());
+        }
         let roots = platform_roots()?;
 
         // When multiple crypto providers (e.g. aws-lc-rs from rustkit-http and ring from
@@ -326,16 +408,9 @@ impl Client {
         // a silent protocol desync.
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-        let tls_connector = TlsConnector::from(Arc::new(tls_config));
-
-        Ok(Self {
-            config,
-            address_policy: AddressPolicy::default(),
-            resolver: Arc::new(SystemResolver),
-            max_body: None,
-            cookies: None,
-            tls_connector,
-        })
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        *slot = Some(connector.clone());
+        Ok(connector)
     }
 
     /// Open a TLS connection and report the ALPN-negotiated protocol.
@@ -356,7 +431,7 @@ impl Client {
             .map_err(|e| HttpError::TlsError(format!("invalid server name: {e}")))?;
 
         let tls_stream = self
-            .tls_connector
+            .tls_connector()?
             .connect(server_name, stream)
             .await
             .map_err(|e| HttpError::TlsError(e.to_string()))?;
@@ -1465,7 +1540,8 @@ mod tests {
             (one_anchor(), String::new())
         });
         assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
-        assert_eq!(loads, 2);
+        // The failing call asked the platform ROOT_LOAD_ATTEMPTS times (NET-LAZY-TLS).
+        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1);
         assert!(
             roots_cached(&cache, || {
                 loads += 1;
@@ -1473,7 +1549,7 @@ mod tests {
             })
             .is_ok()
         );
-        assert_eq!(loads, 2, "a good store is cached and not reloaded");
+        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1, "a good store is cached and not reloaded");
     }
 
     #[test]
@@ -1487,6 +1563,72 @@ mod tests {
         .to_string();
         assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
         assert!(err.contains("no usable platform root certificates"), "{err}");
+    }
+
+    /// NET-LAZY-TLS: a client is built without the platform roots: a `data:`, `blob:`, `file:`
+    /// or `about:` load (and plain http) never needs them, and on macOS the keychain read they
+    /// take fails now and then (batch 119: 2 of 7 rustkit-net runs, "no usable platform root
+    /// certificates (... failed to load user trust settings: I/O error)").
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn a_client_is_built_without_loading_the_platform_roots() {
+        let probe = fail_platform_roots_on_this_thread("failed to load user trust settings: I/O error");
+        let built = Client::new();
+        assert!(built.is_ok(), "the client is built: {:?}", built.err().map(|e| e.to_string()));
+        assert_eq!(probe.loads(), 0, "building a client loads no roots");
+    }
+
+    /// NET-LAZY-TLS: the first https request loads the roots; a failed load is the request's
+    /// error, says why, and is not kept: the next request loads them again.
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn the_first_https_request_loads_the_roots_and_a_failure_is_not_kept() {
+        let probe = fail_platform_roots_on_this_thread("keychain busy");
+        let client = Client::new().expect("a client");
+        assert_eq!(probe.loads(), 0);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                std::thread::sleep(Duration::from_millis(500));
+                drop(stream);
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let url = format!("https://127.0.0.1:{port}/");
+        let err = rt.block_on(client.get(&url)).err().expect("no roots, no handshake").to_string();
+        assert!(err.contains("no usable platform root certificates") && err.contains("keychain busy"), "{err}");
+        let first = probe.loads();
+        assert!(first >= 1, "the https request loaded the roots");
+        let _ = rt.block_on(client.get(&url));
+        assert!(probe.loads() > first, "a failed load is tried again by the next request");
+    }
+
+    /// NET-LAZY-TLS: one load tries the platform again before it fails (the keychain read flakes
+    /// once in a while), and a store that loaded is kept for the process.
+    #[test]
+    fn a_failed_root_load_is_tried_again_before_it_fails() {
+        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
+        use tokio_rustls::rustls::RootCertStore;
+        let cache: RootsCache = std::sync::Mutex::new(None);
+        let mut loads = 0;
+        let got = roots_cached(&cache, || {
+            loads += 1;
+            if loads < 3 {
+                return (RootCertStore::empty(), "keychain busy".to_string());
+            }
+            let roots = RootCertStore {
+                roots: vec![TrustAnchor {
+                    subject: Der::from_slice(b"subject"),
+                    subject_public_key_info: Der::from_slice(b"spki"),
+                    name_constraints: None,
+                }],
+            };
+            (roots, String::new())
+        });
+        assert!(got.is_ok(), "the third try loads: {:?}", got.err().map(|e| e.to_string()));
+        assert_eq!(loads, 3);
+        assert!(roots_cached(&cache, || unreachable!("kept")).is_ok());
     }
 
     #[test]
