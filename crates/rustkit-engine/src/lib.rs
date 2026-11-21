@@ -608,6 +608,8 @@ mod is_complex_argument_tests;
 #[cfg(test)]
 mod ancestor_attribute_query_tests;
 #[cfg(test)]
+mod font_family_serialization_tests;
+#[cfg(test)]
 mod match_media_tests;
 #[cfg(test)]
 mod computed_content_tests;
