@@ -1,0 +1,344 @@
+{
+  "chrome": "148.0.7778.216",
+  "sampled_at_ms": 50,
+  "duration_ms": 100,
+  "timing": "linear",
+  "cases": [
+    {
+      "label": "line-height px",
+      "css": "#h{line-height:20px}#h.on{line-height:40px}",
+      "read": "line-height",
+      "mid": "30px",
+      "transitions": [
+        "line-height"
+      ],
+      "events": [
+        "run:line-height",
+        "start:line-height",
+        "end:line-height"
+      ],
+      "end": "40px"
+    },
+    {
+      "label": "line-height number",
+      "css": "#h{line-height:1}#h.on{line-height:2}",
+      "read": "line-height",
+      "mid": "24px",
+      "transitions": [
+        "line-height"
+      ],
+      "events": [
+        "run:line-height",
+        "start:line-height",
+        "end:line-height"
+      ],
+      "end": "32px"
+    },
+    {
+      "label": "line-height percent",
+      "css": "#h{line-height:100%}#h.on{line-height:200%}",
+      "read": "line-height",
+      "mid": "24px",
+      "transitions": [
+        "line-height"
+      ],
+      "events": [
+        "run:line-height",
+        "start:line-height",
+        "end:line-height"
+      ],
+      "end": "32px"
+    },
+    {
+      "label": "line-height number->px",
+      "css": "#h{line-height:1}#h.on{line-height:40px}",
+      "read": "line-height",
+      "mid": "40px",
+      "transitions": [],
+      "events": [],
+      "end": "40px"
+    },
+    {
+      "label": "line-height normal->px",
+      "css": "#h{line-height:normal}#h.on{line-height:40px}",
+      "read": "line-height",
+      "mid": "40px",
+      "transitions": [],
+      "events": [],
+      "end": "40px"
+    },
+    {
+      "label": "border-radius px",
+      "css": "#h{border-radius:0px}#h.on{border-radius:20px}",
+      "read": "border-top-left-radius",
+      "mid": "10px",
+      "transitions": [
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-bottom-left-radius",
+        "start:border-bottom-left-radius",
+        "end:border-bottom-left-radius",
+        "run:border-bottom-right-radius",
+        "start:border-bottom-right-radius",
+        "end:border-bottom-right-radius",
+        "run:border-top-left-radius",
+        "start:border-top-left-radius",
+        "end:border-top-left-radius",
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "20px"
+    },
+    {
+      "label": "border-radius all corners",
+      "css": "#h{border-radius:0px}#h.on{border-radius:10px 20px 30px 40px}",
+      "read": "border-radius",
+      "mid": "5px 10px 15px 20px",
+      "transitions": [
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-bottom-left-radius",
+        "start:border-bottom-left-radius",
+        "end:border-bottom-left-radius",
+        "run:border-bottom-right-radius",
+        "start:border-bottom-right-radius",
+        "end:border-bottom-right-radius",
+        "run:border-top-left-radius",
+        "start:border-top-left-radius",
+        "end:border-top-left-radius",
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "10px 20px 30px 40px"
+    },
+    {
+      "label": "border-radius elliptical",
+      "css": "#h{border-radius:10px / 20px}#h.on{border-radius:30px / 40px}",
+      "read": "border-top-left-radius",
+      "mid": "20px 30px",
+      "transitions": [
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-bottom-left-radius",
+        "start:border-bottom-left-radius",
+        "end:border-bottom-left-radius",
+        "run:border-bottom-right-radius",
+        "start:border-bottom-right-radius",
+        "end:border-bottom-right-radius",
+        "run:border-top-left-radius",
+        "start:border-top-left-radius",
+        "end:border-top-left-radius",
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "30px 40px"
+    },
+    {
+      "label": "border-radius percent",
+      "css": "#h{border-radius:0%}#h.on{border-radius:50%}",
+      "read": "border-top-left-radius",
+      "mid": "25%",
+      "transitions": [
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-bottom-left-radius",
+        "start:border-bottom-left-radius",
+        "end:border-bottom-left-radius",
+        "run:border-bottom-right-radius",
+        "start:border-bottom-right-radius",
+        "end:border-bottom-right-radius",
+        "run:border-top-left-radius",
+        "start:border-top-left-radius",
+        "end:border-top-left-radius",
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "border-radius px->percent",
+      "css": "#h{border-radius:10px}#h.on{border-radius:50%}",
+      "read": "border-top-left-radius",
+      "mid": "calc(25% + 5px)",
+      "transitions": [
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-bottom-left-radius",
+        "start:border-bottom-left-radius",
+        "end:border-bottom-left-radius",
+        "run:border-bottom-right-radius",
+        "start:border-bottom-right-radius",
+        "end:border-bottom-right-radius",
+        "run:border-top-left-radius",
+        "start:border-top-left-radius",
+        "end:border-top-left-radius",
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "50%"
+    },
+    {
+      "label": "border-top-right-radius named",
+      "css": "#h{border-top-right-radius:0px;transition:border-top-right-radius 100ms linear}#h.on{border-top-right-radius:20px}",
+      "read": "border-top-right-radius",
+      "mid": "10px",
+      "transitions": [
+        "border-top-right-radius"
+      ],
+      "events": [
+        "run:border-top-right-radius",
+        "start:border-top-right-radius",
+        "end:border-top-right-radius"
+      ],
+      "end": "20px"
+    },
+    {
+      "label": "background-size px",
+      "css": "#h{background-size:10px 20px}#h.on{background-size:30px 40px}",
+      "read": "background-size",
+      "mid": "20px 30px",
+      "transitions": [
+        "background-size"
+      ],
+      "events": [
+        "run:background-size",
+        "start:background-size",
+        "end:background-size"
+      ],
+      "end": "30px 40px"
+    },
+    {
+      "label": "background-size percent",
+      "css": "#h{background-size:0% 0%}#h.on{background-size:100% 50%}",
+      "read": "background-size",
+      "mid": "50% 25%",
+      "transitions": [
+        "background-size"
+      ],
+      "events": [
+        "run:background-size",
+        "start:background-size",
+        "end:background-size"
+      ],
+      "end": "100% 50%"
+    },
+    {
+      "label": "background-size auto->px",
+      "css": "#h{background-size:auto}#h.on{background-size:30px 40px}",
+      "read": "background-size",
+      "mid": "30px 40px",
+      "transitions": [],
+      "events": [],
+      "end": "30px 40px"
+    },
+    {
+      "label": "background-size cover->px",
+      "css": "#h{background-size:cover}#h.on{background-size:30px 40px}",
+      "read": "background-size",
+      "mid": "30px 40px",
+      "transitions": [],
+      "events": [],
+      "end": "30px 40px"
+    },
+    {
+      "label": "background-size px auto",
+      "css": "#h{background-size:10px auto}#h.on{background-size:30px auto}",
+      "read": "background-size",
+      "mid": "20px",
+      "transitions": [
+        "background-size"
+      ],
+      "events": [
+        "run:background-size",
+        "start:background-size",
+        "end:background-size"
+      ],
+      "end": "30px"
+    },
+    {
+      "label": "background-size layers",
+      "css": "#h{background:linear-gradient(red,blue) no-repeat,linear-gradient(green,blue) no-repeat;background-size:10px 10px,20px 20px}#h.on{background-size:30px 30px,40px 40px}",
+      "read": "background-size",
+      "mid": "20px 20px, 30px 30px",
+      "transitions": [
+        "background-size"
+      ],
+      "events": [
+        "run:background-size",
+        "start:background-size",
+        "end:background-size"
+      ],
+      "end": "30px 30px, 40px 40px"
+    },
+    {
+      "label": "width px->percent",
+      "css": "#h{width:100px}#h.on{width:50%}",
+      "read": "width",
+      "mid": "250px",
+      "transitions": [
+        "width"
+      ],
+      "events": [
+        "run:width",
+        "start:width",
+        "end:width"
+      ],
+      "end": "400px"
+    },
+    {
+      "label": "padding-left px->percent",
+      "css": "#h{padding-left:10px}#h.on{padding-left:10%}",
+      "read": "padding-left",
+      "mid": "45px",
+      "transitions": [
+        "padding-left"
+      ],
+      "events": [
+        "run:padding-left",
+        "start:padding-left",
+        "end:padding-left"
+      ],
+      "end": "80px"
+    },
+    {
+      "label": "translate px->percent",
+      "css": "#h{translate:10px}#h.on{translate:50%}",
+      "read": "translate",
+      "mid": "calc(25% + 5px)",
+      "transitions": [
+        "translate"
+      ],
+      "events": [
+        "run:translate",
+        "start:translate",
+        "end:translate"
+      ],
+      "end": "50%"
+    }
+  ]
+}

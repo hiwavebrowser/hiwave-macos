@@ -11,6 +11,7 @@
 //! 4. **Resource sharing**: Share compositor and network resources
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -51,6 +52,12 @@ pub(crate) fn test_compositor() -> Result<Compositor, rustkit_compositor::Compos
     static SHARED_COMPOSITOR: OnceLock<Compositor> = OnceLock::new();
     test_gpu::hold_for_this_test();
     if let Some(shared) = SHARED_COMPOSITOR.get() {
+        // wgpu frees what a dropped engine held (textures, buffers, bind groups) only when its
+        // device is maintained. With one device for the whole process, the previous test's are
+        // freed here, before this test allocates its own: on a software adapter (WARP, a hosted
+        // Windows runner) they are process memory, and ~10 MB a test reached 9 GB and ended the
+        // test binary partway through the suite.
+        shared.device().poll(wgpu::Maintain::Wait);
         return Ok(shared.share_device());
     }
     let compositor = Compositor::new()?;
@@ -300,6 +307,8 @@ use std::borrow::Cow;
 use std::cell::Cell;
 pub mod inspector;
 mod inspector_glue;
+mod svg_computed;
+mod media;
 mod console_log;
 pub mod console_file;
 mod relayout_cause;
@@ -340,8 +349,8 @@ mod transparent_frame_tests;
 pub use presenter::WindowSurface;
 mod page_protocol;
 pub use page_protocol::{
-    connect, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint, PageEvent,
-    PageHandle, PageInput, EVAL_CANCELLED,
+    connect, content_turn_wait, LiveClock, DevtoolsAnswer, DevtoolsQuery, LoadState, PageCmd, PageEndpoint,
+    PageEvent, PageHandle, PageInput, EVAL_CANCELLED,
 };
 mod content_thread;
 /// Tell script runtimes made on the calling thread how much native stack they may use before a
@@ -353,12 +362,19 @@ pub use content_thread::{
 };
 mod wgate;
 pub use wgate::{InputClass, InputMark, VisitTag};
+mod frame_stages;
+pub use frame_stages::{
+    frame_stage_line, frame_stage_totals, host_call_rows_line, set_frame_stage_timing, FrameStageTotals,
+    FRAME_STAGE_FIELDS,
+};
 #[cfg(test)]
 mod send_bounds_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_commit_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wgate_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_stages_tests;
 mod diagnostics;
 pub use diagnostics::{
     DiagnosticTarget, DiagnosticsDump, DiagnosticsOptions, ElementDiagnostics, DIAGNOSTICS_SCHEMA,
@@ -414,6 +430,21 @@ mod script_net_t7_tests;
 #[cfg(test)]
 mod script_net_body_size_tests;
 #[cfg(test)]
+mod frames_stage2_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_round_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_at_present_tests;
+mod script_error_detail;
+#[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
+mod frame_canvas_tests;
+#[cfg(test)]
+mod frame_stage_timer_tests;
+#[cfg(test)]
+mod frame_sandbox_tests;
+#[cfg(test)]
 mod inspector_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inspector_engine_tests;
@@ -434,6 +465,12 @@ use nav_cancel::{load_phase, LoadInProgress, NavWatch};
 mod load_cancel_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_turns_tests;
+#[cfg(all(test, feature = "headless"))]
+mod live_pacing_tests;
+#[cfg(all(test, feature = "headless"))]
+mod frame_rate_tests;
+#[cfg(test)]
+mod live_clock_tests;
 #[cfg(all(test, feature = "headless"))]
 mod script_stream_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -456,6 +493,8 @@ mod script_module_tests;
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
+#[cfg(all(test, feature = "headless"))]
+mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pseudo_custom_props_var_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -537,6 +576,10 @@ mod late_sheet_slot_tests;
 #[cfg(all(test, feature = "headless"))]
 mod adopted_sheets_tests;
 #[cfg(all(test, feature = "headless"))]
+mod named_collections_engine_tests;
+#[cfg(all(test, feature = "headless"))]
+mod unhandled_rejection_engine_tests;
+#[cfg(all(test, feature = "headless"))]
 mod style_media_disabled_tests;
 #[cfg(all(test, feature = "headless"))]
 mod sheet_reuse_tests;
@@ -580,6 +623,10 @@ mod style_attr_declaration_tests;
 mod style_string_brace_tests;
 #[cfg(test)]
 mod canvas_context_tests;
+#[cfg(test)]
+mod canvas_pixels_tests;
+#[cfg(test)]
+mod canvas_gpu_screen_tests;
 #[cfg(test)]
 mod flex_percent_cross_tests;
 #[cfg(test)]
@@ -663,15 +710,67 @@ mod web_animations_tests;
 #[cfg(all(test, feature = "headless"))]
 mod css_transitions_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_transitions_colors_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_individual_transforms_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_sizes_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_visibility_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_property_tests;
+#[cfg(all(test, feature = "headless"))]
+mod registered_transition_fastpath_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_lists_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_grid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_computed_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod block_replaced_margin_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_svg_paint_tests;
+#[cfg(all(test, feature = "headless"))]
+mod media_box_tests;
+#[cfg(all(test, feature = "headless"))]
+mod media_load_tests;
+#[cfg(all(test, feature = "headless"))]
+mod media_fetch_tests;
+#[cfg(all(test, feature = "headless"))]
+mod media_host_tests;
+#[cfg(all(test, feature = "headless"))]
+mod replaced_float_avoid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod form_control_float_avoid_tests;
+#[cfg(all(test, feature = "headless"))]
+mod anim_read_jump_tests;
+#[cfg(all(test, feature = "headless"))]
+mod css_transitions_cost_tests;
+#[cfg(all(test, feature = "headless"))]
+mod border_radius_computed_tests;
+#[cfg(all(test, feature = "headless"))]
 mod css_animations_tests;
 #[cfg(all(test, feature = "headless"))]
+mod css_timeline_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_animation_tests;
+#[cfg(all(test, feature = "headless"))]
+mod layout_per_frame_tests;
+#[cfg(all(test, feature = "headless"))]
+mod script_restyle_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat19_animation_rect_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod lat22_forced_read_build_tests;
 #[cfg(all(test, feature = "headless"))]
+mod hidden_tiles_build_tests;
+#[cfg(all(test, feature = "headless"))]
+mod retained_style_tests;
+#[cfg(all(test, feature = "headless"))]
 mod paint_only_web_font_tests;
+#[cfg(all(test, feature = "headless"))]
+mod paint_style_read_tests;
 #[cfg(all(test, feature = "headless"))]
 mod animation_layer_reset_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -680,7 +779,12 @@ mod pseudo_animation_tests;
 mod chrome_bridge_tests;
 #[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
+#[cfg(test)]
+mod clock_live_timer_tests;
+#[cfg(test)]
+mod clock_flag_tests;
 mod animations;
+mod registered_props;
 #[cfg(test)]
 mod ancestor_attribute_tests;
 #[cfg(test)]
@@ -709,6 +813,8 @@ mod text_control_select_tests;
 mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
+#[cfg(all(test, feature = "headless"))]
+mod clock_chain_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -914,6 +1020,8 @@ mod snapshot_stage_tests;
 mod feed_fill_paint_tests;
 #[cfg(all(test, feature = "headless"))]
 mod backdrop_filter_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_shadow_blur_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clip_path_shape_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -1388,32 +1496,13 @@ const PRESENTED_FRAME_MAX_AGE: std::time::Duration = std::time::Duration::from_s
 /// already the story.
 const MAX_PENDING_INPUTS: usize = 256;
 
-struct ViewState {
-    /// What the last wheel moved, while a run of wheels holds to it.
-    wheel_gesture: Option<WheelGesture>,
-    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
-    /// the release.
-    scrollbar_drag: Option<ScrollbarDrag>,
-    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
-    scrollbar_hover: Option<WheelTarget>,
-    /// CH2.E7: the element a press on a styled scrollbar went to (the
-    /// scroller, or the root element for the viewport's bar). Until the
-    /// release, the press's mouse events target it, and the release fires
-    /// no `click` (Chrome).
-    scrollbar_pressed: Option<usize>,
-    id: EngineViewId,
-    /// Counts the display lists this view has been given.
-    frame_generation: u64,
-    presented: Option<PresentedFrame>,
-    /// Counts the frames this view has presented (a diagnostic: the threads
-    /// plan's per-view frame count; the tests read it to see how many draws
-    /// one input cost).
-    frames_presented: u64,
-    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
-    /// document the app loads into such a view (`load_html`) gets the app
-    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
-    app_owned: bool,
-    viewhost_id: ViewId,
+/// What a view holds for the document it shows: the document, its script
+/// bindings, style and layout data, display list, scroll position and the
+/// bookkeeping of its load. Split out of [`ViewState`] (Stage 0 of the
+/// nested-browsing-contexts plan) so that a nested document can own one
+/// too. A pure move: no field changed name, type or meaning, and
+/// `ViewState` derefs to it, so `view.document` reads as before.
+struct DocState {
     url: Option<Url>,
     title: Option<String>,
     /// The HTTP status the view's document came with; None for a document
@@ -1433,19 +1522,6 @@ struct ViewState {
     /// layout replaces it, nothing writes into it).
     #[allow(dead_code)]
     display_list: Option<Arc<DisplayList>>,
-    /// The element the developer tools outline on this page
-    /// (`Engine::devtools_highlight`), drawn over the display list.
-    devtools_highlight: Option<usize>,
-    /// The inputs the view took since its last commit
-    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
-    /// the next commit for the input-to-present log (LAT1c), or are
-    /// counted `no_frame` when their turn changed no frame.
-    input_pending: Vec<InputMark>,
-    /// Inputs since the last commit that presented no frame of their own.
-    inputs_unpresented: u32,
-    /// The host of the view's current visit, as `wgate::begin_visit` was
-    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
-    visit_host: Arc<str>,
     #[allow(dead_code)]
     bindings: Option<DomBindings>,
     /// The canvases of the page's bindings, held apart from them: the
@@ -1456,42 +1532,15 @@ struct ViewState {
     /// (`canvas_paint::CanvasPaint`): a canvas whose recording and box did
     /// not change is not painted again.
     canvas_paints: HashMap<usize, canvas_paint::CanvasPaint>,
-    /// The view's stop state: the interrupt word another thread (the
-    /// watchdog, later the user's Stop) sets to end its running script.
-    /// Lives as long as the view; each new document's bindings get it.
-    control: Arc<rustkit_js::ViewControl>,
-    navigation: NavigationStateMachine,
-    /// This view's newest navigation (threads plan M3b): one more for each
-    /// `load_url` or `load_html`, never for Stop. A load captures it before
-    /// its first await and re-checks it, and the view's cancel watermark
-    /// (`ViewControl::cancel_nav`), at every await and between its scripts
-    /// and subresource phases. A newer navigation, `Engine::stop` or a
-    /// [`NavCanceller`] on another thread makes the load stale, and a stale
-    /// load abandons without touching view state.
-    ///
-    /// Fetches still out when a load is cancelled are dropped with the
-    /// load's future; their responses never reach the engine.
-    nav_id: u64,
-    /// Wakes a load waiting on the network when its navigation is
-    /// cancelled from another thread ([`NavCanceller`]).
-    nav_signal: Arc<tokio::sync::Notify>,
-    /// The decode pool's key (D1): a decode that comes back with an older
-    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
-    /// with every new `nav_id` and also on every Stop and observed cancel,
-    /// so Stop on a loaded page still drops the decodes it has out while
-    /// later images on the same document (and `nav_id`) decode normally.
-    decode_epoch: u64,
-    #[allow(dead_code)]
-    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
-    /// A listener cancelled the `pointerdown` of the press in progress:
-    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
-    compat_mouse_suppressed: bool,
     /// The element the pointer was over at its last move (raw NodeId).
     hovered_node: Option<usize>,
     /// What the script writes flushed for the next relayout could restyle
     /// (incremental-restyle PR 1: logged, not acted on). Taken by
     /// `relayout`, which keeps it in `last_dirty`.
     pending_dirty: Option<restyle_invalidation::DirtySet>,
+    /// TREE-REUSE (a): the per-element styles of this view's last build, kept for the next one
+    /// while `RUSTKIT_RETAINED_STYLES` is on (`RetainedStylesScope`).
+    retained_styles: Option<StyleMemo>,
     /// Script wrote to the DOM since the title was last compared with the
     /// document's (`Engine::follow_script_title`).
     title_stale: bool,
@@ -1499,15 +1548,6 @@ struct ViewState {
     last_dirty: Option<restyle_invalidation::DirtySet>,
     /// A chain a sheet reads has changed since the last build.
     pointer_restyle: bool,
-    /// CH2.E22: the last focus the user moved was moved by the pointer
-    /// (Chromium's last focus type): script's focus then matches
-    /// `:focus-visible` only on a control that takes typed text. False
-    /// until the first, and after a focus moved from the keyboard. Kept
-    /// across documents, as Chromium keeps it per page.
-    focus_by_pointer: bool,
-    /// CH2.E22: the focused button a Space keydown went to; its keyup
-    /// clicks it.
-    space_armed: Option<usize>,
     /// Set by `relayout` for the build it is about to run: nothing but a
     /// pointer restyle asked for it, so it may keep the laid-out tree
     /// (`Engine::repaint_restyled`).
@@ -1515,41 +1555,9 @@ struct ViewState {
     /// What the last full layout was built with: the chains and the view's
     /// size (`Engine::repaint_restyled`).
     laid_with: Option<LaidWith>,
-    /// Where the pointer was at its last move, in viewport coordinates.
-    pointer_at: Option<(f32, f32)>,
-    /// The frame (`frame_generation`, scroll offset) the hovered chain was
-    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
-    /// moved since hit-tests the still pointer again.
-    hover_hit_at: Option<(u64, (f32, f32))>,
-    /// The primary button is held: between a press and its release.
-    primary_button_down: bool,
-    /// The element the press in progress landed on (raw NodeId).
-    press_target: Option<usize>,
     /// The document selection as the engine paints it (`selection.rs`),
     /// and the drag that is moving it.
     doc_selection: Option<selection::DocSelection>,
-    select_drag: Option<selection::SelectDrag>,
-    /// Which press of a multi-click the button went down for (1 single,
-    /// 2 double...): the release fires `dblclick` after the second.
-    press_clicks: u32,
-    /// The click count the press or release being dispatched reports as
-    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
-    event_clicks: u32,
-    /// What the window was last told about the pointer: the cursor and
-    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
-    hover_reported: Option<HoverFeedback>,
-    /// HTML drag and drop: the press's drag candidate, or the drag in
-    /// progress (drag_drop.rs).
-    drag: drag_drop::DragState,
-    /// The press in progress has had its say on the focus (it moved it, or
-    /// a listener cancelled the press): the release leaves the focus alone.
-    press_settled_focus: bool,
-    /// Whether the view itself has focus.
-    view_focused: bool,
-    /// The view host said the view lost the system focus and has not said
-    /// it came back: `document.hasFocus()` is false. A view that was never
-    /// told either way (a headless one) reads as focused.
-    view_blurred: bool,
     /// Current scroll offset (x, y) in pixels.
     scroll_offset: (f32, f32),
     /// Maximum scroll offset based on content size.
@@ -1564,15 +1572,6 @@ struct ViewState {
     /// with no sheets was cascaded in full and then thrown away.
     /// `load_subresources` takes this and lays out even if every sheet failed.
     initial_layout_deferred: bool,
-    /// Headless bounds (only set for headless views, None for window-based views).
-    headless_bounds: Option<Bounds>,
-    /// Bounds the view was given since its last layout (`set_view_bounds`):
-    /// the next live turn lays out once, at these, and fires `resize`.
-    pending_resize: Option<Bounds>,
-    /// The viewport last published to the page (`window.innerWidth` /
-    /// `innerHeight`). A later resize at this size is not an event, and a
-    /// queued size the view has already left is not dispatched.
-    announced_viewport: Option<(u32, u32)>,
     /// What the current document's scripts did on load (see [`ScriptRecord`]).
     script_log: Vec<ScriptRecord>,
     /// The document response's `Referrer-Policy` header, if it had a valid one.
@@ -1601,6 +1600,11 @@ struct ViewState {
     /// Image fetches the live loop has started for what the current
     /// document's scripts added, and not yet kept.
     live_images: Vec<script_net::LiveFuture<FetchedImages>>,
+    /// MEDIA-AVF: the document's `<video>` / `<audio>` elements and their resources'
+    /// fetches in flight (`media.rs`).
+    media: media::MediaElements,
+    /// Each with the element and run it is for: a fetch nobody waits on is dropped.
+    live_media: Vec<(usize, u64, script_net::LiveFuture<media::MediaFetched>)>,
     /// Stylesheet fetches still out: the load's past its subresource
     /// budget (Z row S6) and those for links scripts inserted (CH2.E20).
     /// Each lands in `fetched_sheets` under its URL on a live turn.
@@ -1646,12 +1650,174 @@ struct ViewState {
     relayout_pending: PendingCauses,
     /// Relayouts since the current document was committed, by cause.
     relayout_stats: RelayoutStats,
-    /// The view's Inspector record (see `inspector`).
-    inspector: Arc<Inspector>,
     /// What the style and layout build reads and writes of this view
     /// (`layout_ctx::ViewLayout`): focus, the pointer chains, control
     /// state, the sheet cache, the rule index, html's overflow.
     lay: Rc<layout_ctx::ViewLayout>,
+}
+
+/// A same-origin `<iframe>`'s document, loaded into a child realm of its
+/// view's runtime (nested browsing contexts, Stage 2; only with
+/// `EngineConfig::nested_contexts`).
+struct FrameState {
+    /// The frame's document as an offscreen view of this engine: its own
+    /// style, layout, display list, timers and script network, with the
+    /// child realm's bindings (Stage 3). Its display list is painted into
+    /// the parent's at the iframe's content box.
+    view: EngineViewId,
+    #[allow(dead_code)]
+    url: Url,
+}
+
+/// The display-list key of the iframe element `node`'s replaced box.
+fn frame_key(node: usize) -> String {
+    format!("rustkit-frame:{node}")
+}
+
+fn frame_node(key: &str) -> Option<usize> {
+    key.strip_prefix("rustkit-frame:").and_then(|n| n.parse().ok())
+}
+
+struct ViewState {
+    /// The top-level document's state (see [`DocState`]).
+    doc: DocState,
+    /// The view's frames by the parent document's iframe node id
+    /// (`EngineConfig::nested_contexts`), and the navigation they belong to.
+    frames: HashMap<usize, FrameState>,
+    frames_nav: u64,
+    /// What the last wheel moved, while a run of wheels holds to it.
+    wheel_gesture: Option<WheelGesture>,
+    /// CH2.E7: a styled scrollbar's thumb being dragged, from the press to
+    /// the release.
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// CH2.E7: the scroller whose thumb the pointer is over (`:hover`).
+    scrollbar_hover: Option<WheelTarget>,
+    /// CH2.E7: the element a press on a styled scrollbar went to (the
+    /// scroller, or the root element for the viewport's bar). Until the
+    /// release, the press's mouse events target it, and the release fires
+    /// no `click` (Chrome).
+    scrollbar_pressed: Option<usize>,
+    id: EngineViewId,
+    /// Counts the display lists this view has been given.
+    frame_generation: u64,
+    presented: Option<PresentedFrame>,
+    /// Counts the frames this view has presented (a diagnostic: the threads
+    /// plan's per-view frame count; the tests read it to see how many draws
+    /// one input cost).
+    frames_presented: u64,
+    /// CH3.A7: the app owns this view (its chrome, a panel). Only a
+    /// document the app loads into such a view (`load_html`) gets the app
+    /// bridge (`window.ipc`, `window.hiwaveChrome`); web content never does.
+    app_owned: bool,
+    viewhost_id: ViewId,
+    /// The element the developer tools outline on this page
+    /// (`Engine::devtools_highlight`), drawn over the display list.
+    devtools_highlight: Option<usize>,
+    /// The inputs the view took since its last commit
+    /// (`Engine::note_input`; moves sampled, the earliest kept); they ride
+    /// the next commit for the input-to-present log (LAT1c), or are
+    /// counted `no_frame` when their turn changed no frame.
+    input_pending: Vec<InputMark>,
+    /// Inputs since the last commit that presented no frame of their own.
+    inputs_unpresented: u32,
+    /// The host of the view's current visit, as `wgate::begin_visit` was
+    /// told it (`-` for an HTML load), for the commit's [`wgate::VisitTag`].
+    visit_host: Arc<str>,
+    /// The view's stop state: the interrupt word another thread (the
+    /// watchdog, later the user's Stop) sets to end its running script.
+    /// Lives as long as the view; each new document's bindings get it.
+    control: Arc<rustkit_js::ViewControl>,
+    navigation: NavigationStateMachine,
+    /// This view's newest navigation (threads plan M3b): one more for each
+    /// `load_url` or `load_html`, never for Stop. A load captures it before
+    /// its first await and re-checks it, and the view's cancel watermark
+    /// (`ViewControl::cancel_nav`), at every await and between its scripts
+    /// and subresource phases. A newer navigation, `Engine::stop` or a
+    /// [`NavCanceller`] on another thread makes the load stale, and a stale
+    /// load abandons without touching view state.
+    ///
+    /// Fetches still out when a load is cancelled are dropped with the
+    /// load's future; their responses never reach the engine.
+    nav_id: u64,
+    /// Wakes a load waiting on the network when its navigation is
+    /// cancelled from another thread ([`NavCanceller`]).
+    nav_signal: Arc<tokio::sync::Notify>,
+    /// The decode pool's key (D1): a decode that comes back with an older
+    /// one is dropped. Bridged to `nav_id`, not replaced by it: it moves on
+    /// with every new `nav_id` and also on every Stop and observed cancel,
+    /// so Stop on a loaded page still drops the decodes it has out while
+    /// later images on the same document (and `nav_id`) decode normally.
+    decode_epoch: u64,
+    #[allow(dead_code)]
+    nav_event_rx: mpsc::UnboundedReceiver<LoadEvent>,
+    /// A listener cancelled the `pointerdown` of the press in progress:
+    /// its `mousedown` and `mouseup` are not fired (Pointer Events §11.3).
+    compat_mouse_suppressed: bool,
+    /// CH2.E22: the last focus the user moved was moved by the pointer
+    /// (Chromium's last focus type): script's focus then matches
+    /// `:focus-visible` only on a control that takes typed text. False
+    /// until the first, and after a focus moved from the keyboard. Kept
+    /// across documents, as Chromium keeps it per page.
+    focus_by_pointer: bool,
+    /// CH2.E22: the focused button a Space keydown went to; its keyup
+    /// clicks it.
+    space_armed: Option<usize>,
+    /// Where the pointer was at its last move, in viewport coordinates.
+    pointer_at: Option<(f32, f32)>,
+    /// The frame (`frame_generation`, scroll offset) the hovered chain was
+    /// last hit-tested against (CH2.E15): a frame whose boxes or scroll
+    /// moved since hit-tests the still pointer again.
+    hover_hit_at: Option<(u64, (f32, f32))>,
+    /// The primary button is held: between a press and its release.
+    primary_button_down: bool,
+    /// The element the press in progress landed on (raw NodeId).
+    press_target: Option<usize>,
+    select_drag: Option<selection::SelectDrag>,
+    /// Which press of a multi-click the button went down for (1 single,
+    /// 2 double...): the release fires `dblclick` after the second.
+    press_clicks: u32,
+    /// The click count the press or release being dispatched reports as
+    /// `detail` (`mousedown`, `mouseup`, `click`, `auxclick`; CH2.E4).
+    event_clicks: u32,
+    /// What the window was last told about the pointer: the cursor and
+    /// the tooltip (CH2.E4, `PageEvent::Cursor` / `Tooltip`).
+    hover_reported: Option<HoverFeedback>,
+    /// HTML drag and drop: the press's drag candidate, or the drag in
+    /// progress (drag_drop.rs).
+    drag: drag_drop::DragState,
+    /// The press in progress has had its say on the focus (it moved it, or
+    /// a listener cancelled the press): the release leaves the focus alone.
+    press_settled_focus: bool,
+    /// Whether the view itself has focus.
+    view_focused: bool,
+    /// The view host said the view lost the system focus and has not said
+    /// it came back: `document.hasFocus()` is false. A view that was never
+    /// told either way (a headless one) reads as focused.
+    view_blurred: bool,
+    /// Headless bounds (only set for headless views, None for window-based views).
+    headless_bounds: Option<Bounds>,
+    /// Bounds the view was given since its last layout (`set_view_bounds`):
+    /// the next live turn lays out once, at these, and fires `resize`.
+    pending_resize: Option<Bounds>,
+    /// The viewport last published to the page (`window.innerWidth` /
+    /// `innerHeight`). A later resize at this size is not an event, and a
+    /// queued size the view has already left is not dispatched.
+    announced_viewport: Option<(u32, u32)>,
+    /// The view's Inspector record (see `inspector`).
+    inspector: Arc<Inspector>,
+}
+
+impl std::ops::Deref for ViewState {
+    type Target = DocState;
+    fn deref(&self) -> &DocState {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for ViewState {
+    fn deref_mut(&mut self) -> &mut DocState {
+        &mut self.doc
+    }
 }
 
 impl ViewState {
@@ -1680,6 +1846,8 @@ impl ViewState {
     fn summarize_relayouts_for_navigation(&mut self) {
         let stats = std::mem::take(&mut self.relayout_stats);
         self.relayout_pending = PendingCauses::default();
+        // FORCED-READ: the outgoing document's forced builds, by stage.
+        let (forced_build_ms, forced_layout_ms) = self.lay.forced_stage_ms.take();
         if stats.relayouts == 0 {
             return;
         }
@@ -1689,7 +1857,7 @@ impl ViewState {
             .map(relayout_cause::summary_url)
             .unwrap_or_default();
         info!(
-            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1}",
+            "relayout summary url={} relayouts={} by_cause={} causes={} mutations={} trees_reused={} total_ms={:.1} layouts_skipped={} animation_frames_painted={} animation_paint_ms={:.1} forced_layouts={} forced_ms={:.1} forced_build_ms={:.1} forced_layout_ms={:.1}",
             url,
             stats.relayouts,
             stats.by_first_cause,
@@ -1701,7 +1869,9 @@ impl ViewState {
             stats.animation_frames_painted,
             stats.animation_paint_ms,
             stats.forced_layouts,
-            stats.forced_ms
+            stats.forced_ms,
+            forced_build_ms,
+            forced_layout_ms
         );
         // LAT22 probe: why the document's forced reads built the tree.
         let reasons = std::mem::take(&mut *self.lay.forced_build_reasons.borrow_mut());
@@ -1763,6 +1933,7 @@ impl ViewState {
         self.lay.focus_visible.set(false);
         self.lay.rule_reads.borrow_mut().take();
         self.pending_dirty = None;
+        self.retained_styles = None;
         self.last_dirty = None;
         self.pointer_restyle = false;
         self.restyle_only = false;
@@ -1788,6 +1959,9 @@ impl ViewState {
         self.live_modules.clear();
         self.live_modules_started = 0;
         self.live_images.clear();
+        self.media = media::MediaElements::default();
+        self.live_media.clear();
+        self.lay.media_sizes.borrow_mut().clear();
         self.live_sheets.clear();
         self.sheet_links.clear();
         self.external_sheet_owners = Rc::default();
@@ -1829,6 +2003,15 @@ pub struct EngineConfig {
     /// Disable animations and transitions for deterministic parity captures.
     /// When true, all CSS animations and transitions are ignored during rendering.
     pub disable_animations: bool,
+    /// The page clock has no real time in it (virtual time plus a fixed step per read), so a capture
+    /// that steps the timers reproduces every `t`-driven frame. Off by default: a live page reads a
+    /// clock that flows. Its own switch, not a side effect of `disable_animations`.
+    pub deterministic_page_clock: bool,
+    /// The document timeline reads each animation frame's exact grid time, with no real time in it
+    /// (TIMELINE1): script animations compute from it, so a capture reads the same animation times
+    /// every run, however long its turns take in real time. Frame callbacks' timestamps and
+    /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
+    pub grid_frame_stamps: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -1869,6 +2052,11 @@ pub struct EngineConfig {
     /// start more requests; whatever is still pending after the last round
     /// completes with a network error.
     pub script_network_rounds: u32,
+    /// Same-origin `<iframe>` documents (nested browsing contexts, Stage 2
+    /// of docs/diagnostics/2026-11-11/nested-browsing-contexts-plan.md).
+    /// Off by default: an iframe stays an empty box with `contentWindow`
+    /// null, as before.
+    pub nested_contexts: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -1924,6 +2112,8 @@ impl Default for EngineConfig {
             cookies_enabled: true,
             background_color: [1.0, 1.0, 1.0, 1.0], // White
             disable_animations: false,
+            deterministic_page_clock: false,
+            grid_frame_stamps: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -1931,6 +2121,9 @@ impl Default for EngineConfig {
             subresource_budget_ms: 8_000,
             script_network_enabled: true,
             script_network_rounds: 8,
+            // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
+            // frames in a built app or parity-capture before the flip.
+            nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -1957,6 +2150,55 @@ const MAX_LIVE_TIMER_CALLBACKS: u32 = 1_000;
 /// still due for the next turn. Callbacks that finish inside the budget
 /// still run in the one turn, which is what a pump of a few timers observes.
 const LIVE_FRAME_MS: u64 = 16;
+
+thread_local! {
+    /// RAF-ONE-ROUND on this thread (`set_one_animation_round`); `None`: `HIWAVE_RAF_ONE_ROUND`.
+    static ONE_ANIMATION_ROUND: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// RAF-ONE-ROUND: a frame tree's live turn (one presented frame) runs one animation-frame round
+/// on this thread's engines. Off, a late turn ran a second round, of the frame a late callback
+/// asked for (due already), before the turn returned: MotionMark's heavy cells counted two suite
+/// frames per presented frame. Off by default (on with `HIWAVE_RAF_ONE_ROUND=1`): on, a frame
+/// document's CSS animation clock can be read at the timers' clock on a turn that defers that
+/// frame, ahead of the time its animations report (`css_timeline_tests`, RAF-ONE-ROUND PR).
+pub fn set_one_animation_round(on: bool) {
+    ONE_ANIMATION_ROUND.with(|c| c.set(Some(on)));
+}
+
+thread_local! {
+    /// ANIM-UPDATE-ORDER: the frame time this thread's current turn updated its animations to
+    /// before its round (`Engine::presample_animations`), while one round a turn is on.
+    static PRESAMPLED_FRAME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The animation clock a turn leaves (ANIM-UPDATE-ORDER): the frame's stamp `clock`, or the time
+/// the turn updated its animations to before its round (`presampled`) when the stamp is within a
+/// millisecond of it (the stamp carries the clock's reads), so the settle does not draw the same
+/// frame again. Never below the presampled time: the animations were already drawn at it, and a
+/// stamp read lower (a real clock against the grid) would step the painted time back.
+fn turn_animation_clock(clock: f64, presampled: Option<f64>) -> f64 {
+    match presampled {
+        Some(at) if (clock - at).abs() < 1.0 => at,
+        Some(at) => clock.max(at),
+        None => clock,
+    }
+}
+
+#[cfg(all(test, feature = "headless"))]
+pub(crate) fn turn_animation_clock_for_tests(clock: f64, presampled: Option<f64>) -> f64 {
+    turn_animation_clock(clock, presampled)
+}
+
+fn one_animation_round() -> bool {
+    ONE_ANIMATION_ROUND.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let on = std::env::var("HIWAVE_RAF_ONE_ROUND").ok().as_deref() == Some("1");
+            c.set(Some(on));
+            on
+        })
+    })
+}
 
 /// What a load lends the engine to at its safe points (LAT15): the content
 /// thread's endpoint, which applies the window's commands that may run
@@ -2065,9 +2307,13 @@ enum ScriptTiming {
     Async,
 }
 
-/// The largest page script `run_page_scripts` starts. Instagram's 3.9 MB
-/// bundle ran in 3.3s; youtube's 10.8 MB one did not finish in 16s.
-const MAX_PAGE_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+/// The largest page script `run_page_scripts` starts. It was 4 MiB while
+/// Boa's parse and compile grew with the square of a scope's variables:
+/// YouTube's 10.9 MB `kevlar_base` bundle ran for 12.7 s. Since the scope
+/// name index (#1376) that bundle parses in about 1.4 s and compiles in about
+/// 0.6 s, so the limit now bounds memory, not time: Boa peaks at about 85
+/// bytes per source byte, about 1.4 GB for a 16 MiB script.
+const MAX_PAGE_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Why an inline HTML load (`load_html`) does not run a script: it runs
 /// inline classic scripts only. Every other `Skipped` there is a script it
@@ -2127,7 +2373,7 @@ impl ScriptFeed {
             0,
             Err(ScriptOutcome::Skipped("script fetch lost")),
             false,
-            ScriptFetched { kind, fetch: None, arrived: None },
+            ScriptFetched { kind, fetch: None, arrived: None, without_detail: false },
         ))
     }
 
@@ -2174,6 +2420,10 @@ struct ScriptFetched {
     fetch: Option<std::time::Duration>,
     /// When its body or failure arrived; `None` for an inline script.
     arrived: Option<std::time::Instant>,
+    /// Its errors are reported to the page without detail
+    /// (`script_error_detail`): every fetched script until its response
+    /// says otherwise; never an inline one.
+    without_detail: bool,
 }
 
 impl ScriptFetched {
@@ -2376,6 +2626,83 @@ pub struct LivePump {
     /// Milliseconds until the page's next timer is due. `None`: it has none,
     /// and the loop can sleep until the next input.
     pub next_timer_ms: Option<u64>,
+    /// LINKS-SLOW: the same wait in whole microseconds, rounded up, when this turn's own timers
+    /// set it (`None` otherwise): a timer set in a real turn is due at a fraction of a
+    /// millisecond, and the content loop aims its wake at that instant.
+    pub next_timer_exact_us: Option<u64>,
+}
+
+/// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
+/// for Testing 148 renders a same-origin frame's response: only HTML types
+/// are parsed as markup; text and JSON become a text document, an image an
+/// image document, and anything else is downloaded (no document).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameDocumentKind {
+    Html,
+    Text,
+    Json,
+    Image,
+    Download,
+}
+
+impl FrameDocumentKind {
+    /// From the response's MIME essence (`type/subtype`, lowercased).
+    fn of(essence: Option<&str>) -> Self {
+        let Some(essence) = essence else {
+            // No type: sniffed as HTML, as a page with none is.
+            return Self::Html;
+        };
+        let (top, sub) = essence.split_once('/').unwrap_or((essence, ""));
+        match (top, sub) {
+            ("text", "html") | ("application", "xhtml+xml") => Self::Html,
+            ("application", "json") => Self::Json,
+            (_, sub) if sub.ends_with("+json") => Self::Json,
+            ("text", _) => Self::Text,
+            ("application", "javascript" | "ecmascript" | "x-javascript") => Self::Text,
+            // An SVG image is shown as an image here (Chrome renders it as
+            // an SVG document; a stated deviation).
+            ("image", _) => Self::Image,
+            _ => Self::Download,
+        }
+    }
+
+    /// The markup the frame's document is parsed from.
+    fn markup(self, body: String, url: &Url) -> String {
+        fn escape(text: &str) -> String {
+            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        }
+        match self {
+            Self::Html | Self::Download => body,
+            Self::Text => format!(
+                "<html><head></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{}</pre></body></html>",
+                escape(&body)
+            ),
+            Self::Json => format!(
+                "<html><head></head><body><pre>{}</pre><div class=\"json-formatter-container\"></div></body></html>",
+                escape(&body)
+            ),
+            Self::Image => {
+                let name = url.path_segments().and_then(|mut s| s.next_back()).unwrap_or("").to_string();
+                let src = escape(url.as_str()).replace('"', "&quot;");
+                format!(
+                    "<html><head><title>{}</title></head><body><img style=\"display: block;-webkit-user-select: none;\" src=\"{src}\"></body></html>",
+                    escape(&name)
+                )
+            }
+        }
+    }
+}
+
+/// Fold a later turn of the frames into what the frames' turns so far
+/// said: its next timer is the one that stands (the earlier answer's has
+/// run or moved), the rest add up.
+fn merge_live(into: &mut LivePump, later: LivePump) {
+    into.timers_ran += later.timers_ran;
+    into.requests += later.requests;
+    into.in_flight = later.in_flight;
+    into.relaid_out |= later.relaid_out;
+    into.yielded_for_frame |= later.yielded_for_frame;
+    into.next_timer_ms = later.next_timer_ms;
 }
 
 /// How far [`Engine::load_url_yielding`] got before it returned.
@@ -2815,6 +3142,8 @@ impl EngineConfig {
     pub fn for_parity_testing() -> Self {
         Self {
             disable_animations: true,
+            deterministic_page_clock: true,
+            grid_frame_stamps: true,
             ..Default::default()
         }
     }
@@ -3162,11 +3491,19 @@ impl SiblingContext {
 /// The main browser engine.
 pub struct Engine {
     config: EngineConfig,
+    /// The most timer callbacks a view's live turn runs: one per task while
+    /// a frame tree's page runs the tree's timers, none for its frames
+    /// (`pump_live`), else the usual cap.
+    live_timer_cap: u32,
     /// The window thread's half: view host, compositor, renderer. The
     /// page side (everything below) hands it frames; see `presenter.rs`.
     presenter: Option<Presenter>,
     /// Commits a page engine publishes. A window engine stores them on its presenter.
     page_commits: HashMap<EngineViewId, FrameCommit>,
+    /// MEDIA-AVF step 3: the main-thread `MediaHost` that owns the players
+    /// (`docs/design/MEDIA_AVF.md` §3.2). `None` (the default until step 6): media
+    /// elements load their metadata and nothing more.
+    media_backend: Option<Arc<dyn rustkit_media::host::MediaBackend>>,
     /// One navigation sequence, shared with the window handle.
     nav_seq: Arc<AtomicU64>,
     /// `Some` replaces Boa's host re-entry cap for runtimes this engine creates.
@@ -3194,12 +3531,37 @@ pub struct Engine {
 /// inherited one): the declaration is left out and the same-named
 /// presentation attribute dropped, so rustkit-svg's parse-time inheritance
 /// gives the parent's value.
+///
+/// A2.2: `transitions` holds the author `transition*` declarations that
+/// match the element, as (property, value) in the cascade's order, for the
+/// svg paint lane (`LayoutCtx::svg_paint_transitions`); never written into
+/// the markup. `animated` is the lane's running values (`fill:rgb(...);`),
+/// written after everything else, since a transition beats every origin.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SvgPaintStyle {
     normal: String,
     important: String,
     inherit: Vec<String>,
+    transitions: Vec<(String, String)>,
+    animated: String,
 }
+
+impl SvgPaintStyle {
+    /// Whether this changes the element's markup: a style that only names
+    /// transitions serializes as no entry, so its cache key stays.
+    fn paints(&self) -> bool {
+        !self.normal.is_empty() || !self.important.is_empty() || !self.inherit.is_empty() || !self.animated.is_empty()
+    }
+}
+
+/// The `transition*` properties the svg paint side cascade collects (A2.2).
+const SVG_TRANSITION_PROPERTIES: &[&str] = &[
+    "transition",
+    "transition-property",
+    "transition-duration",
+    "transition-timing-function",
+    "transition-delay",
+];
 
 /// Of `SVG_PAINT_PROPERTIES`, the ones that are not inherited (`unset` is
 /// `initial` for them).
@@ -3441,10 +3803,13 @@ impl Engine {
 
         console_log::install_console_diag();
         let system_clipboard = config.system_clipboard;
+        let nested_contexts = config.nested_contexts;
         Ok(Self {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config,
             presenter,
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq,
             host_reentry_override: None,
             clipboard: if system_clipboard {
@@ -3457,7 +3822,11 @@ impl Engine {
             views: HashMap::new(),
             event_tx,
             event_rx: Some(event_rx),
-            lctx: Rc::new(layout_ctx::LayoutCtx::default()),
+            lctx: Rc::new({
+                let lctx = layout_ctx::LayoutCtx::default();
+                lctx.nested_contexts.set(nested_contexts);
+                lctx
+            }),
         })
     }
 
@@ -3516,18 +3885,59 @@ impl Engine {
 
         // Create view state
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                retained_styles: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                media: media::MediaElements::default(),
+                live_media: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3535,9 +3945,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3548,15 +3955,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3566,36 +3966,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3639,18 +4015,59 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                retained_styles: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                media: media::MediaElements::default(),
+                live_media: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id: EngineViewId::new(),
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3658,9 +4075,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3671,15 +4085,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3689,36 +4096,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: None,
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3779,18 +4162,59 @@ impl Engine {
         let navigation = NavigationStateMachine::new(nav_tx);
 
         let view_state = ViewState {
-            lay: Rc::default(),
+            frames: HashMap::new(),
+            frames_nav: 0,
+            doc: DocState {
+                lay: Rc::default(),
+                url: None,
+                title: None,
+                http_status: None,
+                document: None,
+                layout: None,
+                held_fixed: None,
+                display_list: None,
+                bindings: None,
+                canvases: None,
+                canvas_paints: HashMap::new(),
+                hovered_node: None,
+                pending_dirty: None,
+                retained_styles: None,
+                title_stale: false,
+                last_dirty: None,
+                pointer_restyle: false,
+                restyle_only: false,
+                laid_with: None,
+                doc_selection: None,
+                scroll_offset: (0.0, 0.0),
+                max_scroll_offset: (0.0, 0.0),
+                external_stylesheets: Rc::default(),
+                initial_layout_deferred: false,
+                script_log: Vec::new(),
+                header_referrer_policy: None,
+                images_attempted: std::collections::HashSet::new(),
+                images_planned_for: 0,
+                script_policy: None,
+                live_requests: Vec::new(),
+                live_modules: Vec::new(),
+                live_modules_started: 0,
+                live_images: Vec::new(),
+                media: media::MediaElements::default(),
+                live_media: Vec::new(),
+                live_sheets: Vec::new(),
+                sheet_links: Vec::new(),
+                external_sheet_owners: Rc::default(),
+                fetched_sheets: std::collections::HashMap::new(),
+                sheet_urls_seen: std::collections::HashSet::new(),
+                sheets_checked_for: None,
+                live_inserted: script_net::InsertedScripts::new(),
+                load_tail: None,
+                relayout_pending: PendingCauses::default(),
+                relayout_stats: RelayoutStats::default(),
+            },
             id,
             control: rustkit_js::Watchdog::shared().view_control(),
             app_owned: false,
             viewhost_id,
-            url: None,
-            title: None,
-            http_status: None,
-            document: None,
-            layout: None,
-            held_fixed: None,
-            display_list: None,
             devtools_highlight: None,
             input_pending: Vec::new(),
             inputs_unpresented: 0,
@@ -3798,9 +4222,6 @@ impl Engine {
             frame_generation: 0,
             presented: None,
             frames_presented: 0,
-            bindings: None,
-            canvases: None,
-            canvas_paints: HashMap::new(),
             navigation,
             nav_id: 0,
             nav_signal: Arc::new(tokio::sync::Notify::new()),
@@ -3811,15 +4232,8 @@ impl Engine {
             scrollbar_drag: None,
             scrollbar_hover: None,
             scrollbar_pressed: None,
-            hovered_node: None,
-            pending_dirty: None,
-            title_stale: false,
-            last_dirty: None,
-            pointer_restyle: false,
             focus_by_pointer: false,
             space_armed: None,
-            restyle_only: false,
-            laid_with: None,
             pointer_at: None,
             hover_hit_at: None,
             primary_button_down: false,
@@ -3829,36 +4243,12 @@ impl Engine {
             press_clicks: 1,
             event_clicks: 1,
             hover_reported: None,
-            doc_selection: None,
             select_drag: None,
             view_focused: false,
             view_blurred: false,
-            scroll_offset: (0.0, 0.0),
-            max_scroll_offset: (0.0, 0.0),
-            external_stylesheets: Rc::default(),
-            initial_layout_deferred: false,
             headless_bounds: Some(bounds),
             pending_resize: None,
             announced_viewport: None,
-            script_log: Vec::new(),
-            header_referrer_policy: None,
-            images_attempted: std::collections::HashSet::new(),
-            images_planned_for: 0,
-            script_policy: None,
-            live_requests: Vec::new(),
-            live_modules: Vec::new(),
-            live_modules_started: 0,
-            live_images: Vec::new(),
-            live_sheets: Vec::new(),
-            sheet_links: Vec::new(),
-            external_sheet_owners: Rc::default(),
-            fetched_sheets: std::collections::HashMap::new(),
-            sheet_urls_seen: std::collections::HashSet::new(),
-            sheets_checked_for: None,
-            live_inserted: script_net::InsertedScripts::new(),
-            load_tail: None,
-            relayout_pending: PendingCauses::default(),
-            relayout_stats: RelayoutStats::default(),
             inspector: Inspector::new(&self.config.inspector),
         };
 
@@ -3874,6 +4264,11 @@ impl Engine {
             .ok_or(EngineError::ViewNotFound(id))?;
         self.lctx.image_manager.forget_view(id.0);
         self.page_commits.remove(&id);
+        // The svg frames this view's transitions parsed (`svg_transient_keys`) leave the
+        // shared cache with it: no later pass of this view would evict them.
+        let mut svgs = self.lctx.svg_cache.borrow_mut();
+        view.lay.svg_transient_keys.take().iter().for_each(|key| drop(svgs.remove(key)));
+        drop(svgs);
 
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.destroy_view(id, view.viewhost_id);
@@ -4007,7 +4402,7 @@ impl Engine {
             // As `fire_mouse`: a document being left hears no `resize`;
             // `innerWidth`/`innerHeight` are kept current all the same.
             let leaving = view.control.stops_all();
-            if let Some(bindings) = view.bindings.as_ref() {
+            if let Some(bindings) = view.doc.bindings.as_ref() {
                 let sized = bindings.set_dimensions(bounds.width as f64, bounds.height as f64);
                 if leaving {
                     debug!(?id, "Resize event not dispatched: the document is being left");
@@ -4027,7 +4422,7 @@ impl Engine {
                     // A stopped listener's error is the stop itself, which has
                     // its own record.
                     let fired = if stopped.is_some() { Ok(()) } else { fired };
-                    view.script_log.extend(stopped);
+                    view.doc.script_log.extend(stopped);
                     if let Err(e) = fired {
                         let record = ScriptRecord {
                             source: "event:resize".into(),
@@ -4035,9 +4430,9 @@ impl Engine {
                             elapsed_ms: 0,
                             outcome: ScriptOutcome::Threw(e.to_string()),
                         };
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
-                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, "event:resize", 0);
+                    inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, "event:resize", 0);
                 }
             }
         }
@@ -5861,7 +6256,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return fallback;
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return fallback;
         };
         // The window has asked to leave this document (`navigate`,
@@ -5894,13 +6289,13 @@ impl Engine {
                         elapsed_ms: 0,
                         outcome: ScriptOutcome::Threw(e.to_string()),
                     };
-                    inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                 }
                 fallback
             }
         };
-        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.script_log, &source, 0);
-        view.script_log.extend(stopped);
+        inspector_glue::drain_reports(bindings, &view.inspector, &mut view.doc.script_log, &source, 0);
+        view.doc.script_log.extend(stopped);
         answer
     }
 
@@ -6090,6 +6485,9 @@ impl Engine {
             if load_stopped {
                 log_script_stopped("event:load", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(())));
             match caught {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6114,7 +6512,8 @@ impl Engine {
                 callbacks = 0u32,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "event:load", step_ms);
         }
         if !stopped && !self.nav_superseded(id, nav_id) {
             self.refresh_layout_for_script(id, &bindings);
@@ -6132,6 +6531,9 @@ impl Engine {
             if timer_stopped {
                 log_script_stopped("timers", step_started.elapsed().as_millis() as u64, take_script_js_overrun());
             }
+            // A step that ends in a record of its own has its time there,
+            // not in its errors' records too (SCRIPT-TIME-DUP).
+            let own_record = !matches!(caught, Ok(Ok(_)));
             match caught {
                 Ok(Ok(ran)) => timer_callbacks = ran,
                 Ok(Err(message)) => log.push(ScriptRecord {
@@ -6156,7 +6558,8 @@ impl Engine {
                 callbacks = timer_callbacks,
                 "Page lifecycle step done"
             );
-            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_started.elapsed().as_millis() as u64);
+            let step_ms = if own_record { 0 } else { step_started.elapsed().as_millis() as u64 };
+            inspector_glue::drain_reports(&bindings, &inspector, &mut log, "timers", step_ms);
         }
         if !stopped {
             // A script the load handler inserted does not delay `load`,
@@ -6277,6 +6680,10 @@ impl Engine {
             return Ok(());
         }
         self.scroll_to_loaded_fragment(id);
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         let view = self
             .views
             .get_mut(&id)
@@ -6312,8 +6719,554 @@ impl Engine {
         Ok(())
     }
 
+    /// One live turn that steps the page's clock by `elapsed_ms` of virtual time the page has not
+    /// lived through yet (a capture's settle, a test): every timer due inside it runs on that clock,
+    /// and what it sets counts from its own due time. The app's loops, whose `elapsed_ms` is real time
+    /// that has passed, use [`Self::pump_live_real`].
     pub async fn pump_live(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, false).await
+    }
+
+    /// One live turn after `elapsed_ms` of real time: a timer due inside it was held back (a long
+    /// task, a late turn), so it runs once, and what it sets (a chain's next link, an interval's next
+    /// run) counts from the turn's time, as in Chrome, not from the due time it was held back from
+    /// (CLOCK3: a 10 ms chain replayed every link it had missed in one turn).
+    pub async fn pump_live_real(&mut self, id: EngineViewId, elapsed_ms: u64) -> LivePump {
+        self.pump_live_on(id, elapsed_ms, true).await
+    }
+
+    /// [`Self::pump_live_real`] for a turn whose clock kept `fraction_ms` of real time it did not
+    /// give the page (the content loop's `LiveClock`): the turn's real instant is that much
+    /// earlier than its start, so the timers' clock reads real time (LINKS-SLOW).
+    pub async fn pump_live_real_at(&mut self, id: EngineViewId, elapsed_ms: u64, fraction_ms: f64) -> LivePump {
+        LIVE_FRACTION_MS.with(|f| f.set(if fraction_ms.is_finite() && fraction_ms > 0.0 { fraction_ms } else { 0.0 }));
+        let out = self.pump_live_on(id, elapsed_ms, true).await;
+        LIVE_FRACTION_MS.with(|f| f.set(0.0));
+        out
+    }
+
+    /// Nested browsing contexts, Stage 2: take what this view's document
+    /// asked of its iframes and do it. A same-origin `src` (or none:
+    /// about:blank) is fetched, parsed and bound in a new realm of the
+    /// view's runtime; its classic scripts run in document order, then its
+    /// `DOMContentLoaded` and `load`, then `load` at the iframe element.
+    /// A cross-origin `src` is not fetched: the frame stays blank and the
+    /// element hears `load`; so does a frame with a `sandbox` attribute
+    /// (`frame_sandbox_tests`). A frame whose element left, or that is
+    /// navigated again, is dropped first. Not here yet (later stages):
+    /// layout and paint of the frame, the child's timers and network
+    /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
+    /// waiting for its frames.
+    async fn drive_frames(&mut self, id: EngineViewId) {
+        let loader = self.loader.clone();
+        let referrer = self.subresource_referrer(id);
+        let (requests, page_url, policy) = {
+            let Some(view) = self.views.get_mut(&id) else { return };
+            let Some(parent) = view.doc.bindings.as_ref() else { return };
+            let mut stale = Vec::new();
+            if view.frames_nav != view.nav_id {
+                // A new document: the old one's frames went with its runtime.
+                stale.extend(view.frames.drain().map(|(_, f)| f.view));
+                view.frames_nav = view.nav_id;
+                if let Err(e) = parent.scan_frames() {
+                    debug!(error = %e, "frames: the scan for the parser's iframes failed");
+                }
+            }
+            let requests = parent.take_frame_requests();
+            let out = (requests, view.doc.url.clone(), view.doc.script_policy.clone());
+            for fid in stale {
+                self.views.remove(&fid);
+            }
+            out
+        };
+        let mut changed = false;
+        for request in requests {
+            changed |= self.drop_frame(id, request.node);
+            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let blank = target.scheme() == "about";
+            let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
+            fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+                engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+            }
+            // A frame with a `sandbox` attribute (as it was when the page
+            // asked for this navigation) takes the same path, whatever the
+            // attribute's tokens: `allow-scripts` and `allow-same-origin`
+            // are not acted on in this stage.
+            if request.sandbox.is_some() || (!blank && !same_origin) {
+                // The cross-origin floor: no request, no document, one `load`.
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node, false);
+                }
+                continue;
+            }
+            // The document's URL is the response's, after redirects; it is
+            // same-origin only when every URL of the chain is the page's
+            // origin (one that left and came back is not).
+            let (html, target) = if blank {
+                ("<html><head></head><body></body></html>".to_string(), target)
+            } else {
+                let fetched = loader.fetch(referrer.get_for(target.clone(), RequestDestination::Other)).await;
+                let page_origin = page_url.as_ref().map(|page| page.origin());
+                let ours = |url: &Url| page_origin.as_ref().is_some_and(|origin| *origin == url.origin());
+                match fetched {
+                    Ok(response) if response.redirect_chain.iter().any(|(url, _)| !ours(url)) || !ours(&response.url) => {
+                        // The cross-origin floor, as for a cross-origin `src`.
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node, false);
+                        }
+                        continue;
+                    }
+                    Ok(response) if response.ok() => {
+                        let url = response.url.clone();
+                        let essence = response.content_type.as_ref().map(|m| m.essence_str().to_ascii_lowercase());
+                        let kind = FrameDocumentKind::of(essence.as_deref());
+                        if kind == FrameDocumentKind::Download {
+                            // Chrome downloads it: the frame keeps its
+                            // initial document and hears no `load`.
+                            continue;
+                        }
+                        let body = response.text().await.unwrap_or_default();
+                        (kind.markup(body, &url), url)
+                    }
+                    Ok(response) => (String::new(), response.url.clone()),
+                    // No response to decide on (the loader refused a
+                    // redirect, or the request failed): the floor too.
+                    Err(_) => {
+                        if let Some(parent) = parent_of(self, id) {
+                            let _ = parent.frame_loaded(request.node, false);
+                        }
+                        continue;
+                    }
+                }
+            };
+            // With the engine's scripting setting, as the top-level load
+            // parses (HTML §13.2.3.5: `<noscript>` content is text).
+            let Ok(document) = Document::parse_html_scripted(&html, self.config.javascript_enabled) else {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node, false);
+                }
+                continue;
+            };
+            let document = Rc::new(document);
+            let Some((child, (width, height))) = parent_of(self, id).and_then(|parent| {
+                let child = parent.new_child().ok()?;
+                Some((child, parent.frame_size(request.node)))
+            }) else {
+                continue;
+            };
+            let bound = child
+                .set_document(document.clone())
+                .and_then(|_| child.set_location(&target))
+                .and_then(|_| child.set_dimensions(width, height))
+                .and_then(|_| child.enable_net_bridge());
+            let attached = bound.is_ok()
+                && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
+            if !attached {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
+                continue;
+            }
+            // The frame's own page state, offscreen, at its viewport.
+            let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
+            let Ok(fid) = self.insert_offscreen_view(bounds) else {
+                if let Some(parent) = parent_of(self, id) {
+                    parent.drop_child(child);
+                }
+                continue;
+            };
+            child.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            child.set_media_can_play(Some(Box::new(media::can_play_type)));
+            // The images its canvases draw: what the frame's own image loads
+            // put in the engine's image store, as for a top-level page.
+            child.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
+            // What a top-level page's bindings are given at load, for the
+            // frame's: the engine's selector matcher (without it script's
+            // `querySelector` fell back to the bindings' own, which does not
+            // look inside a shadow tree), the microtask cap, and the view's
+            // interrupt word, so a stop reaches a script running in a frame.
+            child.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
+            let lay = self.views.get(&fid).map(|view| view.lay.clone());
+            child.set_selector_matcher(Rc::new(move |node, selector, checked| {
+                let _focus = lay
+                    .as_ref()
+                    .filter(|_| selector.contains(":focus"))
+                    .map(|lay| WalkFocusScope::enter(lay.focus_chain.borrow().clone(), lay.focus_visible.get()));
+                SelectorMatcher.node_matches(node, selector, checked)
+            }));
+            if let Some(control) = self.views.get(&id).map(|view| view.control.clone()) {
+                child.set_view_control(Some(control));
+            }
+            self.attach_editing(fid, &child);
+            if let Some(frame) = self.views.get_mut(&fid) {
+                frame.canvases = Some(child.canvas_source());
+                frame.doc.url = Some(target.clone());
+                frame.doc.document = Some(document.clone());
+                frame.doc.script_policy = policy.clone();
+                frame.announced_viewport = Some((bounds.width, bounds.height));
+            }
+            // The frame's linked stylesheets, before its scripts and its
+            // `load`, as a page's are before its own: what the parent's
+            // `load` handler measures in the frame is styled (Chrome 148,
+            // docs/diagnostics/2026-11-15/frame_style_cft148.json). A sheet
+            // over the subresource budget lands on a live turn, as a page's.
+            // Nothing of the page runs during this wait (the tree's one
+            // loop is here), so the frame cannot be navigated under it; a
+            // later request for the element drops this view and its sheets
+            // with it. The wait ends at the subresource budget.
+            match self.load_external_stylesheets_slotted(fid).await {
+                Ok((links, fetched, late)) => {
+                    if let Some(frame) = self.views.get_mut(&fid) {
+                        frame.sheet_links = links;
+                        frame.fetched_sheets = fetched;
+                        frame.live_sheets = late;
+                        frame.rebuild_link_sheets();
+                    }
+                }
+                // The live turn's link check asks for them again.
+                Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
+            }
+            // The child's classic scripts, in document order.
+            // The engine's own question (not a page script: nothing of it
+            // is announced to the frame's page).
+            let listed = child.evaluate(
+                "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
+                   var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
+                   return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
+            );
+            let scripts: Vec<(Option<String>, String, String)> = match listed {
+                Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            // Module scripts are deferred: after the classic ones, in order.
+            let mut modules: Vec<(String, String)> = Vec::new();
+            for (index, (src, text, kind)) in scripts.into_iter().enumerate() {
+                if kind.is_empty() {
+                    continue;
+                }
+                let is_module = kind == "module";
+                let (source, name) = match src {
+                    Some(src) => {
+                        let Ok(url) = target.join(&src) else { continue };
+                        if url.origin() != target.origin() {
+                            continue;
+                        }
+                        let fetched = loader.fetch(referrer.get_for(url.clone(), RequestDestination::Script)).await;
+                        match fetched {
+                            Ok(response) if response.ok() => {
+                                // What its `error` events may say, from where it was served in the end.
+                                child.register_script(url.as_str(), url.as_str(), script_error_detail::of_response(Some(&target), &response));
+                                (response.text().await.unwrap_or_default(), url.to_string())
+                            }
+                            _ => continue,
+                        }
+                    }
+                    None => {
+                        let name = if is_module { format!("{target}#inline-module-{}", index + 1) } else { format!("frame-inline#{}", index + 1) };
+                        // The frame's own code.
+                        child.register_script(&name, target.as_str(), false);
+                        (text, name)
+                    }
+                };
+                if is_module {
+                    modules.push((name, source));
+                    continue;
+                }
+                if let Err(e) = child.evaluate_named(&source, &name) {
+                    debug!(error = %e, "frames: a child script threw");
+                }
+            }
+            if !modules.is_empty() {
+                // The module map and base are the runtime's: the frame's
+                // graph is loaded with the frame's URL as base, then the
+                // page's base is put back.
+                child.set_module_base(target.as_str());
+                for (url, source) in modules {
+                    let Ok(handle) = child.begin_module(&url, &source) else { continue };
+                    for _ in 0..64 {
+                        let wanted = child.take_module_requests();
+                        if wanted.is_empty() {
+                            break;
+                        }
+                        for requested in wanted {
+                            let outcome = match Url::parse(&requested) {
+                                Ok(u) if u.origin() == target.origin() => {
+                                    match loader.fetch(referrer.get_for(u.clone(), RequestDestination::Script)).await {
+                                        Ok(response) if response.ok() => {
+                                            let final_url = response.url.to_string();
+                                            response
+                                                .text()
+                                                .await
+                                                .map(|source| rustkit_js::FetchedModule { final_url, source })
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        Ok(response) => Err(format!("status {}", response.status.as_u16())),
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                }
+                                _ => Err("not same-origin with the frame".to_string()),
+                            };
+                            child.supply_module(&requested, outcome);
+                        }
+                    }
+                    if let rustkit_js::ModuleState::Failed(why) | rustkit_js::ModuleState::Threw(why) = child.poll_module(&handle) {
+                        debug!(module = %url, %why, "frames: a child module did not run");
+                    }
+                }
+                if let Some(page) = &page_url {
+                    child.set_module_base(page.as_str());
+                }
+            }
+            if let Some(frame) = self.views.get_mut(&fid) {
+                // The frame's first layout starts its animations: at the timeline's time now,
+                // not at the tree clock's zero, before the frame was made (TIMELINE2).
+                frame.doc.lay.animations.borrow_mut().clock_ms = child.animation_clock_ms();
+                frame.doc.bindings = Some(child);
+            }
+            if let Err(e) = self.relayout_for(fid, RelayoutCause::InitialLoad) {
+                debug!(error = %e, "frames: the frame's first layout failed");
+            }
+            if let Some(child) = self.views.get(&fid).and_then(|v| v.doc.bindings.as_ref()) {
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Document, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "DOMContentLoaded");
+                let _ = child.fire_lifecycle_event(rustkit_bindings::LifecycleTarget::Window, "load");
+            }
+            if let Some(view) = self.views.get_mut(&id) {
+                view.frames.insert(request.node, FrameState { view: fid, url: target });
+            }
+            // The initial about:blank of a frame nothing listened to at
+            // its insertion: Chrome fired that `load` inside the insertion,
+            // so a handler set since must not hear it now.
+            if !request.quiet {
+                if let Some(parent) = parent_of(self, id) {
+                    let _ = parent.frame_loaded(request.node, request.initial);
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame change failed");
+            }
+        }
+    }
+
+    /// Drop the frame of iframe `node` of view `id`, if it has one: its
+    /// offscreen view goes, and its realm with it.
+    fn drop_frame(&mut self, id: EngineViewId, node: usize) -> bool {
+        let Some(frame) = self.views.get_mut(&id).and_then(|v| v.frames.remove(&node)) else { return false };
+        let child = self.views.remove(&frame.view).and_then(|mut v| v.doc.bindings.take());
+        if let (Some(child), Some(parent)) = (child, self.views.get(&id).and_then(|v| v.doc.bindings.as_ref())) {
+            parent.drop_child(child);
+        }
+        true
+    }
+
+    /// The frames' own live turns, after the parent's frame requests: each
+    /// frame's timers, animation frames, script network and relayouts. The
+    /// parent is laid out again when a frame was (its paint includes the
+    /// frame's).
+    async fn pump_frames(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
+        let frames: Vec<EngineViewId> = self
+            .views
+            .get(&id)
+            .map(|v| v.frames.values().map(|f| f.view).collect())
+            .unwrap_or_default();
+        let mut all = LivePump::default();
+        for fid in frames {
+            let turn = Box::pin(self.pump_live_on(fid, elapsed_ms, real_clock)).await;
+            all.relaid_out |= turn.relaid_out;
+            all.in_flight += turn.in_flight;
+            all.next_timer_ms = match (all.next_timer_ms, turn.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        if all.relaid_out {
+            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                debug!(error = %e, "frames: the parent's layout after a frame's failed");
+            }
+        }
+        all
+    }
+
+    /// One live turn of view `id` and, with nested browsing contexts on,
+    /// of its frames first: what the page asked of its iframes is done,
+    /// each frame takes its own turn, then the page takes its. What the
+    /// frames still need joins the answer, because nothing else wakes the
+    /// loop for them: a frame's next timer, its requests that are out, and a
+    /// frame request the page made during this turn (a `load` handler that
+    /// sets `src` again: Speedometer's runner between workloads) ask for the
+    /// next turn at once. `real_clock`: see [`Self::pump_live_real`]; the
+    /// tree's turn is on one clock, so its frames' turns take the same.
+    async fn pump_live_on(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
+        if one_animation_round() {
+            // The tree's late rounds are the frames of their turns' time (CLOCK-AT-PRESENT).
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                if let Err(e) = bindings.set_one_round(true) {
+                    debug!(error = %e, "the one-round mark failed");
+                }
+            }
+            let at = self.presample_animations(id, elapsed_ms);
+            PRESAMPLED_FRAME.with(|p| p.set(at));
+        }
+        if !self.config.nested_contexts {
+            return self.pump_live_turn(id, elapsed_ms, real_clock).await;
+        }
+        self.drive_frames(id).await;
+        let has_frames = self.views.get(&id).is_some_and(|v| !v.frames.is_empty());
+        // A frame's own frames are the tree's: only its top runs the timers.
+        let is_frame = self.views.values().any(|v| v.frames.values().any(|f| f.view == id));
+        if !has_frames || is_frame {
+            let frames = self.pump_frames(id, elapsed_ms, real_clock).await;
+            let mut out = self.pump_live_turn(id, elapsed_ms, real_clock).await;
+            out.relaid_out |= frames.relaid_out;
+            out.in_flight += frames.in_flight;
+            out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            return self.frame_requests_wake(id, out);
+        }
+        // A frame tree is one event loop (HTML 8.1.7): one timer queue and
+        // clock for every document in it (the page's lifecycle script shares
+        // them), run from the page's turn alone. Each timer task is its own
+        // evaluation, so its microtasks run before the next task, whichever
+        // document set it; the frames' turns take no timers and do what
+        // their documents' scripts asked of the network and of layout. The
+        // turn's time is the tree's.
+        let started = std::time::Instant::now();
+        // The turn is one presented frame, so it runs one animation-frame round, however many
+        // calls below run its parts (RAF-ONE-ROUND): a frame a late round's callbacks ask for,
+        // due already, is the next turn's, not a second round in a sub-turn or the stop's.
+        self.set_tree_turn(id, true);
+        self.live_timer_cap = 0;
+        let mut frames = self.pump_frames(id, 0, real_clock).await;
+        self.live_timer_cap = 1;
+        let mut out = self.pump_live_turn(id, elapsed_ms, real_clock).await;
+        let mut stopped = false;
+        while out.timers_ran > 0 && out.next_timer_ms == Some(0) {
+            if started.elapsed() >= std::time::Duration::from_millis(LIVE_FRAME_MS) {
+                stopped = true;
+                break;
+            }
+            let turn = self.pump_live_turn(id, 0, real_clock).await;
+            out.timers_ran += turn.timers_ran;
+            out.requests += turn.requests;
+            out.in_flight = turn.in_flight;
+            out.relaid_out |= turn.relaid_out;
+            out.next_timer_ms = turn.next_timer_ms;
+            if turn.timers_ran == 0 {
+                break;
+            }
+        }
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        if stopped {
+            // The turn's frame still comes (#776): the tree's due animation
+            // frame callbacks run once before it returns.
+            if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+                // The callbacks are page script: the W-gate hold and the frame stage totals
+                // charge their time to the script bucket, not to the turn's `other`.
+                let _script = wgate::script_turn();
+                if let Err(e) = bindings.run_animation_round(MAX_LIVE_TIMER_CALLBACKS) {
+                    debug!(error = %e, "frames: the tree's animation round failed");
+                }
+            }
+            out.yielded_for_frame = true;
+        }
+        self.set_tree_turn(id, false);
+        // The frames lay out and send what this turn's tasks wrote and asked.
+        self.live_timer_cap = 0;
+        let after = self.pump_frames(id, 0, real_clock).await;
+        self.live_timer_cap = MAX_LIVE_TIMER_CALLBACKS;
+        merge_live(&mut frames, after);
+        out.relaid_out |= frames.relaid_out;
+        out.in_flight += frames.in_flight;
+        out.next_timer_ms = match (out.next_timer_ms, frames.next_timer_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.frame_requests_wake(id, out)
+    }
+
+    /// ANIM-UPDATE-ORDER (one round a turn): when the turn `elapsed_ms` on will run an animation
+    /// frame, update the animations of `id` and of its frames to that frame's time first, as HTML's
+    /// update-the-rendering does before the animation frame callbacks, so a computed read in a
+    /// callback (or in a task of the turn, whose timeline is that frame's) is the frame's value,
+    /// and the frame's animation events reach script before the callbacks.
+    /// The after-turn settle then has nothing left to draw unless script wrote. Returns the time.
+    fn presample_animations(&mut self, id: EngineViewId, elapsed_ms: u64) -> Option<f64> {
+        let at = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .and_then(|b| b.turn_frame_at(elapsed_ms))?;
+        let mut views = vec![id];
+        if let Some(v) = self.views.get(&id) {
+            views.extend(v.frames.values().map(|f| f.view));
+        }
+        for vid in views {
+            {
+                let Some(view) = self.views.get(&vid) else { continue };
+                let mut anims = view.lay.animations.borrow_mut();
+                if !anims.active() {
+                    continue;
+                }
+                if at > anims.clock_ms {
+                    anims.clock_ms = at;
+                }
+            }
+            // Draw the frame at that time and send its animation and transition events, before
+            // the round (Chrome 148: every event before its frame's rAF callbacks,
+            // `anim_event_order_probe_cft148.json`); what their listeners write is laid out.
+            if let Err(e) = self.settle_animations(vid) {
+                debug!(error = %e, "the turn's animation update failed");
+            }
+        }
+        Some(at)
+    }
+
+    /// Open or close the frame tree's turn on `id`'s timer queue (the tree's one).
+    fn set_tree_turn(&self, id: EngineViewId, open: bool) {
+        if !one_animation_round() {
+            return;
+        }
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.doc.bindings.as_ref()) {
+            if let Err(e) = bindings.set_tree_turn(open) {
+                debug!(error = %e, open, "frames: the tree's turn mark failed");
+            }
+        }
+    }
+
+    /// A frame request the page made during this turn asks for the next
+    /// turn at once (see [`Self::pump_live`]).
+    fn frame_requests_wake(&self, id: EngineViewId, mut out: LivePump) -> LivePump {
+        let asked = self
+            .views
+            .get(&id)
+            .and_then(|v| v.doc.bindings.as_ref())
+            .is_some_and(|bindings| bindings.has_frame_requests());
+        if asked {
+            out.next_timer_ms = Some(0);
+        }
+        out
+    }
+
+    async fn pump_live_turn(&mut self, id: EngineViewId, elapsed_ms: u64, real_clock: bool) -> LivePump {
         debug_assert!(!serving(), "a live turn ran at a load's safe point");
+        // The turn's instant: on the real clock its timers count from here, not from when the
+        // timer slice begins after the turn's own work (CLOCK3 R1).
+        let turn_began = std::time::Instant::now();
+        let tracing = links_trace_on();
+        if tracing {
+            LINKS_TRACE.with(|t| {
+                let mut v = t.get();
+                if v[0].is_none() {
+                    v[0] = Some(turn_began);
+                }
+                t.set(v);
+            });
+        }
         let _hold = wgate::hold("live_turn");
         let mut out = LivePump::default();
         // The window's size as of this turn, laid out once, before the
@@ -6340,23 +7293,24 @@ impl Engine {
             && self
                 .views
                 .get(&id)
-                .is_some_and(|view| view.load_tail.is_none());
+                .is_some_and(|view| view.doc.load_tail.is_none());
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
+        let live_timer_cap = self.live_timer_cap;
         let Some(view) = self.views.get_mut(&id) else {
             return out;
         };
         let _turn = rustkit_js::DiagTurn::enter("live");
         rustkit_js::set_diag_nav(view.nav_id);
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return out;
         };
-        let policy = view.script_policy.clone();
-        let document = view.url.clone();
+        let policy = view.doc.script_policy.clone();
+        let document = view.doc.url.clone();
         let inspector = view.inspector.clone();
-        let live_requests = &mut view.live_requests;
-        let live_modules = &mut view.live_modules;
-        let live_modules_started = &mut view.live_modules_started;
+        let live_requests = &mut view.doc.live_requests;
+        let live_modules = &mut view.doc.live_modules;
+        let live_modules_started = &mut view.doc.live_modules_started;
         // A module supplied this turn can ask for more, or for the network:
         // the next turn is due at once.
         let mut supplied_modules = false;
@@ -6392,14 +7346,28 @@ impl Engine {
         let timer_stopped = if defer_post_load_timers {
             false
         } else {
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    if v[1].is_none() {
+                        v[1] = Some(std::time::Instant::now());
+                    }
+                    t.set(v);
+                });
+            }
             let (timers, timer_stopped) = with_script_js(bindings, || {
                 let _job = rustkit_js::DiagJob::enter("timer");
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let (ran, yielded) = bindings.advance_timers_for_frame(
-                        elapsed_ms,
-                        MAX_LIVE_TIMER_CALLBACKS,
-                        LIVE_FRAME_MS,
-                    )?;
+                    let (ran, yielded) = if real_clock {
+                        bindings.advance_real_timers_for_frame_since(
+                            elapsed_ms,
+                            live_timer_cap,
+                            LIVE_FRAME_MS,
+                            turn_began.elapsed().as_secs_f64() * 1000.0 + LIVE_FRACTION_MS.with(|f| f.get()),
+                        )?
+                    } else {
+                        bindings.advance_timers_for_frame(elapsed_ms, live_timer_cap, LIVE_FRAME_MS)?
+                    };
                     frame_yield.set(yielded);
                     Ok::<_, rustkit_bindings::BindingError>(ran)
                 }))
@@ -6414,15 +7382,27 @@ impl Engine {
                 }
                 Err(_) => threw.push(("timers", ScriptOutcome::EngineFailed(EngineFailure::Panic))),
             }
+            if tracing {
+                LINKS_TRACE.with(|t| {
+                    let mut v = t.get();
+                    v[2] = Some(std::time::Instant::now());
+                    t.set(v);
+                });
+            }
             // What the timers threw or left rejected is theirs in the Inspector.
             inspector_glue::drain_errors(bindings, &view.inspector, "timers");
             timer_stopped
         };
         out.yielded_for_frame = frame_yield.get();
-        // The animation clock is the timer clock as the timers left it, so
-        // the layout below (and the one `settle_animations` makes) reads
-        // the transitions at this turn's time.
-        view.lay.animations.borrow_mut().clock_ms = bindings.clock_now_ms();
+        // The animation clock is the document timeline as the timers left
+        // it (TIMELINE2: the frame's time once this turn's frame ran), so
+        // the layout below (and the one `settle_animations` makes) reads the
+        // transitions at the time script animations read.
+        // ANIM-UPDATE-ORDER: a turn whose animations were updated to its frame's time before its
+        // round keeps that time when the frame's stamp is within a millisecond of it (the stamp
+        // carries the clock's reads), so the settle below does not draw the same frame again.
+        let clock = bindings.animation_clock_ms();
+        view.doc.lay.animations.borrow_mut().clock_ms = turn_animation_clock(clock, PRESAMPLED_FRAME.with(|p| p.get()));
         // Whose script spent the budget: a timer's, or a response handler's
         // below.
         let spent_by_timers = timer_stopped;
@@ -6578,8 +7558,8 @@ impl Engine {
             // `in_flight`. A turn whose JavaScript budget is already spent
             //             only enqueues.
             // The open tail already ran its one script for this turn.
-            if view.load_tail.is_none() {
-                let inserted = view.live_inserted.clone();
+            if view.doc.load_tail.is_none() {
+                let inserted = view.doc.live_inserted.clone();
                 let execute = !script_js_exhausted();
                 let found = script_net::drive_inserted_scripts(
                     bindings,
@@ -6597,8 +7577,8 @@ impl Engine {
                     threw.push(("network", ScriptOutcome::EngineFailed(EngineFailure::Panic)));
                 }
                 for record in found.records {
-                    if view.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
-                        inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+                    if view.doc.script_log.len() < MAX_LIVE_SCRIPT_RECORDS {
+                        inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
                     }
                 }
             }
@@ -6628,12 +7608,17 @@ impl Engine {
         } else {
             bindings.next_timer_delay()
         };
-        view.script_log.extend(stopped);
+        out.next_timer_exact_us = if out.next_timer_ms.is_some_and(|ms| ms > 0) {
+            bindings.next_timer_delay_exact().map(|ms| (ms * 1000.0).ceil() as u64)
+        } else {
+            None
+        };
+        view.doc.script_log.extend(stopped);
         let threw = threw
             .into_iter()
             .chain(reported.into_iter().map(|message| ("timers", ScriptOutcome::Threw(message))));
         for (source, outcome) in threw {
-            if view.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
+            if view.doc.script_log.len() >= MAX_LIVE_SCRIPT_RECORDS {
                 // The log is full; the Inspector's buffer bounds itself (the
                 // page's errors reached it from their reports above).
                 if let ScriptOutcome::EngineFailed(failure) = &outcome {
@@ -6647,7 +7632,7 @@ impl Engine {
                 elapsed_ms: 0,
                 outcome,
             };
-            inspector_glue::log_script(&mut view.script_log, &view.inspector, record);
+            inspector_glue::log_script(&mut view.doc.script_log, &view.inspector, record);
         }
 
         match self.flush_script_dom_writes(id, Some(RelayoutCause::Timer)) {
@@ -6667,7 +7652,7 @@ impl Engine {
         if self
             .views
             .get(&id)
-            .is_some_and(|view| view.lay.animations.borrow().active())
+            .is_some_and(|view| view.lay.animations.borrow().active() || view.media.busy())
         {
             out.next_timer_ms = Some(out.next_timer_ms.map_or(LIVE_FRAME_MS, |ms| ms.min(LIVE_FRAME_MS)));
         }
@@ -6790,8 +7775,21 @@ impl Engine {
                 Err(e) => debug!(?id, error = %e, "Failed to look for images an image listener added"),
             }
         }
+        // MEDIA-AVF: media elements' loading (media.rs), and their players' answers.
+        let media = self.settle_media(id).await;
+        if media.resized {
+            match self.relayout_for(id, RelayoutCause::Other("media metadata")) {
+                Ok(()) => out.relaid_out = true,
+                Err(e) => debug!(?id, error = %e, "relayout after media metadata failed"),
+            }
+        } else if media.new_frames {
+            // A new video frame changes no box: present it with no build (§3.3).
+            if let Err(e) = self.present_video_frame(id) {
+                debug!(?id, error = %e, "video frame present failed");
+            }
+        }
         if let Some(view) = self.views.get(&id) {
-            out.in_flight += view.live_images.len() + view.live_sheets.len();
+            out.in_flight += view.live_images.len() + view.live_sheets.len() + view.live_media.len();
         }
         if out.timers_ran > 0 || out.requests > 0 {
             debug!(?id, ?out, "Live turn");
@@ -7700,6 +8698,8 @@ impl Engine {
         policy: Option<Arc<FetchPolicy>>,
     ) -> Option<ScriptFeed> {
         let document = self.views.get(&id).and_then(|v| v.document.clone())?;
+        // The document's own URL, for what each fetched script's errors may say.
+        let page_url = self.views.get(&id).and_then(|v| v.url.clone());
 
         // Collect in document order.
         enum Body {
@@ -7858,6 +8858,7 @@ impl Engine {
                     }
                     _ => None,
                 };
+                let page_url = page_url.clone();
                 async move {
                     let mut label = label;
                     let external = matches!(entry, Ok((_, Body::External(_))));
@@ -7866,6 +8867,10 @@ impl Engine {
                         _ => None,
                     };
                     let fetch_started = std::time::Instant::now();
+                    // An inline script's errors are the page's; a fetched
+                    // one's are until its response is known to be the
+                    // document's origin all the way.
+                    let mut without_detail = external;
                     let result = match entry {
                         Err(outcome) => Err(outcome),
                         Ok((timing, Body::Inline(text))) => Ok((timing, text)),
@@ -7876,6 +8881,10 @@ impl Engine {
                         // One fetch per module URL (see `module_fetches`).
                         Ok((timing, Body::External(_))) if is_module => match shared_module {
                             Some(shared) => shared.await.map(|(final_url, source)| {
+                                without_detail = match Url::parse(&final_url) {
+                                    Ok(landed) => script_error_detail::without_detail(page_url.as_ref(), requested.iter(), &landed),
+                                    Err(_) => true,
+                                };
                                 label = final_url;
                                 (timing, source)
                             }),
@@ -7894,6 +8903,7 @@ impl Engine {
                                 .await;
                                 match fetched {
                                     Ok(Ok(response)) if response.ok() => {
+                                        without_detail = script_error_detail::of_response(page_url.as_ref(), &response);
                                         let received = guard.map(|g| g.received(&response));
                                         match response.text().await {
                                             Ok(text) => {
@@ -7932,6 +8942,7 @@ impl Engine {
                         kind,
                         fetch: external.then(|| fetch_started.elapsed()),
                         arrived: external.then(std::time::Instant::now),
+                        without_detail,
                     };
                     // A module's source is in: its imports start now. An
                     // external module's imports resolve against the URL it
@@ -8383,7 +9394,7 @@ impl Engine {
                     Some((label, _, _, _, facts)) => facts.cancelled(&inspector, &label),
                     None => {
                         let (label, kind, _) = &feed.entries[position];
-                        ScriptFetched { kind, fetch: None, arrived: None }.cancelled(&inspector, label);
+                        ScriptFetched { kind, fetch: None, arrived: None, without_detail: true }.cancelled(&inspector, label);
                     }
                 }
             }
@@ -8519,10 +9530,9 @@ impl Engine {
                 log.push(record);
                 continue;
             }
-            // Boa cannot be interrupted mid-script, so the budget can only
-            // be enforced between scripts. Boa takes about 1s per MB here,
-            // and more on app bundles: youtube's 10.8 MB bundle ran for 16s+
-            // and hung the capture. A script that big is not started.
+            // A script over MAX_PAGE_SCRIPT_BYTES is not started: Boa's
+            // parse of it alone would take more memory than a page should
+            // (about 85 bytes per source byte at its peak).
             if text.len() > MAX_PAGE_SCRIPT_BYTES {
                 let record = ScriptRecord {
                     source: label,
@@ -8545,6 +9555,12 @@ impl Engine {
                 // page module whose URL merely ends the same way does not.
                 if module_url != label {
                     inspector.alias_script(&module_url, &label);
+                }
+                // An inline module is the page's own code; an external one
+                // is what its fetch found it to be.
+                match (label.starts_with("inline#"), &document_url) {
+                    (true, Some(document)) => bindings.register_script(&module_url, document.as_str(), false),
+                    _ => bindings.register_script(&module_url, &module_url, facts.without_detail),
                 }
                 info!(source = %label, bytes = text.len(), "Running module script");
                 let module_started = std::time::Instant::now();
@@ -8693,12 +9709,16 @@ impl Engine {
                 if let Some(url) = document_url.as_ref() {
                     crate::console_log::alias(inspector.view_id(), &label, url.as_str());
                 }
+                // The page's own code: its `error` events name the document.
+                bindings.register_script(&label, document_url.as_ref().map_or("", |url| url.as_str()), false);
                 None
             } else {
                 external_scripts += 1;
                 let name = format!("script#{external_scripts}");
                 inspector.alias_script(&name, &label);
                 crate::console_log::alias(inspector.view_id(), &name, &label);
+                // What its `error` events may say was decided at its fetch.
+                bindings.register_script(&name, &label, facts.without_detail);
                 Some(name)
             };
             let began = std::time::Instant::now();
@@ -8858,9 +9878,11 @@ impl Engine {
             // `src`): that one gets one more wait of the same length, and
             // no further round, so the window's `load` is at most two
             // budgets behind the scripts whatever the handlers do.
-            let mut round = 0;
-            while source == "event:load" {
-                round += 1;
+            // Only before `load`, at most two rounds (`source` does not change in the loop: the
+            // condition was a `while` on it, which clippy refuses as a loop condition that never
+            // changes).
+            let rounds = if source == "event:load" { 2 } else { 0 };
+            for _round in 1..=rounds {
                 self.note_image_writes_of(id, bindings);
                 if after_load && !leaving {
                     match nav_cancel::unless_cancelled(watch, self.load_images_added_by_scripts(id)).await {
@@ -8894,9 +9916,6 @@ impl Engine {
                     return;
                 }
                 self.refresh_layout_for_script(id, bindings);
-                if round == 2 {
-                    break;
-                }
             }
             info!(%source, "Running page lifecycle step");
             load_phase(source);
@@ -8911,7 +9930,11 @@ impl Engine {
             );
             // Only an escaped error (the loop limit, a panic) is worth a
             // record of its own; a clean step is not a script.
+            // The step's time is recorded once: on its own record when it
+            // has one, else on the first error it reported (SCRIPT-TIME-DUP).
+            let mut step_ms = step_started.elapsed().as_millis() as u64;
             if record.outcome != ScriptOutcome::Ran {
+                step_ms = 0;
                 inspector_glue::log_script(log, &inspector, record);
             }
             if poisoned.get() {
@@ -8947,11 +9970,11 @@ impl Engine {
                 log.push(ScriptRecord {
                     source: source.to_string(),
                     bytes: 0,
-                    elapsed_ms: step_started.elapsed().as_millis() as u64,
+                    elapsed_ms: std::mem::take(&mut step_ms),
                     outcome: ScriptOutcome::Threw(message),
                 });
             }
-            inspector_glue::drain_reports(bindings, &inspector, log, source, step_started.elapsed().as_millis() as u64);
+            inspector_glue::drain_reports(bindings, &inspector, log, source, step_ms);
             // External scripts prepared while the document is still loading
             // do not hold DOMContentLoaded. They do hold `window` `load`
             // and `readyState` `complete`: each runs, and its element hears
@@ -9020,12 +10043,17 @@ impl Engine {
                         bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
                     }))
                 });
-                timers_ms += step_started.elapsed().as_millis() as u64;
+                let slice_ms = step_started.elapsed().as_millis() as u64;
+                // A slice that ends in a record of its own (stopped, threw)
+                // has its time there, not in the errors' (SCRIPT-TIME-DUP).
+                if !(stopped || matches!(caught, Ok(Err(_)) | Err(_))) {
+                    timers_ms += slice_ms;
+                }
                 // A slice the budget stopped is one over-budget record, as a
                 // lifecycle step's is (`run` above), not the interrupt's
                 // RuntimeLimitError. The timers it did not reach stay due.
                 if stopped && !matches!(caught, Err(_)) {
-                    let elapsed_ms = step_started.elapsed().as_millis() as u64;
+                    let elapsed_ms = slice_ms;
                     log_script_stopped("timers", elapsed_ms, take_script_js_overrun());
                     inspector_glue::log_script(
                         log,
@@ -9529,6 +10557,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -9633,6 +10662,9 @@ impl Engine {
 
             let bindings =
                 DomBindings::new(js_runtime).map_err(|e| EngineError::JsError(e.to_string()))?;
+            // A capture (animations disabled for determinism) reads a page clock with no real time in it.
+            bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
@@ -9647,7 +10679,13 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_media_can_play(Some(Box::new(media::can_play_type)));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -9935,6 +10973,10 @@ impl Engine {
         }
         self.scroll_to_loaded_fragment(id);
 
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         // Finish navigation
         let view = self
             .views
@@ -9988,6 +11030,31 @@ impl Engine {
         id: EngineViewId,
         html: &str,
         preset_nav: Option<u64>,
+    ) -> Result<(), EngineError> {
+        self.load_html_doc(id, html, preset_nav, false)
+    }
+
+    /// [`Engine::load_html_as`] for one of the app's own pages shown in a
+    /// web content view (the report page). That document, and no later
+    /// one, gets the internal page's `window.ipc`
+    /// ([`DomBindings::new_internal_page`]); what it posts is read with
+    /// [`Self::drain_view_internal_reads`] and answered with
+    /// [`Self::answer_view_internal_read`]. A URL load never gets it.
+    pub fn load_internal_page_as(
+        &mut self,
+        id: EngineViewId,
+        html: &str,
+        preset_nav: Option<u64>,
+    ) -> Result<(), EngineError> {
+        self.load_html_doc(id, html, preset_nav, true)
+    }
+
+    fn load_html_doc(
+        &mut self,
+        id: EngineViewId,
+        html: &str,
+        preset_nav: Option<u64>,
+        internal_page: bool,
     ) -> Result<(), EngineError> {
         self.begin_view_visit(id, None);
         let _hold = wgate::hold("load_html");
@@ -10047,6 +11114,7 @@ impl Engine {
             .map_err(|e| EngineError::NavigationError(e.to_string()))?;
         // A committed navigation replaces the document; start at the top.
         view.scroll_offset = (0.0, 0.0);
+        view.lay.forget_script_restyle();
 
         let _ = self.event_tx.send(EngineEvent::NavigationCommitted {
             view_id: id,
@@ -10096,10 +11164,14 @@ impl Engine {
             let app_owned = self.views.get(&id).is_some_and(|view| view.app_owned);
             let bindings = if app_owned {
                 DomBindings::new_app_owned(js_runtime)
+            } else if internal_page {
+                DomBindings::new_internal_page(js_runtime)
             } else {
                 DomBindings::new(js_runtime)
             }
             .map_err(|e| EngineError::JsError(e.to_string()))?;
+            bindings.set_deterministic_clock(self.config.deterministic_page_clock);
+            bindings.set_grid_frame_stamps(self.config.grid_frame_stamps);
             bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
             // Script's `matches(':focus')` reads the view's focus as the
             // cascade does (CH2.E22).
@@ -10114,7 +11186,13 @@ impl Engine {
                 SelectorMatcher.node_matches(node, selector, checked)
             }));
             bindings.set_canvas_text_measurer(Some(canvas_paint::text_measurer()));
+            bindings.set_media_can_play(Some(Box::new(media::can_play_type)));
             bindings.set_canvas_image_loader(Some(canvas_paint::image_loader(self.lctx.image_manager.clone(), self.lctx.canvas_svgs.clone())));
+            if self.config.nested_contexts {
+                if let Err(e) = bindings.enable_frames() {
+                    warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -10168,6 +11246,10 @@ impl Engine {
         }
         self.flush_script_dom_writes(id, None)?;
 
+        // A resize observation held for a frame gets that frame now: no turn may follow.
+        if let Err(e) = self.run_held_observation_frame(id) {
+            debug!(?id, ?e, "Held resize observation frame failed");
+        }
         // Finish navigation
         let view = self
             .views
@@ -10320,6 +11402,8 @@ impl Engine {
             info!(source = %label, bytes = text.len(), "Running inline script of an HTML load");
             let record = run(label.clone(), text.len(), &|| {
                 let _ = bindings.set_current_script(Some(node_id));
+                // An inline script of markup the host loaded: the page's own.
+                bindings.register_script(&label, bindings.document_url().as_ref().map_or("", |url| url.as_str()), false);
                 let result = bindings.evaluate_named(&text, &label).map(|_| ()).map_err(strip);
                 let _ = bindings.set_current_script(None);
                 result
@@ -10467,9 +11551,110 @@ impl Engine {
                     .set(only_script && nothing_dirty && pointer_restyle.is_none());
             }
         }
+        // LPF1: script writes that marked their elements for a new style and paint only (no box,
+        // no layout, no subtree or sibling restyle) may build those elements alone.
+        let cooling = self.views.get(&id).is_some_and(|view| {
+            let left = view.lay.script_cooldown.get();
+            // The cooldown's last relayout keeps its tree, for the attempt after it (LPF3: a
+            // `no kept tree` miss followed every cooldown).
+            if left == 1 {
+                view.lay.want_script_unlaid.set(true);
+            }
+            if left > 0 {
+                view.lay.script_cooldown.set(left - 1);
+            }
+            left > 0
+        });
+        // The one trust check (R1): everything that happened in the task is in the set the short
+        // path trusts. The set is from the log, so a mark with no log record made it full
+        // (`unlogged_mark`); a scroll in the task is not in it; and every cause is a script one.
+        let scrolled_in_task = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.lay.scrolled_in_task.replace(false));
+        let mut script_note = "-".to_string();
+        // REG-TRANS-FASTPATH: an animation frame whose registered custom property transitions
+        // took no paint-only frame names the elements that animate; a relayout the animations
+        // alone asked for restyles only those (and what is under them) on the same short path.
+        let animation_roots = self
+            .views
+            .get(&id)
+            .and_then(|view| view.lay.animation_roots.borrow_mut().take())
+            .filter(|_| {
+                !causes.counts.is_empty()
+                    && causes.counts.iter().all(|(kind, _)| kind == "animation")
+                    && causes.mutations.is_empty()
+                    && dirty.as_ref().is_none_or(|d| d.full.is_none() && d.nodes.is_empty())
+                    && !scrolled_in_task
+            });
+        if let (true, Some(roots)) =
+            (script_restyle_enabled() && pointer_restyle.is_none() && !cooling, animation_roots)
+        {
+            if let Some(view) = self.views.get(&id) {
+                view.lay.script_idle.set(0);
+                *view.lay.script_roots.borrow_mut() = Some(roots);
+            }
+        } else if script_restyle_enabled() && pointer_restyle.is_none() && !cooling {
+            match script_restyle_roots(&causes, dirty.as_ref(), scrolled_in_task) {
+                Ok(roots) => {
+                    if let Some(view) = self.views.get(&id) {
+                        view.lay.script_idle.set(0);
+                        *view.lay.script_roots.borrow_mut() = Some(roots);
+                    }
+                }
+                Err(why) => {
+                    script_note = format!("refused:{why}");
+                    // No script paint write in a row of relayouts: the kept tree is let go.
+                    if let Some(view) = self.views.get(&id) {
+                        let idle = view.lay.script_idle.get() + 1;
+                        view.lay.script_idle.set(idle);
+                        if idle >= SCRIPT_RESTYLE_IDLE {
+                            view.lay.want_script_unlaid.set(false);
+                            view.lay.script_unlaid.borrow_mut().take();
+                            // ... and the run of misses has ended (LPF3).
+                            view.lay.script_last_cooldown.set(None);
+                        }
+                    }
+                }
+            }
+        } else if cooling {
+            script_note = "cooling".to_string();
+        }
+        let tried = self.views.get(&id).is_some_and(|view| view.lay.script_roots.borrow().is_some());
+        let retained = self.enter_retained_styles(id, &causes, dirty.as_ref());
+        // PR 3: a relayout whose styles were kept may splice what its writes built into the
+        // kept box tree; every full build keeps its tree for the next.
+        if let Some(view) = self.views.get(&id) {
+            let boxes = retained_styles_mode().keeps_boxes();
+            if boxes {
+                view.lay.want_script_unlaid.set(true);
+            }
+            let trusted = retained && STYLE_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.key.is_some()));
+            *view.lay.splice_roots.borrow_mut() = match (boxes && trusted, dirty.as_ref()) {
+                (true, Some(dirty)) if !dirty.nodes.is_empty() => {
+                    let mut roots: Vec<usize> = dirty.nodes.keys().copied().collect();
+                    roots.sort_unstable();
+                    Some(roots)
+                }
+                _ => None,
+            };
+        }
         let layout_skipped = self.relayout_uncounted(id);
         if let Some(view) = self.views.get(&id) {
+            view.lay.splice_roots.borrow_mut().take();
+        }
+        self.leave_retained_styles(id, retained);
+        let mut script_walked = None;
+        if let Some(view) = self.views.get(&id) {
             view.lay.incremental_skip_build.set(false);
+            view.lay.script_roots.borrow_mut().take();
+            script_walked = view.lay.script_walked.take();
+        }
+        if tried {
+            script_note = match script_walked {
+                Some(walked) => format!("hit:walked={walked}"),
+                None => format!("miss:{}", LAST_RESTYLE_MISS.with(|why| why.borrow().clone()).replace(' ', "_")),
+            };
         }
         let layout_skipped = layout_skipped?;
         // A drop-down whose select left the document, lost the focus or
@@ -10524,7 +11709,7 @@ impl Engine {
             .unwrap_or_default();
         info!(
             ?id,
-            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {}",
+            "relayout cause={} causes={} mutations={} tree_reused={} took_ms={:.1} {} extract_ms={:.1} layout_skipped={} {} script_restyle={}",
             cause,
             causes.counts,
             causes.mutations,
@@ -10533,7 +11718,8 @@ impl Engine {
             stages,
             extract_ms,
             layout_skipped,
-            would
+            would,
+            script_note
         );
         if let Some(view) = self.views.get_mut(&id) {
             view.last_dirty = Some(dirty);
@@ -10546,12 +11732,109 @@ impl Engine {
                 view.relayout_stats.layouts_skipped =
                     view.relayout_stats.layouts_skipped.saturating_add(1);
             }
+            if let Some(walked) = script_walked {
+                view.relayout_stats.script_restyles = view.relayout_stats.script_restyles.saturating_add(1);
+                view.relayout_stats.last_restyle_walked = walked;
+            }
         }
         Ok(())
     }
 
     /// The relayout itself: build, lay out, paint. Returns whether the
     /// layout pass was skipped (the build changed only what is painted).
+    /// TREE-REUSE (a): put the view's retained styles where this relayout's build replays them
+    /// (`STYLE_MEMO`), with every element the script writes reached marked stale. They are kept
+    /// only across a relayout that script writes alone asked for and whose writes the dirty set
+    /// covers (`DirtySet::full` is none), with the same script-set control state; any other
+    /// relayout starts them over (the build records). True when they were put in place, for
+    /// [`Engine::leave_retained_styles`].
+    fn enter_retained_styles(
+        &mut self,
+        id: EngineViewId,
+        causes: &PendingCauses,
+        dirty: Option<&restyle_invalidation::DirtySet>,
+    ) -> bool {
+        let mode = retained_styles_mode();
+        let Some(view) = self.views.get_mut(&id) else {
+            return false;
+        };
+        if mode == RetainedStyles::Off {
+            view.retained_styles = None;
+            return false;
+        }
+        // A load's memo span is armed: its builds use that memo.
+        if STYLE_MEMO.with(|m| m.borrow().is_some()) {
+            return false;
+        }
+        let controls = retained_controls_fingerprint(&view.lay);
+        let mut memo = view
+            .retained_styles
+            .take()
+            .unwrap_or_else(|| StyleMemo::retained(mode.verifies()));
+        memo.verify = mode.verifies();
+        let trusted = memo.key.is_some()
+            && memo.controls == controls
+            && dirty.is_some_and(|d| d.full.is_none())
+            && !causes.counts.is_empty()
+            && causes
+                .counts
+                .iter()
+                .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        // A stretch with no script relayouts: let the styles go, and record none.
+        memo.untrusted_run = if trusted { 0 } else { memo.untrusted_run + 1 };
+        let script_caused = causes
+            .counts
+            .iter()
+            .any(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"));
+        if memo.untrusted_run > RETAINED_IDLE && !script_caused {
+            let run = memo.untrusted_run;
+            let mut idle = StyleMemo::retained(memo.verify);
+            idle.untrusted_run = run;
+            view.retained_styles = Some(idle);
+            return false;
+        }
+        match (trusted, dirty, view.document.clone()) {
+            (true, Some(dirty), Some(document)) => {
+                for (&raw, &bits) in &dirty.nodes {
+                    let Some(node) = document.get_node(rustkit_dom::NodeId::new(raw)) else {
+                        continue;
+                    };
+                    memo.stale.insert(node.id);
+                    if bits & (restyle_invalidation::SUBTREE_STYLE | restyle_invalidation::BOX) != 0 {
+                        let mut under = node.children();
+                        while let Some(child) = under.pop() {
+                            memo.stale.insert(child.id);
+                            under.extend(child.children());
+                        }
+                    }
+                }
+            }
+            _ => {
+                memo.key = None;
+                memo.styles.clear();
+                memo.pseudos.clear();
+                memo.stale.clear();
+            }
+        }
+        memo.controls = controls;
+        STYLE_MEMO.with(|m| *m.borrow_mut() = Some(memo));
+        true
+    }
+
+    /// Keep the styles [`Engine::enter_retained_styles`] put in place for the view's next relayout.
+    fn leave_retained_styles(&mut self, id: EngineViewId, entered: bool) {
+        if !entered {
+            return;
+        }
+        let Some(mut memo) = STYLE_MEMO.with(|m| m.borrow_mut().take()) else {
+            return;
+        };
+        memo.in_build = None;
+        if let Some(view) = self.views.get_mut(&id) {
+            view.retained_styles = Some(memo);
+        }
+    }
+
     fn relayout_uncounted(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
         // This build reads the hovered and pressed chains as they are now.
         let mut restyle_only = false;
@@ -10594,7 +11877,7 @@ impl Engine {
         {
             let _svg = relayout_cause::time_stage(relayout_cause::Stage::Svg);
             self.cache_svg_paint_styles(&document, id, Some((bounds.width as f32, bounds.height as f32)));
-            self.lctx.cache_inline_svgs(&document);
+            self.lctx.cache_inline_svgs(&document, self.views.get(&id).map(|v| &*v.lay));
         }
 
         // Get external stylesheets from view state
@@ -10612,6 +11895,13 @@ impl Engine {
         {
             return Ok(true);
         }
+        // LPF1: script writes that change only paint build only the written elements.
+        let script_roots = self.views.get(&id).and_then(|view| view.lay.script_roots.borrow_mut().take());
+        if let Some(written) = script_roots {
+            if self.repaint_script_restyled(id, &document, &external_stylesheets, (bounds.width, bounds.height), written)? {
+                return Ok(true);
+            }
+        }
 
         let javascript_enabled = self.config.javascript_enabled;
         // INC5 stage 2: the incremental path takes the published tree back
@@ -10622,6 +11912,11 @@ impl Engine {
                 view.layout = None;
             }
         }
+        // LPF1: this build is the one the view publishes, so it is the one kept for script paint
+        // writes (when they asked for it). The guard clears the flag after the build, also if the
+        // build unwinds.
+        let retaining = self.views.get(&id).map(|view| view.lay.clone());
+        let retain = retaining.as_ref().map(|lay| FlagGuard::set(&lay.retain_script_unlaid_now));
         let root_box = self.lctx.lay_out_document(
             self.build_view(id),
             &document,
@@ -10629,6 +11924,7 @@ impl Engine {
             javascript_enabled,
             (bounds.width, bounds.height),
         );
+        drop(retain);
 
         // Debug: log the layout box tree AFTER layout
         fn debug_layout_box(box_: &LayoutBox, depth: usize) {
@@ -10701,12 +11997,12 @@ impl Engine {
         if let Some(layout) = view.layout.as_ref() {
             incremental_layout::adopt(&view.lay, layout);
         }
-        view.laid_with = Some(LaidWith {
-            hover: view.lay.hover_chain.borrow().clone(),
-            active: view.lay.active_chain.borrow().clone(),
-            focused: view.lay.focused_node.get().map(|node| node.raw()),
-            focus_chain: view.lay.focus_chain.borrow().clone(),
-            focus_visible: view.lay.focus_visible.get(),
+        view.doc.laid_with = Some(LaidWith {
+            hover: view.doc.lay.hover_chain.borrow().clone(),
+            active: view.doc.lay.active_chain.borrow().clone(),
+            focused: view.doc.lay.focused_node.get().map(|node| node.raw()),
+            focus_chain: view.doc.lay.focus_chain.borrow().clone(),
+            focus_visible: view.doc.lay.focus_visible.get(),
             size: (bounds.width, bounds.height),
         });
         // Script reads of geometry (getBoundingClientRect, offsetWidth, ...)
@@ -10799,6 +12095,37 @@ impl Engine {
         for mut cmd in dl.commands.drain(..) {
             // A canvas paints what script drew on it (canvas_paint), again
             // only when its recording or its box changed.
+            if let rustkit_layout::DisplayCommand::Image { url, content_box: dest_rect, .. } = &cmd {
+                if let Some(node) = frame_node(url) {
+                    // A frame paints its own display list, clipped to the
+                    // iframe's content box and moved to it.
+                    let frame_list = self
+                        .views
+                        .get(&id)
+                        .and_then(|v| v.frames.get(&node))
+                        .and_then(|f| self.views.get(&f.view))
+                        .and_then(|frame| frame.doc.display_list.clone());
+                    if let Some(list) = frame_list {
+                        expanded.push(rustkit_layout::DisplayCommand::PushClip(*dest_rect));
+                        expanded.push(rustkit_layout::DisplayCommand::PushTransform {
+                            matrix: [1.0, 0.0, 0.0, 1.0, dest_rect.x, dest_rect.y],
+                            origin: (0.0, 0.0),
+                        });
+                        expanded.extend(list.commands.iter().cloned());
+                        expanded.push(rustkit_layout::DisplayCommand::PopTransform);
+                        expanded.push(rustkit_layout::DisplayCommand::PopClip);
+                    }
+                    continue;
+                }
+            }
+            // MEDIA-AVF M1.1: a media element's box with no metadata paints nothing. A
+            // video's (`rustkit-video:`) paints its newest frame once the presenter has
+            // one (step 3); until then the renderer finds no texture and skips it.
+            if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
+                if rustkit_layout::key_has_no_ratio(url) {
+                    continue;
+                }
+            }
             if let rustkit_layout::DisplayCommand::Image { url, .. } = &cmd {
                 if let Some(node) = canvas_paint::canvas_node(url) {
                     if let Some(source) = &canvas_source {
@@ -10894,6 +12221,185 @@ impl Engine {
         // An open `<select>` drop-down paints over the page.
         self.append_select_popup(id, &mut dl);
         dl
+    }
+
+    /// LPF1: a relayout asked for by script writes that marked their elements for a new style
+    /// and paint only (`written`, from the frame's `DirtySet`). As the pointer restyle does, it
+    /// builds no more of the page than those elements, and, when their boxes come out as they were
+    /// built last time but for what is painted, copies the paint onto the laid-out tree and paints
+    /// it again: no full build and no layout. "As they were built last time" is the last full
+    /// build kept before layout (`ViewLayout::script_unlaid`, patched here too): the document no
+    /// longer has the old state to build. Anything else is a miss, named on the relayout line, and
+    /// the full build that follows keeps its tree for the next frame.
+    fn repaint_script_restyled(
+        &mut self,
+        id: EngineViewId,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        size: (u32, u32),
+        written: Vec<usize>,
+    ) -> Result<bool, EngineError> {
+        let miss = |why: &str| {
+            debug!(?id, why, "Script restyle needs a full build");
+            LAST_RESTYLE_MISS.with(|last| *last.borrow_mut() = format!("script: {why}"));
+            Ok(false)
+        };
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        // The full build this relayout falls back to keeps its tree for the next one.
+        view.lay.want_script_unlaid.set(true);
+        let (Some(with), Some(_)) = (view.laid_with.as_ref(), view.layout.as_ref()) else {
+            return miss("no layout");
+        };
+        if with.size != size {
+            return miss("resized");
+        }
+        let Some(mut unlaid) = view.lay.script_unlaid.borrow_mut().take() else {
+            return miss("no kept tree");
+        };
+        // A forced read's tree is not the published one this path patches (TREE-REUSE step (1)).
+        if view.lay.script_unlaid_unpublished.get() {
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+            return miss("the kept tree is a forced read's");
+        }
+        // The topmost written elements, and the elements above them: the build walks down those
+        // and builds only what is under a root.
+        // A miss before the patch below leaves the kept tree as it was: put it back, for a build
+        // that splices into it (PR 3, `RUSTKIT_RETAINED_STYLES=boxes`). A full build replaces it.
+        let RestylePlan { roots, path, pending } = match restyle_plan(document, &written) {
+            Ok(plan) => plan,
+            Err(why) => {
+                *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+                return miss(why);
+            }
+        };
+        let started = std::time::Instant::now();
+        let (found, walked) = {
+            let _build_time = time_stage(Stage::Build);
+            RESTYLE_BUILD.with(|build| {
+                *build.borrow_mut() = Some(RestyleBuild {
+                    path,
+                    roots: roots.iter().copied().collect(),
+                    pending,
+                    found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
+                    walked: 0,
+                })
+            });
+            self.build_layout_for_view(id, document, external_stylesheets);
+            let build = RESTYLE_BUILD.with(|build| build.borrow_mut().take());
+            match build {
+                Some(build) => (build.found, build.walked),
+                None => (HashMap::new(), 0),
+            }
+        };
+        // A build numbers its elements in the order it reaches them (`element_id`): the build of
+        // a few elements numbers them from the start. They take the numbers the full build gave
+        // them, which the laid-out boxes keep.
+        let mut found = found;
+        for root in &roots {
+            if let (Some(fresh), Some(kept)) = (found.get_mut(root), box_of_node(&unlaid, *root)) {
+                adopt_build_ids(fresh, kept);
+            }
+        }
+        // Each root as built now against its box as built last time, and its laid-out box.
+        let Some(view) = self.views.get_mut(&id) else {
+            return Ok(false);
+        };
+        let Some(mut laid) = view.layout.take() else {
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+            return miss("no layout");
+        };
+        let mut boxed = Vec::with_capacity(roots.len());
+        let mut why = None;
+        for root in &roots {
+            let Some(fresh) = found.get(root) else {
+                why = Some("a written element was not reached".to_string());
+                break;
+            };
+            match (box_of_node(&unlaid, *root), fresh.node_id.is_some()) {
+                // No box before or now (`display: none`): nothing is painted.
+                (None, false) => continue,
+                (None, true) | (Some(_), false) => {
+                    why = Some("a box came or went".to_string());
+                    break;
+                }
+                (Some(kept), true) => {
+                    if let Some(needs) = script_restyle_needs_layout(kept, fresh) {
+                        why = Some(needs);
+                        break;
+                    }
+                    if !box_of_node(&laid, *root).is_some_and(|laid| same_shape(laid, fresh)) {
+                        why = Some("layout moved boxes".to_string());
+                        break;
+                    }
+                    boxed.push(*root);
+                }
+            }
+        }
+        if let Some(why) = why {
+            view.layout = Some(laid);
+            *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+            // More than paint changed. A one-off miss sits out nothing: the full build that follows
+            // keeps its tree, and the next paint-only write takes the short path again (LPF3: a
+            // tile coming or going on the Mac's MotionMark cost 60 full-build relayouts and a
+            // `no kept tree` miss after them). Misses in a row sit out 1, 2, 4, ... relayouts, up to
+            // the cap and then at it, keeping no tree until the last of them, so a page whose
+            // writes keep changing layout pays neither an attempt nor a kept copy every frame. A
+            // miss is in a row when no hit (and no idle stretch or navigation) came since the last
+            // one; relayouts the path refused between them do not end the run (R1).
+            let cooldown = view
+                .lay
+                .script_last_cooldown
+                .get()
+                .map_or(0, |last| (last * 2).clamp(1, SCRIPT_RESTYLE_COOLDOWN));
+            view.lay.script_last_cooldown.set(Some(cooldown));
+            view.lay.script_cooldown.set(cooldown);
+            // With the box tree kept (`boxes`), the full build after this miss keeps its tree for
+            // the next relayout's splice whatever the cooldown: letting it go left that splice
+            // `no kept tree`, a full build of the page (BOXES-DIFF).
+            view.lay
+                .want_script_unlaid
+                .set(cooldown == 0 || retained_styles_mode().keeps_boxes());
+            return miss(&why);
+        }
+        {
+            let laid = Rc::make_mut(&mut laid);
+            for root in &boxed {
+                let (Some(_), Some(fresh)) = (box_of_node(&unlaid, *root), found.get(root)) else {
+                    continue;
+                };
+                if let Some(laid) = box_of_node_mut(laid, *root) {
+                    copy_all_paint(laid, fresh);
+                    copy_transform_and_opacity(laid, fresh);
+                }
+                if let Some(kept) = box_of_node_mut(&mut unlaid, *root) {
+                    *kept = fresh.clone();
+                }
+            }
+        }
+        *view.lay.script_unlaid.borrow_mut() = Some(unlaid);
+        view.lay.script_last_cooldown.set(None);
+        laid.forget_hit_overflow();
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.layout = Some(laid);
+        // Script reads of computed style answer from the restyled boxes.
+        if let (Some(bindings), Some(layout)) = (view.bindings.as_ref(), view.layout.as_ref()) {
+            let _snapshot_time = time_stage(Stage::Snapshot);
+            publish_geometry(bindings, layout, root_element_id(view), view.lay.clone());
+        }
+        view.display_list = Some(Arc::new(display_list));
+        view.frame_generation += 1;
+        view.lay.script_walked.set(Some(walked));
+        if let Some(bindings) = self.views.get(&id).and_then(|v| v.bindings.as_ref()) {
+            bindings.set_forced_layout(self.forced_layout_for(id));
+        }
+        self.render(id)?;
+        debug!(?id, roots = roots.len(), walked, ms = started.elapsed().as_secs_f64() * 1000.0, "Script restyle without layout");
+        Ok(true)
     }
 
     /// The short path of a pointer restyle: `true` when the view was
@@ -11087,13 +12593,15 @@ impl Engine {
             // (`button:hover svg path`): the map and the parsed icons of
             // this build's chains, kept by the pre-pass when unchanged.
             self.cache_svg_paint_styles(document, id, Some((size.0 as f32, size.1 as f32)));
-            self.lctx.cache_inline_svgs(document);
+            self.lctx.cache_inline_svgs(document, self.views.get(&id).map(|v| &*v.lay));
             RESTYLE_BUILD.with(|build| {
                 *build.borrow_mut() = Some(RestyleBuild {
                     path: path.clone(),
                     roots: roots.iter().copied().collect(),
                     pending: pending.clone(),
                     found: HashMap::new(),
+                    dropped: Default::default(),
+                    refused: None,
                     walked: 0,
                 })
             });
@@ -11693,6 +13201,11 @@ impl Engine {
         if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
             return miss("a relayout is pending");
         }
+        // A2.2: an svg paint transition re-rasterises its svg, which only a
+        // build does (no frame change carries an svg's raster yet).
+        if view.lay.animations.borrow().svg_moving() {
+            return miss("an svg paint transition runs");
+        }
         let size = match view.headless_bounds {
             Some(b) => (b.width, b.height),
             None => match self.presenter.as_mut().map(|p| p.host_bounds(view.viewhost_id)) {
@@ -11934,6 +13447,185 @@ impl layout_ctx::LayoutCtx {
         root_box
     }
 
+    /// TREE-REUSE (PR 3): the box tree of `document` built from the tree the view's last build kept
+    /// (`script_unlaid`) by building only the elements in `written` (the relayout's dirty set, its
+    /// topmost ones as roots) and putting each where its old box was. A box that came is inserted
+    /// among its parent's boxes and one that went is removed, only where the parent's children
+    /// are all element boxes at block level, so no anonymous box would have to change. `None`
+    /// (the caller builds in full) for anything else; the kept tree is used up either way.
+    fn spliced_build(
+        &self,
+        lay: &layout_ctx::ViewLayout,
+        document: &Document,
+        external_stylesheets: &[Stylesheet],
+        javascript_enabled: bool,
+        written: &[usize],
+    ) -> Option<LayoutBox> {
+        let miss = |why: &str| {
+            debug!(why, "Kept box tree: a full build");
+            LAST_SPLICE_MISS.with(|last| *last.borrow_mut() = why.to_string());
+            None
+        };
+        let Some(mut tree) = lay.script_unlaid.borrow_mut().take() else {
+            return miss("no kept tree");
+        };
+        // A running transition or animation moves boxes no write reached: their kept boxes hold
+        // last frame's values (#1246 R1 item 1, carried into the splice).
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
+            return miss("animations running");
+        }
+        // One that moved while the kept tree was built may have moved on or ended since, in frames
+        // no build saw (a paint-only animation frame patches the laid-out tree, not the kept one):
+        // the boxes no write reaches would keep its value (#1247 R1 item 2).
+        if lay.script_unlaid_animated.get() {
+            return miss("the kept tree was built while animations ran");
+        }
+        // `running()` covers CSS transitions and animations only. A script animation is applied
+        // from the view's script layer, and can start, move or fill in frames no build saw: any
+        // write to that layer since the kept tree was built refuses it (#1247 delta R1).
+        if lay.animated.borrow().generation != lay.script_unlaid_generation.get() {
+            return miss("script animations moved since the kept tree was built");
+        }
+        // An image that arrived since the kept tree was built: its kept box has the natural size of
+        // before (BOXES-DIFF receipt: 150x150 spliced, 184x184 built, one live capture of two).
+        if self.image_generation() != lay.script_unlaid_images.get() {
+            return miss("an image arrived since the kept tree was built");
+        }
+        let plan = match restyle_plan(document, written) {
+            Ok(plan) => plan,
+            Err(why) => return miss(why),
+        };
+        for root in &plan.roots {
+            let is_element = document
+                .get_node(rustkit_dom::NodeId::new(*root))
+                .is_some_and(|n| matches!(n.node_type, NodeType::Element { .. }));
+            if !is_element {
+                return miss("a written node is not an element");
+            }
+        }
+        RESTYLE_BUILD.with(|build| {
+            *build.borrow_mut() = Some(RestyleBuild {
+                path: plan.path,
+                roots: plan.roots.iter().copied().collect(),
+                pending: plan.pending,
+                found: HashMap::new(),
+                dropped: Default::default(),
+                refused: None,
+                walked: 0,
+            })
+        });
+        self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+        let Some(build) = RESTYLE_BUILD.with(|build| build.borrow_mut().take()) else {
+            return miss("no restyle build");
+        };
+        if let Some(why) = build.refused {
+            return miss(why);
+        }
+        let mut found = build.found;
+        // A root whose box its parent's build drops has no box in a full build: it splices as one
+        // whose box went (BOXES-DIFF, board report.html's emptied `#error-container`).
+        for root in &build.dropped {
+            found.remove(root);
+        }
+        let mut next_id = max_element_id(&tree) + 1;
+        let block_level = |b: &LayoutBox| {
+            !b.style.display.is_inline_level() && b.style.display != rustkit_css::Display::Contents
+        };
+        let list_item = |b: &LayoutBox| b.style.display_modifier == rustkit_css::DisplayModifier::ListItem;
+        // A parent whose boxes are its element children at block level, in a block box, none of
+        // them a list item: a list item that comes or goes renumbers the ones after it, which no
+        // write reached (#1247 R1 item 1).
+        //
+        // CSS counters (`counter-reset`/`-increment`/`-set`, `counter()` in `content`) number
+        // later boxes the same way, and anywhere in the document. RustKit computes and draws none
+        // of them yet (`rustkit_css::content::content_string`); when it does, a box that comes or
+        // goes, or a written box whose counter properties changed, must refuse the splice the same
+        // way when the kept tree uses counters.
+        let plain_parent = |b: &LayoutBox| {
+            matches!(b.box_type, BoxType::Block)
+                && block_level(b)
+                && b.children.iter().all(|c| c.node_id.is_some() && block_level(c) && !list_item(c))
+        };
+        for root in &plan.roots {
+            let fresh = found.remove(root).filter(|f| f.node_id.is_some());
+            if fresh.as_ref().is_some_and(|f| f.style.display == rustkit_css::Display::Contents) {
+                return miss("display: contents");
+            }
+            let had = box_of_node(&tree, *root).is_some();
+            match (had, fresh) {
+                (false, None) => {}
+                (true, Some(mut fresh)) => {
+                    let Some(kept) = box_of_node_mut(&mut tree, *root) else {
+                        return miss("no kept box");
+                    };
+                    if kept.style.display.is_inline_level() != fresh.style.display.is_inline_level()
+                        || kept.style.display == rustkit_css::Display::Contents
+                    {
+                        return miss("a box changed level");
+                    }
+                    if list_item(kept) != list_item(&fresh) {
+                        return miss("a box became or stopped being a list item");
+                    }
+                    number_spliced_boxes(&mut fresh, Some(kept), &mut next_id);
+                    *kept = fresh;
+                }
+                (true, None) => {
+                    let Some(parent) = document.get_node(rustkit_dom::NodeId::new(*root)).and_then(|n| n.parent()) else {
+                        return miss("no parent");
+                    };
+                    let Some(parent_box) = box_of_node_mut(&mut tree, parent.id.raw()) else {
+                        return miss("no parent box");
+                    };
+                    if !plain_parent(parent_box) {
+                        return miss("a box went from a parent with anonymous or inline boxes");
+                    }
+                    let Some(at) = parent_box.children.iter().position(|c| c.node_id == Some(*root)) else {
+                        return miss("a box went from under another box");
+                    };
+                    parent_box.children.remove(at);
+                }
+                (false, Some(mut fresh)) => {
+                    let Some(node) = document.get_node(rustkit_dom::NodeId::new(*root)) else {
+                        return miss("no node");
+                    };
+                    let Some(parent) = node.parent() else {
+                        return miss("no parent");
+                    };
+                    if !block_level(&fresh) {
+                        return miss("an inline box came");
+                    }
+                    if list_item(&fresh) {
+                        return miss("a list item came");
+                    }
+                    // After the box of the nearest earlier sibling that has one.
+                    let siblings = parent.children();
+                    let before: Vec<usize> = siblings
+                        .iter()
+                        .take_while(|c| c.id.raw() != *root)
+                        .map(|c| c.id.raw())
+                        .collect();
+                    let Some(parent_box) = box_of_node_mut(&mut tree, parent.id.raw()) else {
+                        return miss("no parent box");
+                    };
+                    if !plain_parent(parent_box) {
+                        return miss("a box came into a parent with anonymous or inline boxes");
+                    }
+                    let at = before
+                        .iter()
+                        .rev()
+                        .find_map(|raw| parent_box.children.iter().position(|c| c.node_id == Some(*raw)))
+                        .map_or(0, |i| i + 1);
+                    number_spliced_boxes(&mut fresh, None, &mut next_id);
+                    parent_box.children.insert(at, fresh);
+                }
+            }
+        }
+        number_in_document_order(&mut tree);
+        #[cfg(test)]
+        SPLICES.with(|c| c.set(c.get() + 1));
+        Some(tree)
+    }
+
     /// One build and layout of `document` (`lay_out_document`).
     fn lay_out_document_pass(
         &self,
@@ -11946,13 +13638,85 @@ impl layout_ctx::LayoutCtx {
     ) -> LayoutBox {
         let lay = building.lay.clone();
         // Build layout tree from DOM with tracing
+        // PR 3: the relayout's own build may build only what its script writes reached and splice
+        // it into the tree the last build kept.
+        let splice = lay
+            .as_ref()
+            .filter(|lay| lay.retain_script_unlaid_now.get())
+            .and_then(|lay| lay.splice_roots.borrow_mut().take());
         let root_box = {
             let _build_span = tracing::info_span!("build_layout_tree").entered();
             let _build_time = time_stage(Stage::Build);
             self.with_building(building, || {
-                self.build_layout_from_document(document, external_stylesheets, javascript_enabled)
+                let spliced = match (splice, lay.as_ref()) {
+                    (Some(written), Some(lay)) => {
+                        self.spliced_build(lay, document, external_stylesheets, javascript_enabled, &written)
+                    }
+                    _ => None,
+                };
+                // BOXES-DIFF: with the box tree kept, a full build numbers its elements as a splice
+                // does (`number_in_document_order`: in tree order, one number per element with a
+                // box). The build itself numbers each element's box as it builds it, also boxes a
+                // parent then drops (an empty block, a `display: contents` element), so its numbers
+                // have gaps a splice cannot know of: the same element read 4 spliced and 5 built,
+                // and what compares numbers between builds saw a different number for one element.
+                let full_build = || {
+                    let mut tree = self.build_layout_from_document(document, external_stylesheets, javascript_enabled);
+                    if retained_styles_mode().keeps_boxes() {
+                        number_in_document_order(&mut tree);
+                    }
+                    tree
+                };
+                match spliced {
+                    Some(spliced) if retained_styles_mode() == RetainedStyles::BoxesVerify => {
+                        // What the animation state's sweep would drop if the build ended with the
+                        // splice, as `with_building` decides it (#1257 delta R1): the comparison
+                        // build below visits every element, so the real sweep never shows it.
+                        let would_sweep = lay.as_ref().map_or_else(Vec::new, |lay| {
+                            lay.animations.borrow().would_sweep(layout_ctx::build_was_partial(false))
+                        });
+                        let full = full_build();
+                        let note_difference = |difference: String| {
+                            let total = SPLICE_DIFFERENCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            tracing::error!(%difference, total, "Kept box tree: the splice differs from a full build");
+                            #[cfg(test)]
+                            SPLICE_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        };
+                        if let Some(difference) = first_box_difference(&spliced, &full, &mut Vec::new()) {
+                            note_difference(difference);
+                        }
+                        // Before-change values the splice's sweep drops of elements that are
+                        // still there (the full build visited them): their next style change
+                        // would start no transition.
+                        let lost = lay.as_ref().map_or(0, |lay| {
+                            let animations = lay.animations.borrow();
+                            would_sweep.iter().filter(|node| animations.visited_this_build(**node)).count()
+                        });
+                        if lost > 0 {
+                            note_difference(format!(
+                                "the splice's sweep drops the before-change values of {lost} elements still styled"
+                            ));
+                        }
+                        full
+                    }
+                    Some(spliced) => spliced,
+                    None => full_build(),
+                }
             })
         };
+        // LPF1: the tree as built, before layout writes into it, for script paint writes to
+        // compare their elements with; dropped when no such writes asked for it.
+        if let Some(lay) = lay.as_ref() {
+            // TREE-REUSE step (1): or a forced layout's own build, in `boxes` mode.
+            let forced = lay.keep_forced_tree_now.get();
+            let keep = lay.want_script_unlaid.get() && (lay.retain_script_unlaid_now.get() || forced);
+            *lay.script_unlaid.borrow_mut() = keep.then(|| root_box.clone());
+            lay.script_unlaid_unpublished.set(keep && forced);
+            lay.script_unlaid_animated
+                .set(keep && (lay.animations.borrow().running() || lay.animations.borrow().svg_moving()));
+            lay.script_unlaid_generation.set(lay.animated.borrow().generation);
+            lay.script_unlaid_images.set(self.image_generation());
+        }
 
         // Layout computation
         let mut root_box = root_box;
@@ -12196,7 +13960,9 @@ impl layout_ctx::LayoutCtx {
     /// INC5 stage 2: the last layout again, without a build, when the view
     /// keeps it under the same key and nothing animates.
     fn skipped_build(&self, lay: &Rc<layout_ctx::ViewLayout>, bounds: (u32, u32)) -> Option<LayoutBox> {
-        if lay.animations.borrow().running() {
+        // A2.2: a moving svg paint is in the svg's raster key, which the
+        // kept layout holds as of its build.
+        if lay.animations.borrow().running() || lay.animations.borrow().svg_moving() {
             return None;
         }
         let mut slot = lay.incremental_layout.borrow_mut();
@@ -12296,6 +14062,7 @@ impl layout_ctx::LayoutCtx {
     ) -> LayoutBox {
         // Read by `with_building` once this build is over.
         relayout_cause::set_last_build_reused_tree(false);
+        relayout_cause::set_last_build_partial(RESTYLE_BUILD.with(|build| build.borrow().is_some()));
         // A full build replaces the view's styles of boxless elements
         // (`display: contents`, the root). A restyle keeps the ones it does
         // not walk.
@@ -12371,8 +14138,14 @@ impl layout_ctx::LayoutCtx {
         };
         // `document.adoptedStyleSheets` follows the document's `<style>`
         // and `<link>` sheets. The document node holds the text.
-        let adopted: Vec<String> =
+        let mut adopted: Vec<String> =
             document.root().adopted_styles().into_iter().filter(|text| !text.is_empty()).collect();
+        // `CSS.registerProperty()` registrations, as `@property` text after
+        // every sheet (TRANS-F).
+        let registered = document.registered_property_rules();
+        if !registered.is_empty() {
+            adopted.push(registered);
+        }
         // What the prepared sheets are made of, by identity (see
         // `SheetsFingerprint`); `None` when the build cannot vouch for it.
         let fingerprint = self.sheets_fingerprint(&inline_sheets, external_stylesheets, &adopted, viewport, &order);
@@ -12433,6 +14206,7 @@ impl layout_ctx::LayoutCtx {
                     && stylesheets
                         .iter()
                         .any(|s| s.rules.iter().any(container_query::floats_first_letter));
+                let registry = registered_props::registry_for(&stylesheets);
                 let prepared = PreparedSheets {
                     from: fingerprint.clone(),
                     // The document tree's sheets. Shared, so the build can
@@ -12440,6 +14214,7 @@ impl layout_ctx::LayoutCtx {
                     // (`shadow_tree`); the rules stay where they are, so
                     // the rule index still recognizes them.
                     sheets: Rc::new(stylesheets),
+                    registry,
                     css_vars,
                     any_container_rule,
                     container_first_letter,
@@ -12454,6 +14229,7 @@ impl layout_ctx::LayoutCtx {
         drop(inline_sheets);
         let stylesheets = prepared.sheets;
         let css_vars = prepared.css_vars;
+        let _registry = registered_props::RegistryScope::install(prepared.registry.clone());
         let _tree_indexes = TreeRuleIndexScope::install();
         let _tree_scopes = shadow_tree::BuildScope::install(
             document,
@@ -12491,7 +14267,8 @@ impl layout_ctx::LayoutCtx {
         // uninstalled) when the build returns. A replaying build takes its
         // styles from the memo and skips building it; a node the recording
         // missed still cascades correctly, by the unindexed scan.
-        let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) {
+        let retained_replay = STYLE_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.retained));
+        let _rule_index = match style_memo.as_ref().is_some_and(StyleMemoBuild::replays) && !retained_replay {
             true => None,
             false => {
                 let index = self.shared_rule_index(&stylesheets, fingerprint);
@@ -12670,6 +14447,7 @@ impl layout_ctx::LayoutCtx {
                 &element_ids,
                 false,
             );
+            self.with_building_lay(|lay| lay.last_build_elements.set(element_ids.get() as u32));
             // CSS 2.1 §14.2: the CANVAS background comes from the html
             // element, or from body when html's is transparent. The root box
             // paints it across the whole viewport (see the post-layout
@@ -12781,7 +14559,12 @@ impl layout_ctx::LayoutCtx {
     /// value is one frame's: a tree kept now would replay that frame, and
     /// a kept tree taken now would skip the frame due.
     fn building_view_animates(&self) -> bool {
-        self.with_building_lay(|lay| lay.animations.borrow().running()).unwrap_or(false)
+        // A2.2: so is an svg paint transition (the svg's raster key moves).
+        self.with_building_lay(|lay| {
+            let anims = lay.animations.borrow();
+            anims.running() || anims.svg_moving()
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -13059,6 +14842,27 @@ impl Engine {
         segment
     }
 
+    /// Whether a parent's build keeps `child` (already reboxed if a culled inline) among its boxes:
+    /// blocks with children, visible styling or a part in layout while empty; inlines with content
+    /// or visible styling; text, images, form controls and line breaks always. A full build and a
+    /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
+    fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
+        match child.box_type {
+            BoxType::Block | BoxType::AnonymousBlock => {
+                !child.children.is_empty()
+                    || Engine::has_visible_styling(&child.style)
+                    || Engine::empty_block_affects_layout(child, parent_style)
+            }
+            BoxType::Inline => {
+                Engine::has_content_children(child) || Engine::has_visible_styling(&child.style)
+            }
+            BoxType::Text(_)
+            | BoxType::Image { .. }
+            | BoxType::FormControl(_)
+            | BoxType::LineBreak => true,
+        }
+    }
+
     /// Attach element identity so the geometry oracle can join this box to
     /// Chrome's selector-keyed rects.
     ///
@@ -13274,6 +15078,8 @@ impl layout_ctx::LayoutCtx {
                     // Return an empty block for hidden elements
                     return LayoutBox::new(BoxType::Block, ComputedStyle::new());
                 }
+                #[cfg(test)]
+                BUILT_ELEMENTS.with(|c| c.set(c.get() + 1));
 
                 // Rules of other trees that reach this element: its shadow
                 // tree's `:host` rules, its slot's `::slotted` rules.
@@ -13281,7 +15087,7 @@ impl layout_ctx::LayoutCtx {
                     shadow_tree::OwnRules::install(node, &tag_lower, attributes, ancestors, sib);
                 // Create computed style based on element, attributes, and stylesheets
                 let (mut style, share_id) = style_share_tracked(|| {
-                    memoized_style(node.id, || {
+                    memoized_element_style(node.id, node.parent().map(|p| p.id), || {
                         self.compute_style_for_element(
                             tag_name,
                             attributes,
@@ -13298,7 +15104,40 @@ impl layout_ctx::LayoutCtx {
                 // Transitions: start what this cascade's changes call for
                 // and overlay the running ones (after the memo, so the
                 // memo keeps the cascade's own result).
-                self.animate_style(node.id.raw(), &mut style, stylesheets);
+                let may_animate = self.animate_style(node.id.raw(), &mut style, stylesheets);
+                // TRANS-F: a registered custom property moves. What reads
+                // it (`var()` in this element's own declarations) is
+                // cascaded again with the moving values; what the
+                // animations set over the cascade is carried across.
+                if let Some(values) = self.take_custom_overlay(node.id.raw()) {
+                    let cascaded = self.cascaded_style(node.id.raw());
+                    let _override = registered_props::OverrideScope::install(values);
+                    let own_rules =
+                        shadow_tree::OwnRules::install(node, &tag_lower, attributes, ancestors, sib);
+                    let mut fresh = self.compute_style_for_element(
+                        tag_name,
+                        attributes,
+                        stylesheets,
+                        css_vars,
+                        ancestors,
+                        siblings_before,
+                        sib,
+                        parent_style,
+                    );
+                    drop(own_rules);
+                    if let Some(cascaded) = cascaded {
+                        animations::carry_animated(&cascaded, &style, &mut fresh);
+                    }
+                    fresh.custom_properties = style.custom_properties.clone();
+                    *style = fresh;
+                }
+                // Its memo entry is the bare cascade, and transitions and animations are applied
+                // after it: an element that animates, or may (it names an animation or a
+                // transition), hands its children values its entry does not show. A retained
+                // build treats it as changed, so they cascade (#1246 R1 item 1).
+                if may_animate {
+                    note_retained_animating(node.id);
+                }
 
                 // CSS computed-value resolution: font-size absolutizes at
                 // style time — em/% against the PARENT's computed font-size,
@@ -13499,15 +15338,12 @@ impl layout_ctx::LayoutCtx {
                     // because the flow pass has no containing-block height
                     // for it and nothing re-anchored it (HT27 R3).
                     //
-                    // Only a POSITIONED image takes the transfer: a static
-                    // one keeps the box exactly as before, float and clear
-                    // included (a floated `<img>` still rides the line; that
-                    // is a separate item, not touched here), so nothing
-                    // moves on a page without a positioned image.
+                    // REPLACED-FLOAT-AVOID: a static image takes its float and
+                    // clear too. A floated `<img>` rode the line as an inline
+                    // box, and a cleared block one sat beside the float it
+                    // clears (Chrome 148 pins in `replaced_float_avoid_tests`).
                     let positioning = Engine::positioning_of(&b.style);
-                    if positioning.position != Position::Static {
-                        Engine::apply_positioning(&mut b, positioning);
-                    }
+                    Engine::apply_positioning(&mut b, positioning);
                     Engine::attach_identity(
                         &mut b,
                         selector_path,
@@ -13528,6 +15364,79 @@ impl layout_ctx::LayoutCtx {
                 // axis gives the other through the bitmap's ratio. What
                 // script draws on its 2D context replaces the image command
                 // in the display list (canvas_paint).
+                // <iframe> (nested browsing contexts, Stage 3): a replaced
+                // element, 300x150 without width/height (which are
+                // presentational hints here), whose paint is its frame's
+                // display list (`frame_key`).
+                if tag_lower == "iframe" && self.nested_contexts.get() {
+                    let attr = |name: &str| {
+                        attributes
+                            .get(name)
+                            .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                            .filter(|v| *v >= 0.0)
+                    };
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url: frame_key(node.id.raw()),
+                            natural_width: attr("width").unwrap_or(300.0),
+                            natural_height: attr("height").unwrap_or(150.0),
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
+                // MEDIA-AVF M1.1: a `<video>` (and an `<audio controls>`) is a replaced
+                // box, its fallback children never laid out. With no media loaded it is
+                // 300x150 (audio controls 300x54) with no natural ratio
+                // (`rustkit_layout::NO_RATIO_KEY_PREFIX`). `width=` / `height=` are
+                // presentational hints, as on `<img>`. It paints nothing yet.
+                if tag_lower == "video" || (tag_lower == "audio" && attributes.contains_key("controls")) {
+                    let hint = |name: &str| attributes.get(name).and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v >= 0.0);
+                    let mut style = style.clone();
+                    if let Some(w) = hint("width") {
+                        if matches!(style.width, rustkit_css::Length::Auto) && !style.size_declared[0] {
+                            style.width = rustkit_css::Length::Px(w);
+                        }
+                    }
+                    if let Some(h) = hint("height") {
+                        if matches!(style.height, rustkit_css::Length::Auto) && !style.size_declared[1] {
+                            style.height = rustkit_css::Length::Px(h);
+                        }
+                    }
+                    // MEDIA-AVF M1.2: once a video's metadata is in, its box takes the
+                    // video's size and ratio (Chrome 148: `width=100` on a 64x48 video
+                    // is 100x75), under its key `rustkit-video:<node>@<player>` (step 3:
+                    // the player's frames paint under it).
+                    let video_size = (tag_lower == "video")
+                        .then(|| self.with_building_lay(|lay| lay.media_sizes.borrow().get(&node.id.raw()).cloned()))
+                        .flatten()
+                        .flatten();
+                    let (url, natural_width, natural_height) = match video_size {
+                        Some((w, h, key)) => (key, w as f32, h as f32),
+                        None => (
+                            format!("{}{}:{}", rustkit_layout::NO_RATIO_KEY_PREFIX, tag_lower, node.id.raw()),
+                            300.0,
+                            if tag_lower == "video" { 150.0 } else { 54.0 },
+                        ),
+                    };
+                    let mut b = LayoutBox::new(
+                        BoxType::Image {
+                            url,
+                            natural_width,
+                            natural_height,
+                        },
+                        style.clone(),
+                    );
+                    Engine::transfer_positioning(&mut b, &style);
+                    Engine::attach_identity(&mut b, selector_path, attributes, &tag_lower, element_ids);
+                    b.node_id = Some(node.id.raw());
+                    return b;
+                }
+
                 if tag_lower == "canvas" {
                     let (natural_width, natural_height) =
                         canvas_paint::bitmap_size(attributes.get("width"), attributes.get("height"));
@@ -14172,6 +16081,7 @@ impl layout_ctx::LayoutCtx {
                 // line-height, blockification) was a function of the style
                 // and the parent's, so `share_id` still names it.
                 let share_parent = StyleShareParent::enter(children_parent_style, share_id);
+                let retain_parent = RetainParent::enter(node.id);
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
@@ -14268,8 +16178,49 @@ impl layout_ctx::LayoutCtx {
                     match restyle {
                         RestyleChild::Build => {}
                         RestyleChild::Root => {
+                            // BOXES-DIFF: the root's box as this build keeps it below, so a
+                            // splice puts in what a full build has: a culled inline reboxed,
+                            // and none where the box is dropped (an empty block with nothing
+                            // visible about it, hidden `<details>` content).
+                            let mut child_box = child_box;
+                            let contents =
+                                child_box.style.display == rustkit_css::Display::Contents;
+                            if !contents {
+                                Engine::rebox_culled_inline(&mut child_box);
+                            }
+                            let shown = !closed_details || details_summary == Some(child_index);
+                            let kept = contents
+                                || (shown && Engine::parent_keeps(&child_box, &layout_box.style));
+                            let refused = if is_details {
+                                Some("a written element in a <details>")
+                            } else if !kept
+                                && matches!(child_box.box_type, BoxType::Inline)
+                                && child_box.children.iter().any(|c| {
+                                    matches!(
+                                        c.position,
+                                        rustkit_layout::Position::Absolute
+                                            | rustkit_layout::Position::Fixed
+                                    )
+                                })
+                            {
+                                Some("a dropped inline keeps its out-of-flow boxes")
+                            } else {
+                                None
+                            };
+                            // A box the parent's build drops (or a `display: contents` one) is
+                            // still a styled element: noted for `getComputedStyle` as a full build
+                            // notes it below, or script read `display: none` after the splice.
+                            if contents || !kept {
+                                self.note_boxless_style(&child_box, Some(&layout_box.style));
+                            }
                             RESTYLE_BUILD.with(|build| {
                                 if let Some(build) = build.borrow_mut().as_mut() {
+                                    if !kept {
+                                        build.dropped.insert(child.id.raw());
+                                    }
+                                    if refused.is_some() {
+                                        build.refused = refused;
+                                    }
                                     build.found.insert(child.id.raw(), child_box);
                                 }
                             });
@@ -14322,25 +16273,7 @@ impl layout_ctx::LayoutCtx {
                     Engine::rebox_culled_inline(&mut child_box);
 
                     // Determine if box should be included in layout tree
-                    let should_include = match child_box.box_type {
-                        BoxType::Block | BoxType::AnonymousBlock => {
-                            // Include blocks if they have children, OR have visible styling,
-                            // OR still take part in layout while empty.
-                            !child_box.children.is_empty()
-                                || Engine::has_visible_styling(&child_box.style)
-                                || Engine::empty_block_affects_layout(&child_box, &layout_box.style)
-                        }
-                        BoxType::Inline => {
-                            // Include inline boxes if they have content children (text, images, form controls)
-                            // or have visible styling (padding, border, background)
-                            Engine::has_content_children(&child_box)
-                                || Engine::has_visible_styling(&child_box.style)
-                        }
-                        BoxType::Text(_)
-                        | BoxType::Image { .. }
-                        | BoxType::FormControl(_)
-                        | BoxType::LineBreak => true,
-                    };
+                    let should_include = Engine::parent_keeps(&child_box, &layout_box.style);
 
                     if should_include && shown {
                         let into = if is_details && details_summary == Some(child_index) {
@@ -14384,6 +16317,7 @@ impl layout_ctx::LayoutCtx {
                 }
                 drop(table_hints);
                 drop(share_chain);
+                drop(retain_parent);
                 drop(share_parent);
                 drop(slot_scope);
                 drop(host_scope);
@@ -15085,6 +17019,17 @@ impl layout_ctx::LayoutCtx {
             }
         }
         let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
+        let registry = registered_props::current();
+        let vars = match registry.as_deref() {
+            Some(registry) => registered_props::fix_up(
+                Some(registry),
+                vars,
+                &inherited_vars,
+                &declared_vars,
+                parent.is_none(),
+            ),
+            None => vars,
+        };
 
         // Apply matching rules: normal declarations, then `!important` ones
         // (CSS Cascade 4 §6.1), specificity order within each.
@@ -15172,6 +17117,21 @@ impl layout_ctx::LayoutCtx {
 
         pseudo_style.settle_animation_opacity(stylesheets);
 
+        let vars = match registry.as_deref() {
+            Some(registry) => {
+                let parent_px = parent
+                    .map(|p| registered_props::font_px(&p.font_size, 16.0))
+                    .unwrap_or(16.0);
+                registered_props::compute_own(
+                    Some(registry),
+                    vars,
+                    &declared_vars,
+                    registered_props::font_px(&pseudo_style.font_size, parent_px),
+                    self.building_viewport(),
+                )
+            }
+            None => vars,
+        };
         pseudo_style.custom_properties = vars;
 
         // Without `content` there is no box, so there is nothing to keep:
@@ -15243,6 +17203,8 @@ impl layout_ctx::LayoutCtx {
         sib: SiblingContext,
         parent_style: Option<&ComputedStyle>,
     ) -> ComputedStyle {
+        #[cfg(test)]
+        CASCADES.with(|c| c.set(c.get() + 1));
         let _ancestor_filter = AncestorFilterScope::install(ancestors);
         let _ua_control_border = UaControlBorderScope::enter(tag_name);
         let _border_style_declared = BorderStyleDeclaredScope::enter(tag_name);
@@ -15640,10 +17602,13 @@ impl layout_ctx::LayoutCtx {
                 style.display = rustkit_css::Display::Block;
                 style.margin_left = rustkit_css::Length::Px(2.0);
                 style.margin_right = rustkit_css::Length::Px(2.0);
-                style.padding_top = rustkit_css::Length::Px(8.0); // 0.35em
-                style.padding_bottom = rustkit_css::Length::Px(10.0); // 0.625em
-                style.padding_left = rustkit_css::Length::Px(12.0); // 0.75em
-                style.padding_right = rustkit_css::Length::Px(12.0);
+                // Chrome's html.css: 0.35em 0.75em 0.625em, of the fieldset's own
+                // font size (5.6px, not 8, at 16px: row FORM-CONTROL-FLOAT-AVOID's
+                // UA-style case).
+                style.padding_top = rustkit_css::Length::Em(0.35);
+                style.padding_bottom = rustkit_css::Length::Em(0.625);
+                style.padding_left = rustkit_css::Length::Em(0.75);
+                style.padding_right = rustkit_css::Length::Em(0.75);
                 style.border_top_width = rustkit_css::Length::Px(2.0);
                 style.border_right_width = rustkit_css::Length::Px(2.0);
                 style.border_bottom_width = rustkit_css::Length::Px(2.0);
@@ -15716,8 +17681,18 @@ impl layout_ctx::LayoutCtx {
             "img" => {
                 style.display = rustkit_css::Display::Inline;
             }
-            "video" | "audio" => {
+            // MEDIA-AVF M1.1 (Chrome 148's UA sheet): `video { object-fit: contain }`,
+            // and an `<audio>` without `controls` is not displayed.
+            "video" => {
                 style.display = rustkit_css::Display::Inline;
+                style.object_fit = "contain".to_string();
+            }
+            "audio" => {
+                style.display = if attributes.contains_key("controls") {
+                    rustkit_css::Display::Inline
+                } else {
+                    rustkit_css::Display::None
+                };
             }
             "canvas" => {
                 style.display = rustkit_css::Display::Inline;
@@ -15732,6 +17707,24 @@ impl layout_ctx::LayoutCtx {
             }
             "iframe" => {
                 style.display = rustkit_css::Display::Inline;
+                // `iframe { border: 2px inset }` (Chrome 148: 2px inset,
+                // currentColor), with nested browsing contexts on only.
+                // The paint styles have no `inset` (rustkit-css
+                // BorderStyle): it paints solid until they do.
+                if self.nested_contexts.get() {
+                    style.border_top_width = rustkit_css::Length::Px(2.0);
+                    style.border_right_width = rustkit_css::Length::Px(2.0);
+                    style.border_bottom_width = rustkit_css::Length::Px(2.0);
+                    style.border_left_width = rustkit_css::Length::Px(2.0);
+                    style.border_top_style = rustkit_css::BorderStyle::Solid;
+                    style.border_right_style = rustkit_css::BorderStyle::Solid;
+                    style.border_bottom_style = rustkit_css::BorderStyle::Solid;
+                    style.border_left_style = rustkit_css::BorderStyle::Solid;
+                    style.border_top_color = style.color;
+                    style.border_right_color = style.color;
+                    style.border_bottom_color = style.color;
+                    style.border_left_color = style.color;
+                }
             }
             // Misc
             "br" => {
@@ -16036,7 +18029,10 @@ impl layout_ctx::LayoutCtx {
         // under a rule index, whose rule numbers the key holds with the
         // index's source. Rules from other trees are not in the key (extras):
         // no sharing with them.
-        let share = match (index.is_some() && extras.is_empty(), parent_style) {
+        let share = match (
+            index.is_some() && extras.is_empty() && !registered_props::override_active(),
+            parent_style,
+        ) {
             (true, Some(parent)) => style_share_lookup(parent, || StyleShareKey {
                 parent: 0,
                 source: index.as_ref().map_or((0, 0, 0), |ix| ix.source),
@@ -16081,6 +18077,10 @@ impl layout_ctx::LayoutCtx {
             .get("style")
             .map(|s| rustkit_css::split_declaration_list(s))
             .unwrap_or_default();
+        // TRANS-F: a moving registered value is the element's last
+        // declaration of it, so the element's other custom properties
+        // that read it (`--tw-gradient-stops`) take the moving value too.
+        let overridden = registered_props::override_values();
         let mut declared_vars: Vec<(&str, Option<&str>)> = Vec::new();
         for important_pass in [false, true] {
             for (rule, _, _) in rules_for(important_pass) {
@@ -16112,7 +18112,22 @@ impl layout_ctx::LayoutCtx {
                 }
             }
         }
+        declared_vars.extend(overridden.iter().map(|(k, v)| (k.as_str(), Some(v.as_str()))));
         let vars = Engine::element_custom_properties(&inherited_vars, &declared_vars);
+        // TRANS-F: registered properties (initial values, `inherits`,
+        // invalid values) and a running transition's override.
+        let registry = registered_props::current();
+        let vars = if registry.is_some() || registered_props::override_active() {
+            registered_props::fix_up(
+                registry.as_deref(),
+                vars,
+                &inherited_vars,
+                &declared_vars,
+                parent_style.is_none(),
+            )
+        } else {
+            vars
+        };
         let css_vars: &CustomProperties = &vars;
 
         // Provenance is recorded from INSIDE this loop rather than by a
@@ -16233,6 +18248,13 @@ impl layout_ctx::LayoutCtx {
         // want of a font can finally be applied.
         self.resolve_ch_lengths(&mut style, &ch_pending);
 
+        // MEDIA-AVF (#1332 R1): Chrome's UA sheet has `audio:not([controls]) { display:
+        // none !important }`, which no author declaration beats (an `!important` UA
+        // declaration outranks author ones). The plain UA default above is not enough.
+        if tag_name.eq_ignore_ascii_case("audio") && !attributes.contains_key("controls") {
+            style.display = rustkit_css::Display::None;
+        }
+
         // A `none`/`hidden` side has a zero used width, whichever of width
         // and style was declared last (`border: 5px solid; border-style: none`
         // used to keep the 5px frame). A side nothing gave a style is `none`
@@ -16245,6 +18267,22 @@ impl layout_ctx::LayoutCtx {
 
         style.settle_animation_opacity(stylesheets);
 
+        // Registered values computed against the element's font size.
+        let vars = match registry.as_deref() {
+            Some(registry) => {
+                let parent_px = parent_style
+                    .map(|p| registered_props::font_px(&p.font_size, 16.0))
+                    .unwrap_or(16.0);
+                registered_props::compute_own(
+                    Some(registry),
+                    vars,
+                    &declared_vars,
+                    registered_props::font_px(&style.font_size, parent_px),
+                    self.building_viewport(),
+                )
+            }
+            None => vars,
+        };
         style.custom_properties = vars;
 
         style_share_store(share, &style);
@@ -16540,6 +18578,8 @@ impl Engine {
             "overflow-wrap" | "word-wrap" => style.overflow_wrap = parent.overflow_wrap,
             "line-break" => style.line_break = parent.line_break,
             "visibility" => style.visibility = parent.visibility,
+            // The parent's whole list (R1 on #1290).
+            "box-shadow" => style.box_shadows = parent.box_shadows.clone(),
             // Not inherited by default, and asked for by name on nearly
             // every page: `*, :before, :after { box-sizing: inherit }`
             // under `html { box-sizing: border-box }`.
@@ -17610,10 +19650,27 @@ impl layout_ctx::LayoutCtx {
                 }
             }
             "box-shadow" => {
-                // Parse box-shadow: offset-x offset-y blur spread color [inset]
-                // Simple parser for common formats
-                if let Some(shadow) = parse_box_shadow(value) {
-                    style.box_shadows.push(shadow);
+                // A declaration is the whole list (css-backgrounds-3 §7.1):
+                // `none` empties it, a comma list is that many shadows in
+                // its order (the first on top), and one shadow that does not
+                // read drops the declaration. Until CSS-TRANS D every
+                // matching declaration was appended and a comma list read as
+                // one shadow, so `#h.on{box-shadow:B}` painted A and B and a
+                // transition never saw a change.
+                // `revert` (and `revert-layer` reaching here, outside a
+                // layer) rolls back to the UA sheet, which has no shadow.
+                let value = value.trim();
+                if value.eq_ignore_ascii_case("none")
+                    || value.eq_ignore_ascii_case("revert")
+                    || value.eq_ignore_ascii_case("revert-layer")
+                {
+                    style.box_shadows.clear();
+                } else if let Some(list) = split_by_comma(value)
+                    .into_iter()
+                    .map(parse_box_shadow)
+                    .collect::<Option<Vec<_>>>()
+                {
+                    style.box_shadows = list;
                 }
             }
             "width" => {
@@ -18357,6 +20414,9 @@ impl layout_ctx::LayoutCtx {
             "color" => style.color = rustkit_css::Color::BLACK,
             "background-color" => style.background_color = rustkit_css::Color::TRANSPARENT,
             "transform" => style.transform = rustkit_css::TransformList::none(),
+            // `initial` / `unset`: no shadow (an earlier declaration's list
+            // stayed until R1 on #1290).
+            "box-shadow" => style.box_shadows.clear(),
             "transition" | "transition-property" => {
                 style.transitions.clear();
                 animations::sync_transition_scalars(style, false);
@@ -19172,7 +21232,7 @@ impl Engine {
                     out.push('<');
                     out.push_str(tag_name);
                     let styled;
-                    let attributes = match paint.get(&node.id.raw()) {
+                    let attributes = match paint.get(&node.id.raw()).filter(|p| p.paints()) {
                         Some(p) => {
                             let mut a = attributes.clone();
                             for property in &p.inherit {
@@ -19192,7 +21252,7 @@ impl Engine {
                                         .is_none_or(|(prop, _)| !own_important.contains(&prop.trim().to_ascii_lowercase()))
                                 })
                                 .collect();
-                            let style = format!("{}{};{}", p.normal, own, important);
+                            let style = format!("{}{};{}{}", p.normal, own, important, p.animated);
                             a.insert("style".to_string(), style);
                             styled = a;
                             &styled
@@ -19236,6 +21296,13 @@ impl Engine {
         let owners: Rc<Vec<NodeId>> = view.map(|v| v.external_sheet_owners.clone()).unwrap_or_default();
         self.lctx
             .cache_svg_paint_styles(document, lay, &external, &owners, self.config.javascript_enabled, viewport);
+        // The view's own document (a test may style a detached one).
+        if let Some(view) = view {
+            if let Some(own) = view.document.as_ref().filter(|d| std::ptr::eq(Rc::as_ptr(d), document)) {
+                self.lctx.svg_paint_transitions(&view.lay, own);
+                self.lctx.note_svg_paint(&view.lay, own);
+            }
+        }
     }
 }
 
@@ -19349,6 +21416,81 @@ impl layout_ctx::LayoutCtx {
         *self.svg_paint_styles.borrow_mut() = map;
     }
 
+    /// A2.2: one pass of `lay`'s svg paint lane over `document` at its
+    /// animation clock (`Animations::svg_update`), then the running values
+    /// written into the paint map just cached (`SvgPaintStyle::animated`),
+    /// so the svg markup, its cache key and raster, and the computed read
+    /// (`svg_computed`) all take them. The lane's own `transition*` lists
+    /// are the side cascade's (`SvgPaintStyle::transitions`).
+    ///
+    /// Cost: nothing when no svg element names a transition and the lane
+    /// is empty. Otherwise the svgs are resolved only when the paint map or
+    /// the DOM changed since the last pass, or a transition runs; a
+    /// running one re-rasterises its svg every frame, as a moving
+    /// `currentcolor` does.
+    fn svg_paint_transitions(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let base = self.svg_paint_styles.borrow().clone();
+        let mut anims = lay.animations.borrow_mut();
+        let named = base.values().any(|s| !s.transitions.is_empty());
+        if !named && anims.svg_lane_empty() {
+            anims.svg_last = None;
+            return;
+        }
+        let gen = rustkit_dom::mutation_generation();
+        let unchanged = anims
+            .svg_last
+            .as_ref()
+            .is_some_and(|(map, at)| *at == gen && std::ptr::eq(map.as_ptr(), Rc::as_ptr(&base)));
+        if anims.svg_moving() || !unchanged {
+            // One parse per distinct declaration list.
+            let mut lists: HashMap<&[(String, String)], Rc<Vec<rustkit_css::TransitionItem>>> = HashMap::new();
+            let mut paints = Vec::new();
+            for svg in svg_computed::outermost_svgs(document) {
+                for (node, (fill, stroke)) in svg_computed::resolve_paints(&svg, &base, svg_computed::BLACK) {
+                    let declared = base.get(&node).map(|s| s.transitions.as_slice()).unwrap_or(&[]);
+                    let items = (!declared.is_empty()).then(|| {
+                        lists
+                            .entry(declared)
+                            .or_insert_with(|| {
+                                let mut scratch = ComputedStyle::default();
+                                for (property, value) in declared {
+                                    self.apply_style_property(&mut scratch, property, value);
+                                }
+                                Rc::new(scratch.transitions)
+                            })
+                            .clone()
+                    });
+                    for (prop, paint) in [("fill", fill), ("stroke", stroke)] {
+                        let spec = items.as_ref().and_then(|i| animations::svg_spec_for(i, prop).cloned());
+                        if spec.is_some() || anims.svg_holds(node, prop) {
+                            paints.push((node, prop, paint, spec));
+                        }
+                    }
+                }
+            }
+            anims.svg_update(&paints);
+            anims.svg_last = Some((Rc::downgrade(&base), gen));
+        }
+        let moving = anims.svg_overlay();
+        drop(anims);
+        if moving.is_empty() {
+            return;
+        }
+        let mut map = (*base).clone();
+        for (node, prop, colour) in moving {
+            let style = map.entry(node).or_default();
+            style.animated.push_str(&format!("{prop}:{};", css_color(colour)));
+        }
+        *self.svg_paint_styles.borrow_mut() = Rc::new(map);
+    }
+
+    /// Keep `document` and the paint map just cached on `lay`'s view for
+    /// svg content's computed paint (`svg_computed`), read after the build.
+    fn note_svg_paint(&self, lay: &layout_ctx::ViewLayout, document: &Rc<Document>) {
+        let paint = self.svg_paint_styles.borrow().clone();
+        *lay.svg_paint.borrow_mut() = Some(Rc::new(svg_computed::SvgPaintSnapshot::new(document, paint)));
+    }
+
     /// CH2.E19: the element state `lay`'s view matches svg paint rules
     /// against: checkedness, the hovered and pressed chains, and the
     /// focused element with the elements above it.
@@ -19416,6 +21558,8 @@ impl layout_ctx::LayoutCtx {
             let keyed = KeyedElement::of(tag_name, attributes);
             // (important, specificity, order, property, value)
             let mut won: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
+            // A2.2: the `transition*` declarations, ranked the same way.
+            let mut transitions: Vec<(bool, (usize, usize, usize), usize, &str, String)> = Vec::new();
             for (order, rule, keys) in &paint_rules {
                 let (order, rule) = (*order, *rule);
                 if !Engine::keys_may_match_keyed(keys, &keyed) {
@@ -19429,6 +21573,11 @@ impl layout_ctx::LayoutCtx {
                 let Some(specificity) = specificity else { continue };
                 for decl in &rule.declarations {
                     let rustkit_css::PropertyValue::Specified(value) = &decl.value else { continue };
+                    if SVG_TRANSITION_PROPERTIES.contains(&decl.property.as_str()) {
+                        let value = self.resolve_css_variables(value, root_vars);
+                        transitions.push((decl.important, specificity, order, decl.property.as_str(), value));
+                        continue;
+                    }
                     if !SVG_PAINT_PROPERTIES.contains(&decl.property.as_str()) {
                         continue;
                     }
@@ -19440,11 +21589,18 @@ impl layout_ctx::LayoutCtx {
                     won.push((decl.important, specificity, order, decl.property.as_str(), value));
                 }
             }
-            if won.is_empty() {
+            if won.is_empty() && transitions.is_empty() {
                 return None;
             }
             won.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-            let mut style = SvgPaintStyle::default();
+            transitions.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+            let mut style = SvgPaintStyle {
+                transitions: transitions
+                    .into_iter()
+                    .map(|(_, _, _, property, value)| (property.to_string(), value))
+                    .collect(),
+                ..SvgPaintStyle::default()
+            };
             // The winner per property is its last entry; a CSS-wide
             // keyword there is applied here rather than written out.
             let mut keyword: HashMap<&str, String> = HashMap::new();
@@ -19461,7 +21617,7 @@ impl layout_ctx::LayoutCtx {
             }
             style.inherit.sort();
             won.retain(|(_, _, _, property, _)| !keyword.get(property).is_some_and(|v| wide(v)));
-            if won.is_empty() && style.inherit.is_empty() {
+            if won.is_empty() && style.inherit.is_empty() && style.transitions.is_empty() {
                 return None;
             }
             for (important, _, _, property, value) in won {
@@ -19541,7 +21697,10 @@ impl layout_ctx::LayoutCtx {
                 if !(rule.media.is_empty() || viewport.is_some_and(|(w, h)| rule.applies_at(w, h))) {
                     continue;
                 }
-                if rule.declarations.iter().any(|d| SVG_PAINT_PROPERTIES.contains(&d.property.as_str())) {
+                if rule.declarations.iter().any(|d| {
+                    SVG_PAINT_PROPERTIES.contains(&d.property.as_str())
+                        || SVG_TRANSITION_PROPERTIES.contains(&d.property.as_str())
+                }) {
                     paint.push((order, source, index, self.subject_keys(&rule.selector)));
                 }
                 if selects_the_root(&rule.selector) {
@@ -19692,15 +21851,28 @@ impl layout_ctx::LayoutCtx {
     /// the box build (which runs with `&self`) can size them and the
     /// display-list splice can paint them. Runs per relayout; already-cached
     /// keys are skipped, so steady-state cost is one serialize per svg.
-    fn cache_inline_svgs(&self, document: &Document) {
+    /// `lay` is the view the pass is for (`None` outside one: no key of
+    /// it is transient).
+    fn cache_inline_svgs(&self, document: &Document, lay: Option<&layout_ctx::ViewLayout>) {
         // Nothing in the document and nothing in its paint map changed
         // since the last pass: every svg's document is cached (LAT4b).
         let paint = self.svg_paint_styles.borrow().clone();
         if self.svg_prepass.borrow().pass_done(document.root(), &paint) {
             return;
         }
+        // A2.2: an svg holding a moving svg paint value is parsed under a
+        // new key each frame. Those keys are this view's transient ones: its
+        // next pass evicts the ones it no longer uses. Another view's keys,
+        // and every svg that holds no moving value, are left alone.
+        let moving_svgs = lay.map(|_| Self::svgs_holding_animated(document, &paint)).unwrap_or_default();
+        let transient = lay.is_some_and(|lay| !lay.svg_transient_keys.borrow().is_empty());
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut parsed: Vec<String> = Vec::new();
         for svg_el in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = self.inline_svg_key_for(&svg_el);
+            if transient {
+                used.insert(key.clone());
+            }
             if self.svg_cache.borrow().contains_key(&key) || self.svg_prepass.borrow().failed.contains(&key) {
                 continue;
             }
@@ -19708,6 +21880,9 @@ impl layout_ctx::LayoutCtx {
             let xml = Engine::inline_svg_markup_from_parts(&parts, &paint);
             match rustkit_svg::SvgDocument::parse(&xml) {
                 Ok(doc) => {
+                    if moving_svgs.contains(&svg_el.id.raw()) {
+                        parsed.push(key.clone());
+                    }
                     self.svg_cache.borrow_mut().insert(key, doc);
                 }
                 Err(e) => {
@@ -19716,7 +21891,42 @@ impl layout_ctx::LayoutCtx {
                 }
             }
         }
+        if let Some(lay) = lay {
+            let mut keys = lay.svg_transient_keys.borrow_mut();
+            let mut cache = self.svg_cache.borrow_mut();
+            keys.retain(|key| {
+                let keep = used.contains(key);
+                if !keep {
+                    cache.remove(key);
+                }
+                keep
+            });
+            keys.extend(parsed);
+        }
         self.svg_prepass.borrow_mut().note_pass(document.root(), &paint);
+    }
+
+    /// Every `<svg>` element (raw NodeId) at or above an element whose
+    /// paint map entry holds a moving svg paint value: the svgs whose
+    /// markup, and so cache key, changes each frame.
+    fn svgs_holding_animated(
+        document: &Document,
+        paint: &HashMap<usize, SvgPaintStyle>,
+    ) -> std::collections::HashSet<usize> {
+        let mut out = std::collections::HashSet::new();
+        for (&node, style) in paint {
+            if style.animated.is_empty() {
+                continue;
+            }
+            let mut at = document.get_node(NodeId::new(node));
+            while let Some(n) = at {
+                if n.tag_name().is_some_and(|t| t.eq_ignore_ascii_case("svg")) {
+                    out.insert(n.id.raw());
+                }
+                at = n.parent();
+            }
+        }
+        out
     }
 }
 
@@ -19833,6 +22043,7 @@ impl Engine {
                     svgs.insert(url.to_string(), std::sync::Arc::new(doc.clone()));
                 }
                 self.lctx.svg_cache.borrow_mut().insert(url.to_string(), doc);
+                self.lctx.svg_images.set(self.lctx.svg_images.get() + 1);
             }
             Err(e) => {
                 debug!(?e, "data: SVG image failed to parse; left to the raster lane");
@@ -20359,6 +22570,125 @@ impl Engine {
     /// (the session's ran 1.5 to 4.7 s, with 2 ms of image polling each)
     /// no longer starve them. A `data:` image decodes on the page, as
     /// before; so does every image when the network runtime is off.
+    /// MEDIA-AVF M1.2: one live turn of view `id`'s media elements (media.rs): sync
+    /// them with the document after a layout or a `load()`, start the fetches that
+    /// asks for, take the fetches that landed, poll the AVFoundation probes, and fire
+    /// the events that queued, each with the element's state as of it. Step 3: drain
+    /// the players' snapshots and pull the videos' frames (`MediaElements::tick_host`).
+    /// Returns whether a video's size came in (its box is laid out again) and whether a
+    /// video has a new frame (presented with no build).
+    async fn settle_media(&mut self, id: EngineViewId) -> media::HostTick {
+        let none = media::HostTick::default();
+        let Some(view) = self.views.get(&id) else { return none };
+        let (Some(document), Some(bindings)) = (view.document.clone(), view.bindings.as_ref()) else {
+            return none;
+        };
+        let reload = bindings.take_media_loads();
+        let generation = view.frame_generation;
+        if !reload.is_empty() || view.media.synced_for != Some(generation) {
+            // `sync` resolves URLs through the engine: the elements are taken out and put back.
+            let mut media = std::mem::take(&mut self.views.get_mut(&id).expect("checked").media);
+            media.sync(&document, &reload, &|raw| self.resolve_resource_url_in(id, raw), &media::can_play_type);
+            media.synced_for = Some(generation);
+            let view = self.views.get_mut(&id).expect("checked");
+            view.media = media;
+            // A removed element's, or an earlier resource's, requests are dropped (cancelled).
+            let mut live = std::mem::take(&mut view.live_media);
+            live.retain(|(node, serial, _)| view.media.wants_fetch(*node, *serial));
+            view.live_media = live;
+        }
+        // What the probes wait on, by range.
+        let fetches = self.views.get_mut(&id).expect("checked").media.take_fetches();
+        if !fetches.is_empty() {
+            let referrer = self.subresource_referrer(id);
+            let loader = self.loader.clone();
+            let cap = media::whole_cap() as usize;
+            let started: Vec<(usize, u64, script_net::LiveFuture<media::MediaFetched>)> = fetches
+                .into_iter()
+                .map(|f| {
+                    let range = format!("bytes={}-{}", f.start, f.end - 1);
+                    let request = referrer.get_for(f.url, RequestDestination::Other).header(
+                        http::header::RANGE,
+                        http::HeaderValue::from_str(&range).expect("ascii"),
+                    );
+                    let loader = loader.clone();
+                    let (node, serial, start) = (f.node, f.serial, f.start);
+                    let future = Box::pin(async move {
+                        let span = match loader.fetch_capped(request, cap).await {
+                            Ok(response) => media::read_span(response, start).await,
+                            Err(rustkit_net::NetError::HttpError(rustkit_http::HttpError::BodyTooLarge(_))) => {
+                                Err(media::FetchFailed::TooLarge)
+                            }
+                            Err(_) => Err(media::FetchFailed::NotSupported),
+                        };
+                        media::MediaFetched { node, serial, span }
+                    }) as script_net::LiveFuture<media::MediaFetched>;
+                    (node, serial, future)
+                })
+                .collect();
+            if let Some(view) = self.views.get_mut(&id) {
+                view.live_media.extend(started);
+            }
+        }
+        let landed = match self.views.get_mut(&id) {
+            Some(view) => media::settle_keyed(&mut view.live_media, LIVE_NETWORK_SLICE).await,
+            None => return none,
+        };
+        let backend = self.media_backend.clone();
+        let Some(view) = self.views.get_mut(&id) else { return none };
+        for fetched in landed {
+            view.media.fetched(fetched);
+        }
+        let mut tick = view.media.tick_host();
+        tick.resized |= view.media.poll(backend.as_ref());
+        if tick.resized {
+            *view.lay.media_sizes.borrow_mut() = view.media.video_sizes();
+        }
+        let events = view.media.take_events();
+        if let Some(bindings) = view.bindings.as_ref() {
+            for event in &events {
+                if let Err(e) = bindings.fire_media_event(event.node, Some(event.kind), Some(&event.state)) {
+                    debug!(?id, error = %e, kind = event.kind, "media event failed");
+                }
+            }
+            if !events.is_empty() {
+                inspector_glue::drain_errors(bindings, &view.inspector, "media");
+            }
+        }
+        tick
+    }
+
+    /// MEDIA-AVF §3.3: present view `id` again for a new video frame. The display list
+    /// is the one already built (the frame's key is stable): its generation moves so the
+    /// presenter takes it as a new frame, and the presenter uploads the frame under its
+    /// key. No build, no layout.
+    fn present_video_frame(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let Some(view) = self.views.get_mut(&id) else { return Ok(()) };
+        if view.display_list.is_none() {
+            return Ok(());
+        }
+        // What was done for this frame's boxes holds for the next generation too.
+        let generation = view.frame_generation;
+        view.frame_generation += 1;
+        if view.images_planned_for == generation {
+            view.images_planned_for = view.frame_generation;
+        }
+        if view.sheets_checked_for == Some(generation) {
+            view.sheets_checked_for = Some(view.frame_generation);
+        }
+        if view.media.synced_for == Some(generation) {
+            view.media.synced_for = Some(view.frame_generation);
+        }
+        view.relayout_stats.video_frames_presented = view.relayout_stats.video_frames_presented.saturating_add(1);
+        self.render(id)
+    }
+
+    /// MEDIA-AVF step 3: the main-thread host whose players media elements use
+    /// (`docs/design/MEDIA_AVF.md` §3.2), or `None` for none (metadata only).
+    pub fn set_media_backend(&mut self, backend: Option<Arc<dyn rustkit_media::host::MediaBackend>>) {
+        self.media_backend = backend;
+    }
+
     fn start_planned_images(plan: ImagePlan) -> Vec<script_net::LiveFuture<FetchedImages>> {
         let ImagePlan {
             pending,
@@ -20610,6 +22940,9 @@ impl Engine {
         }
         if let Ok(mut svgs) = self.lctx.canvas_svgs.lock() {
             svgs.extend(fetched.svgs.iter().map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone()))));
+        }
+        if !fetched.svgs.is_empty() {
+            self.lctx.svg_images.set(self.lctx.svg_images.get() + 1);
         }
         self.lctx.svg_cache.borrow_mut().extend(fetched.svgs);
         if !fetched.gave_up.is_empty() {
@@ -24513,6 +26846,12 @@ impl Engine {
             .hwnd(view.viewhost_id)
     }
 
+    /// Whether `id` is a frame's document (nested browsing contexts): a view some other view lists
+    /// among its frames.
+    fn is_frame_view(&self, id: EngineViewId) -> bool {
+        self.views.values().any(|view| view.frames.values().any(|frame| frame.view == id))
+    }
+
     /// Render a view (internal).
     #[tracing::instrument(skip(self), fields(view_id = ?id))]
     fn render(&mut self, id: EngineViewId) -> Result<(), EngineError> {
@@ -24635,6 +26974,13 @@ impl Engine {
         if self.presenter.is_none() {
             return Ok(());
         }
+        // A frame's document is an offscreen view with no surface or texture of its own: its
+        // parent's frame draws it. Until FRAME-STAGES its present failed ("Surface not found"),
+        // which ended every relayout of a frame's document in an error after the work was done:
+        // no relayout line, no stats.
+        if self.is_frame_view(id) {
+            return Ok(());
+        }
 
         // The presenter's: upload, execute, present.
         let presented = self.presenter.as_mut().unwrap().present(
@@ -24659,6 +27005,38 @@ impl Engine {
         script: &str,
     ) -> Result<String, EngineError> {
         self.script_turn(id, |bindings| bindings.evaluate(script))
+    }
+
+    /// [`Self::execute_script`] with `script` run as a script of the
+    /// page's own, not as the host's (`DomBindings::evaluate_as_page_script`):
+    /// what it rejects is announced to the page. For tests whose script
+    /// stands for a page's.
+    #[doc(hidden)]
+    pub fn execute_as_page_script(&mut self, id: EngineViewId, script: &str) -> Result<String, EngineError> {
+        self.script_turn(id, |bindings| bindings.evaluate_as_page_script(script))
+    }
+
+    /// A resize observation held for an animation frame (REPORT-CHART-0x0: Chrome runs the
+    /// frame's callbacks first) when no turn is to come: run that frame's callbacks as one round,
+    /// then the turn's observer tick delivers it, in Chrome's order. The engine does it once at
+    /// the end of every load (a load runs no frame of its own, so a load-only capture, an MCP
+    /// render or a smoke frame would never get it), and a capture does it again after its
+    /// actions. Nothing held, nothing run: a page with no held observation gets no frame here.
+    pub fn run_held_observation_frame(&mut self, id: EngineViewId) -> Result<(), EngineError> {
+        let held = self
+            .views
+            .get(&id)
+            .and_then(|v| v.bindings.as_ref())
+            .is_some_and(|b| b.resize_held());
+        if !held {
+            return Ok(());
+        }
+        self.execute_host_turn(
+            id,
+            &format!("return __rk.pendingFrameRound({MAX_LIVE_TIMER_CALLBACKS});"),
+            &[],
+        )
+        .map(|_| ())
     }
 
     /// [`Self::execute_script`] for one of the engine's own entry points:
@@ -24804,7 +27182,7 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        if !std::mem::take(&mut view.title_stale) {
+        if !std::mem::take(&mut view.doc.title_stale) {
             return;
         }
         #[cfg(test)]
@@ -24830,22 +27208,23 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
         // Read before the take, which clears it.
         let beyond_layer = bindings.dirty_beyond_animation_layer();
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let log = bindings.take_mutation_log();
-        let had_title = view.title.is_some();
-        if log.full || log.records.iter().any(|record| Self::touches_title(view.document.as_deref(), had_title, record)) {
-            view.title_stale = true;
+        let had_title = view.doc.title.is_some();
+        if log.full || log.records.iter().any(|record| Self::touches_title(view.doc.document.as_deref(), had_title, record)) {
+            view.doc.title_stale = true;
         }
-        Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
-        Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
-        let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-        let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
-        let element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+        Self::note_forced_layouts(id, &mut view.doc.relayout_stats, bindings);
+        Self::apply_script_control_writes(&mut view.doc.lay.edit_states.borrow_mut(), &mut view.doc.lay.checked_states.borrow_mut(), bindings);
+        let max = Self::script_scroll_clamp(view.doc.max_scroll_offset, dirty);
+        let scrolled = Self::apply_script_scroll(&mut view.doc.scroll_offset, max, bindings);
+        let element_scrolled = std::mem::take(&mut view.doc.lay.element_scrolls.borrow_mut().unpainted);
         let canvas_painted = bindings.take_canvas_painted();
         // LAT2: script's animated-style layer is all that was written (a
         // Web Animations frame): a frame that moves only paint keeps the
@@ -24875,11 +27254,19 @@ impl Engine {
         let Some(view) = self.views.get_mut(&id) else {
             return Ok(false);
         };
-        let Some(bindings) = view.bindings.as_ref() else {
+        let Some(bindings) = view.doc.bindings.as_ref() else {
             return Ok(false);
         };
+        if scrolled || element_scrolled {
+            view.doc.lay.scrolled_in_task.set(true);
+        }
         if dirty != DomDirty::Clean {
-            view.pending_dirty = Some(view.dirty_set(&log));
+            // A mark with no log record behind it: the set from the log is not the whole.
+            view.doc.pending_dirty = Some(if unlogged {
+                restyle_invalidation::DirtySet::full("unlogged_mark")
+            } else {
+                view.dirty_set(&log)
+            });
         }
         if dirty == DomDirty::Clean {
             // A canvas that drew is listed again over the same boxes.
@@ -25033,7 +27420,10 @@ impl Engine {
     /// for the DOM as it was at the read. Nothing reads them before the
     /// end-of-task relayout, which rebuilds all of them from the DOM as
     /// script left it; this relies on that relayout always following a
-    /// task that wrote. (Reusing the forced tree to skip it is a follow-up.)
+    /// task that wrote. With `RUSTKIT_RETAINED_STYLES=boxes` that relayout
+    /// splices the task's writes into the forced build's tree (TREE-REUSE
+    /// step (1), `ViewLayout::keep_forced_tree_now`) instead of building
+    /// the whole document again.
     fn forced_layout_for(&self, id: EngineViewId) -> Option<rustkit_bindings::ForcedLayout> {
         let view = self.views.get(&id)?;
         let document = view.document.clone()?;
@@ -25094,7 +27484,6 @@ impl Engine {
                     None => "no published boxes".into(),
                 }
             };
-            forced_read_probe(id, &lay, &document, &writes.probe, &why);
             let started = std::time::Instant::now();
             // LAT19: nothing a forced layout builds is painted, so the
             // animation baseline (what the view painted of each animated
@@ -25111,11 +27500,25 @@ impl Engine {
             );
             lctx.install_web_fonts_for(&Engine::font_partition(building.url.as_ref()));
             lctx.cache_svg_paint_styles(&document, Some(&lay), &sheets, &owners, javascript_enabled, building.viewport);
-            lctx.cache_inline_svgs(&document);
+            lctx.svg_paint_transitions(&lay, &document);
+            lctx.note_svg_paint(&lay, &document);
+            lctx.cache_inline_svgs(&document, Some(&lay));
             // The load's style memo replays cascades recorded before script
             // wrote: this build neither replays nor records. The memo goes
             // back when the guard drops, also if the build unwinds.
             let memo_aside = StyleMemoAside::take();
+            // FORCED-READ: what this build costs, for its log line. The stage timers the build
+            // runs under are read before and after it; nothing is taken from them.
+            let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let stages_before = relayout_cause::stage_ms_so_far();
+            let passes_before = lay.layout_builds.get();
+            // TREE-REUSE step (1): in `boxes` mode the build keeps its tree for the end-of-task
+            // relayout to splice the task's writes into (`ViewLayout::keep_forced_tree_now`). The
+            // guard clears the flag after the build, also if the build unwinds.
+            let keep_tree = retained_styles_mode().keeps_boxes().then(|| {
+                lay.want_script_unlaid.set(true);
+                FlagGuard::set(&lay.keep_forced_tree_now)
+            });
             let built = lctx.lay_out_document(
                 building.for_build(),
                 &document,
@@ -25123,6 +27526,7 @@ impl Engine {
                 javascript_enabled,
                 bounds,
             );
+            drop(keep_tree);
             drop(memo_aside);
             baseline.restore(&lay);
             stamp_element_scrolls(&built, &lay.element_scrolls);
@@ -25133,7 +27537,19 @@ impl Engine {
             let max_scroll = (0.0, (content_height - bounds.1 as f32).max(0.0));
             let built = Rc::new(built);
             incremental_layout::adopt(&lay, &built);
-            debug!(?id, ms = started.elapsed().as_secs_f64() * 1000.0, "Forced layout");
+            let stages = relayout_cause::stage_ms_so_far();
+            let cost = ForcedBuildCost {
+                took_ms: started.elapsed().as_secs_f64() * 1000.0,
+                prepare_ms,
+                build_ms: stages.build - stages_before.build,
+                layout_ms: stages.layout - stages_before.layout,
+                elements: lay.last_build_elements.get(),
+                passes: lay.layout_builds.get().saturating_sub(passes_before),
+            };
+            let (build_sum, layout_sum) = lay.forced_stage_ms.get();
+            lay.forced_stage_ms.set((build_sum + cost.build_ms, layout_sum + cost.layout_ms));
+            forced_read_probe(id, &lay, &document, &writes.probe, &why, &cost);
+            debug!(?id, ms = cost.took_ms, "Forced layout");
             // The geometry is built on the first read that needs it, as
             // `publish_geometry` does: a scrollTo after the write needs only
             // `max_scroll`. Each element's computed style is formatted on
@@ -25164,6 +27580,7 @@ impl Engine {
     /// held outside the view (the page's own load: `run_page_scripts`). One
     /// layout per call, none when nothing changed.
     fn refresh_layout_for_script(&mut self, id: EngineViewId, bindings: &DomBindings) {
+        let unlogged = bindings.dirty_unlogged();
         let dirty = bindings.take_dirty();
         let writes = bindings.take_script_mutations();
         let log = bindings.take_mutation_log();
@@ -25172,11 +27589,19 @@ impl Engine {
             Self::note_forced_layouts(id, &mut view.relayout_stats, bindings);
             Self::apply_script_control_writes(&mut view.lay.edit_states.borrow_mut(), &mut view.lay.checked_states.borrow_mut(), bindings);
             let max = Self::script_scroll_clamp(view.max_scroll_offset, dirty);
-            Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
+            let scrolled = Self::apply_script_scroll(&mut view.scroll_offset, max, bindings);
             element_scrolled = std::mem::take(&mut view.lay.element_scrolls.borrow_mut().unpainted);
+            if scrolled || element_scrolled {
+                view.lay.scrolled_in_task.set(true);
+            }
             if dirty != DomDirty::Clean {
                 view.relayout_pending.note_script(None, writes);
-                view.pending_dirty = Some(view.dirty_set(&log));
+                // A mark with no log record behind it: the set from the log is not the whole.
+                view.pending_dirty = Some(if unlogged {
+                    restyle_invalidation::DirtySet::full("unlogged_mark")
+                } else {
+                    view.dirty_set(&log)
+                });
             }
         }
         let canvas_painted = bindings.take_canvas_painted();
@@ -25763,6 +28188,48 @@ impl Engine {
         drained
     }
 
+    /// What the internal page in view `id` ([`Self::load_internal_page_as`])
+    /// posted since the last drain, with the navigation id of that
+    /// document. Empty for any other document.
+    pub fn drain_view_internal_reads(&self, id: EngineViewId) -> (u64, Vec<String>) {
+        let Some(view) = self.views.get(&id) else {
+            return (0, Vec::new());
+        };
+        let reads = view
+            .bindings
+            .as_ref()
+            .filter(|bindings| bindings.is_internal_page())
+            .map(|bindings| bindings.drain_internal_reads())
+            .unwrap_or_default();
+        (view.nav_id, reads)
+    }
+
+    /// Hand `response_json` (a JSON value) to the internal page that asked,
+    /// as a `hiwave-response` event at its window. Only while view `id`
+    /// still shows that document: navigation `nav_id`, built as an internal
+    /// page. Returns whether it was delivered.
+    pub fn answer_view_internal_read(
+        &mut self,
+        id: EngineViewId,
+        nav_id: u64,
+        response_json: &str,
+    ) -> bool {
+        let same_document = self.views.get(&id).is_some_and(|view| {
+            view.nav_id == nav_id
+                && view.bindings.as_ref().is_some_and(|bindings| bindings.is_internal_page())
+        });
+        if !same_document {
+            return false;
+        }
+        // The answer is data: parsed from a string literal, never spliced in
+        // as script.
+        let literal = serde_json::to_string(response_json).unwrap_or_else(|_| "\"null\"".to_string());
+        let script = format!(
+            "window.dispatchEvent(new CustomEvent('hiwave-response', {{ detail: JSON.parse({literal}) }})); 0"
+        );
+        self.execute_script(id, &script).is_ok()
+    }
+
     /// Check if any view has pending IPC messages.
     pub fn has_pending_ipc(&self) -> bool {
         self.views.values().any(|v| {
@@ -25811,6 +28278,9 @@ fn ipc_cmd_shape(payload: &str) -> String {
 pub struct EngineBuilder {
     config: EngineConfig,
     interceptor: Option<rustkit_net::RequestInterceptor>,
+    /// MEDIA-AVF step 3 (`avfoundation_media`).
+    #[cfg(all(target_os = "macos", feature = "media-avf"))]
+    avf_media: bool,
 }
 
 impl EngineBuilder {
@@ -25819,6 +28289,8 @@ impl EngineBuilder {
         Self {
             config: EngineConfig::default(),
             interceptor: None,
+            #[cfg(all(target_os = "macos", feature = "media-avf"))]
+            avf_media: false,
         }
     }
 
@@ -25907,6 +28379,12 @@ impl EngineBuilder {
 
     /// Requests made after the `load` event go to the live loop
     /// (`EngineConfig::post_load_requests_live`).
+    /// Load same-origin `<iframe>` documents (`EngineConfig::nested_contexts`).
+    pub fn nested_contexts(mut self, on: bool) -> Self {
+        self.config.nested_contexts = on;
+        self
+    }
+
     pub fn post_load_requests_live(mut self, live: bool) -> Self {
         self.config.post_load_requests_live = live;
         self
@@ -25923,15 +28401,38 @@ impl EngineBuilder {
         self
     }
 
+    /// MEDIA-AVF step 3: media elements play through AVFoundation, on the main-thread
+    /// `MediaHost` (`rustkit_media::avf_host`). The main thread's queue has to drain
+    /// (AppKit's does in the app).
+    #[cfg(all(target_os = "macos", feature = "media-avf"))]
+    pub fn avfoundation_media(mut self, on: bool) -> Self {
+        self.avf_media = on;
+        self
+    }
+
     /// Build the engine.
     pub fn build(self) -> Result<Engine, EngineError> {
-        Engine::with_interceptor(self.config, self.interceptor)
+        let media = self.media_backend();
+        let mut engine = Engine::with_interceptor(self.config, self.interceptor)?;
+        engine.media_backend = media;
+        Ok(engine)
     }
 
     /// Build a page engine on the caller. The content thread calls this on
     /// itself; the window does not.
     pub fn build_page(self, nav_seq: Arc<AtomicU64>) -> Result<Engine, EngineError> {
-        Engine::new_page(self.config, self.interceptor, nav_seq)
+        let media = self.media_backend();
+        let mut engine = Engine::new_page(self.config, self.interceptor, nav_seq)?;
+        engine.media_backend = media;
+        Ok(engine)
+    }
+
+    fn media_backend(&self) -> Option<Arc<dyn rustkit_media::host::MediaBackend>> {
+        #[cfg(all(target_os = "macos", feature = "media-avf"))]
+        if self.avf_media {
+            return Some(Arc::new(rustkit_media::avf_host::AvfHost::new()));
+        }
+        None
     }
 }
 
@@ -29332,6 +31833,23 @@ fn publish_geometry(
                 .unwrap_or(true)
         })
     })));
+    // TREE-REUSE step (2): whether an inline style write can change which rules match (a rule
+    // on the `style` attribute, or a `:has()`). The same live index; unknown counts as yes.
+    let reads = Rc::downgrade(&lay);
+    bindings.set_style_attr_rules_probe(Some(Rc::new(move || {
+        reads.upgrade().is_none_or(|lay| {
+            lay.rule_reads
+                .try_borrow()
+                .ok()
+                .and_then(|index| {
+                    index.as_ref().map(|ix| {
+                        let rules = &ix.reads.invalidation;
+                        rules.has || rules.attributes.contains_key("style")
+                    })
+                })
+                .unwrap_or(true)
+        })
+    })));
     let layout = Rc::downgrade(layout);
     let hit_layout = layout.clone();
     bindings.set_hit_tester(Some(layout_hit_tester(move || hit_layout.upgrade(), lay.element_scrolls.clone())));
@@ -29511,12 +32029,15 @@ fn layout_hit_tester(
 /// display: contents or none, dropped empty boxes, the root) added. A node
 /// that also produced a box keeps that box's style. `pseudos`
 /// (`ViewLayout::pseudo_styles`) join their element's lines, each row's
-/// name prefixed `::before ` or `::after `.
+/// name prefixed `::before ` or `::after `. `svg_paint`
+/// (`ViewLayout::svg_paint`) adds every inline svg element's `fill` and
+/// `stroke` rows, as `computed_lines_source` reads them (A2.1).
 fn geometry_with_root(
     layout: &LayoutBox,
     root_element: Option<usize>,
     boxless: &HashMap<usize, layout_ctx::BoxlessStyle>,
     pseudos: &HashMap<(usize, &'static str), ComputedStyle>,
+    svg_paint: Option<&svg_computed::SvgPaintSnapshot>,
 ) -> (HashMap<usize, rustkit_bindings::BoxGeometry>, HashMap<usize, String>) {
     // `rem` is the root element's font size. The root element has no box of
     // its own here; its style is with the boxless ones.
@@ -29548,6 +32069,27 @@ fn geometry_with_root(
             for row in custom_property_lines(&style.custom_properties).lines().skip(2) {
                 lines.push_str(&format!("\n{pseudo} {row}"));
             }
+        }
+    }
+    // A2.1: svg content's fill / stroke, its `currentcolor` the `<svg>`
+    // box's `color` (the box `computed_lines_source` indexes). Content
+    // with no box and no boxless style has these rows alone.
+    if let Some(svg_paint) = svg_paint {
+        let index = style_box_index(layout);
+        let color_of = |svg: usize| -> Option<rustkit_css::Color> {
+            let (path, _) = index.get(&svg)?;
+            let mut b: &LayoutBox = layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b.style.color)
+        };
+        for (node, (fill, stroke)) in svg_paint.every_fill_stroke(&color_of) {
+            snapshot
+                .1
+                .entry(node)
+                .or_default()
+                .push_str(&format!("\nfill\t{fill}\nstroke\t{stroke}"));
         }
     }
     snapshot
@@ -29875,6 +32417,20 @@ fn computed_lines_source(
             .unwrap_or(&*layout.style);
         computed_read::set_root_font(root_style);
         let index = index.get_or_init(|| style_box_index(&layout));
+        let box_at = |node: usize| -> Option<&LayoutBox> {
+            let (path, _) = index.get(&node)?;
+            let mut b: &LayoutBox = &layout;
+            for i in path {
+                b = b.children.get(*i as usize)?;
+            }
+            Some(b)
+        };
+        // A2.1: svg content's computed fill / stroke (`svg_computed`).
+        let svg_rows = || -> Option<String> {
+            let snapshot = lay.svg_paint.borrow().clone()?;
+            let (fill, stroke) = snapshot.fill_stroke(node, &|svg| box_at(svg).map(|b| b.style.color))?;
+            Some(format!("\nfill\t{fill}\nstroke\t{stroke}"))
+        };
         let mut lines = match index.get(&node) {
             Some((path, own_vars)) => {
                 let mut b: &LayoutBox = &layout;
@@ -29887,15 +32443,21 @@ fn computed_lines_source(
                 }
                 lines
             }
-            None => {
-                let style = boxless.get(&node)?;
-                let mut lines = computed_style_lines(&style.box_);
-                if style.own_vars {
-                    lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+            None => match boxless.get(&node) {
+                Some(style) => {
+                    let mut lines = computed_style_lines(&style.box_);
+                    if style.own_vars {
+                        lines.push_str(&custom_property_lines(&style.box_.style.custom_properties));
+                    }
+                    lines
                 }
-                lines
-            }
+                // svg content has no box and no style: its paint rows alone.
+                None => return svg_rows(),
+            },
         };
+        if let Some(rows) = svg_rows() {
+            lines.push_str(&rows);
+        }
         for ((at, pseudo), style) in lay.pseudo_styles.borrow().iter() {
             if *at != node {
                 continue;
@@ -30050,10 +32612,33 @@ fn corner_radii_px(
     width: f32,
     height: f32,
 ) -> (String, String) {
-    let axis = |length: &rustkit_css::Length, size: f32| {
-        css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0))
-    };
-    (axis(&c.horizontal, width), axis(&c.vertical, height))
+    (
+        radius_computed(&c.horizontal, font_px, width),
+        radius_computed(&c.vertical, font_px, height),
+    )
+}
+
+/// One radius as its computed value (css-backgrounds-3 §5.1, Chrome 148):
+/// a percentage stays one, a `calc()` mix of a percentage and lengths is
+/// `calc(P% + Npx)` (em / rem folded to px), any other length is px.
+/// `min()` / `max()` / `clamp()` and viewport units still resolve against
+/// `size`, as before (computed reads have no viewport).
+fn radius_computed(length: &rustkit_css::Length, font_px: f32, size: f32) -> String {
+    use rustkit_css::Length;
+    let resolved = || css_px(length.to_px(font_px, 16.0, finite_f32(size)).max(0.0));
+    match length {
+        Length::Percent(p) => format!("{}%", finite_f32(p.max(0.0))),
+        Length::Calc(sum) if sum.vw == 0.0 && sum.vh == 0.0 && sum.vmin == 0.0 && sum.vmax == 0.0 => {
+            let px = sum.px + sum.em * font_px + sum.rem * computed_read::root_font();
+            match (sum.percent, px) {
+                (p, _) if p == 0.0 => css_px(px.max(0.0)),
+                (p, px) if px == 0.0 => format!("{}%", finite_f32(p)),
+                (p, px) if px < 0.0 => format!("calc({}% - {})", finite_f32(p), css_px(-px)),
+                (p, px) => format!("calc({}% + {})", finite_f32(p), css_px(px)),
+            }
+        }
+        _ => resolved(),
+    }
 }
 
 fn corner_longhand(horizontal: &str, vertical: &str) -> String {
@@ -31133,10 +33718,12 @@ mod tests {
         let compositor = crate::test_compositor().ok()?;
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         Some(Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -31357,7 +33944,7 @@ mod tests {
         // branch builds an Image sized from the viewBox. This is the exit the
         // real engine takes on every relayout, and the one the `shelf`
         // capture went through.
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         assert!(
             !engine.lctx.svg_cache.borrow().is_empty(),
             "the pre-pass did not parse the subtree, so the cache-hit exit \
@@ -31517,7 +34104,7 @@ mod tests {
             </div>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         assert_eq!(
             index.len(),
@@ -31678,7 +34265,7 @@ mod tests {
             </svg>
         </body></html>"##;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -31778,7 +34365,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
 
         // The user-space bbox must be the viewBox's own origin, or the test
@@ -31875,7 +34462,7 @@ mod tests {
             </svg>
         </body></html>"#;
         let document = Rc::new(Document::parse_html(html).expect("parse"));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let index = engine.inline_svg_shape_index(&document);
         let entry = index.values().next().expect("one indexed subtree");
 
@@ -31916,11 +34503,13 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -31988,10 +34577,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32076,10 +34667,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32289,11 +34882,13 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32383,11 +34978,13 @@ mod tests {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32497,11 +35094,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32575,11 +35174,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32647,11 +35248,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32733,11 +35336,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -32836,10 +35441,12 @@ mod tests {
             let compositor = crate::test_compositor().expect("compositor");
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let engine = Engine {
-                config: EngineConfig::default(),
+                live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
+                    config: EngineConfig::default(),
                 views: HashMap::new(),
                 presenter: Some(Presenter::layout_only(compositor)),
                 page_commits: HashMap::new(),
+                media_backend: None,
                 nav_seq: Arc::new(AtomicU64::new(0)),
                 host_reentry_override: None,
                 clipboard: MemoryClipboard::shared(),
@@ -32939,10 +35546,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33020,11 +35629,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33107,10 +35718,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33190,10 +35803,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33264,10 +35879,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33278,7 +35895,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let svg_cache = engine.lctx.svg_cache.borrow();
         assert_eq!(svg_cache.len(), 1);
         let doc = svg_cache.values().next().unwrap();
@@ -33316,10 +35933,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33330,7 +35949,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
         engine.cache_svg_paint_styles(&document, EngineViewId::new(), Some((800.0, 600.0)));
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         let mut out = Vec::new();
         for svg in document.get_elements_by_tag_name_shadow_including("svg") {
             let key = Engine::inline_svg_key(&engine.lctx.inline_svg_markup_styled(&svg));
@@ -33508,10 +36127,12 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -33522,7 +36143,7 @@ mod tests {
             lctx: Rc::new(layout_ctx::LayoutCtx::default()),
         };
 
-        engine.lctx.cache_inline_svgs(&document);
+        engine.lctx.cache_inline_svgs(&document, None);
         // Two identical svgs, one content-addressed entry.
         assert_eq!(engine.lctx.svg_cache.borrow().len(), 1, "identical svgs must share a cache entry");
         let svg_cache = engine.lctx.svg_cache.borrow();
@@ -33587,11 +36208,13 @@ mod tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -36176,10 +38799,12 @@ mod web_font_tests {
         };
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let engine = Engine {
+            live_timer_cap: MAX_LIVE_TIMER_CALLBACKS,
             config: EngineConfig::default(),
             views: HashMap::new(),
             presenter: Some(Presenter::layout_only(compositor)),
             page_commits: HashMap::new(),
+            media_backend: None,
             nav_seq: Arc::new(AtomicU64::new(0)),
             host_reentry_override: None,
             clipboard: MemoryClipboard::shared(),
@@ -42624,12 +45249,13 @@ document.currentScript.remove();
     }
 
     #[test]
-    fn a_script_too_large_for_the_budget_is_not_started() {
+    fn a_script_over_16_mib_is_not_started() {
         let page = r#"<html><head>
 <script src="/huge.js"></script>
 <script>var after = true;</script>
 </head><body>hi</body></html>"#;
-        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(MAX_PAGE_SCRIPT_BYTES / 11 + 1));
+        let huge = format!("var huge = true;\n{}", "// padding\n".repeat(16 * 1024 * 1024 / 11 + 1));
+        assert!(huge.len() > 16 * 1024 * 1024);
         let port = serve(vec![
             ("/", "text/html", page.to_string()),
             ("/huge.js", "text/javascript", huge),
@@ -42641,6 +45267,38 @@ document.currentScript.remove();
             "{log:#?}"
         );
         assert_eq!(engine.execute_script(view, "typeof huge").unwrap(), r#"String("undefined")"#);
+        assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
+    }
+
+    /// A bundle the size of YouTube's `kevlar_base` (10.9 MB, one function
+    /// with thousands of variables) runs. Generated here, not the real one.
+    #[test]
+    fn a_youtube_sized_script_runs() {
+        let page = r#"<html><head>
+<script src="/big.js"></script>
+<script>var after = true;</script>
+</head><body>hi</body></html>"#;
+        let mut big = String::from("var big = (function () {\n");
+        for i in 0..9_000 {
+            big.push_str(&format!("  var v{i} = {i};\n"));
+        }
+        big.push_str("  function sum() { return v0 + v4500 + v8999; }\n");
+        let target = 10_900_000;
+        let line = "  // padding padding padding padding padding padding padding padding\n";
+        let tail = "  return sum();\n})();\n";
+        while big.len() + line.len() + tail.len() <= target {
+            big.push_str(line);
+        }
+        big.push_str(tail);
+        assert!(big.len() > 10_800_000 && big.len() <= target, "{}", big.len());
+        let port = serve(vec![
+            ("/", "text/html", page.to_string()),
+            ("/big.js", "text/javascript", big),
+        ]);
+        let (mut engine, view) = load(EngineConfig::default(), port);
+        let log = engine.script_log(view).unwrap();
+        assert!(matches!(log[0].outcome, ScriptOutcome::Ran), "{log:#?}");
+        assert_eq!(engine.execute_script(view, "big").unwrap(), "Number(13499.0)");
         assert_eq!(engine.execute_script(view, "after").unwrap(), "Boolean(true)");
     }
 
@@ -44768,6 +47426,8 @@ pub(crate) struct PreparedSheets {
     css_vars: Rc<HashMap<String, String>>,
     any_container_rule: bool,
     container_first_letter: bool,
+    /// The registered custom properties of these sheets (TRANS-F).
+    registry: Option<Arc<rustkit_css::PropertyRegistry>>,
 }
 
 impl SheetsFingerprint {
@@ -46559,18 +49219,35 @@ fn forced_animation_frame(
     })
 }
 
+/// FORCED-READ: what one forced build cost. `took_ms` is the whole of it, from the decision to
+/// build to the built tree. Inside it: `prepare_ms` (fonts and the SVG caches, before the build),
+/// `build_ms` (the build stage: sheets, the rule index, the style of every element, the boxes) and
+/// `layout_ms` (the layout stage), each summed over the build's passes (`passes`: more than one on
+/// a page with container queries). `elements` is how many elements the last pass walked.
+struct ForcedBuildCost {
+    took_ms: f64,
+    prepare_ms: f64,
+    build_ms: f64,
+    layout_ms: f64,
+    elements: u32,
+    passes: u32,
+}
+
 /// LAT22 probe: one info line for a read that builds the tree, and the
 /// view's count of the reason. Shapes only: the reason, the read and write
 /// kinds, the names of the properties Web Animations' layer holds (those of
 /// the engine's animation property table; custom properties as `--custom`,
 /// any other key as `other`), and whether the animated elements and the
 /// element read are inside shadow trees. No text, no URLs, no values.
+///
+/// FORCED-READ: written after the build, with what it cost (`ForcedBuildCost`).
 fn forced_read_probe(
     id: EngineViewId,
     lay: &layout_ctx::ViewLayout,
     document: &Document,
     probe: &rustkit_bindings::ForcedReadProbe,
     why: &str,
+    cost: &ForcedBuildCost,
 ) {
     let in_shadow = |raw: usize| {
         document
@@ -46616,6 +49293,12 @@ fn forced_read_probe(
         animated_elements = animated,
         animated_in_shadow,
         read_in_shadow,
+        elements = cost.elements,
+        passes = cost.passes,
+        took_ms = %format!("{:.2}", cost.took_ms),
+        prepare_ms = %format!("{:.2}", cost.prepare_ms),
+        build_ms = %format!("{:.2}", cost.build_ms),
+        layout_ms = %format!("{:.2}", cost.layout_ms),
         "Forced read builds the tree"
     );
     let mut counts = lay.forced_build_reasons.borrow_mut();
@@ -46637,7 +49320,9 @@ fn check_animation_frame(
                 return Err(format!("the box does not show the last `{}`", animations::prop_name(*index)));
             }
             match animations::prop_name(*index) {
-                "transform" => {
+                // The individual transforms compose into the same matrix
+                // (`effective_transform`), so they come and go the same way.
+                "transform" | "translate" | "rotate" | "scale" => {
                     let identity = |v: &animations::AnimValue| {
                         let mut s = rustkit_css::ComputedStyle::default();
                         animations::set_prop_value(&mut s, *index, v);
@@ -46710,6 +49395,189 @@ fn apply_animation_frame(b: &mut LayoutBox, changes: &HashMap<usize, &layout_ctx
 
 /// Unless `RUSTKIT_RESTYLE_REPAINT=0`: a pointer restyle that changes only
 /// paint keeps the laid-out tree. Read once.
+/// LPF1: the most relayouts the script restyle path sits out after writes that changed more than
+/// paint (LPF3: reached only by misses in a row; a one-off miss sits out none).
+const SCRIPT_RESTYLE_COOLDOWN: u32 = 60;
+/// LPF1: relayouts in a row with no script paint write after which the kept tree is let go.
+const SCRIPT_RESTYLE_IDLE: u32 = 8;
+/// LPF1: past this many written elements a relayout takes the full build (the path walks every
+/// written element's ancestors).
+const SCRIPT_RESTYLE_MAX_WRITTEN: usize = 256;
+
+/// LPF1's trust check, the one every script short path calls: the written elements to build alone,
+/// or why the relayout is not one for the short path. Every cause is a script one; the dirty set,
+/// built from the `MutationLog`, is not full (a mark with no log record makes it full:
+/// `unlogged_mark`) and marks its elements for a new style and paint only; no scroll happened in
+/// the task; and there are at most `SCRIPT_RESTYLE_MAX_WRITTEN` of them.
+fn script_restyle_roots(
+    causes: &PendingCauses,
+    dirty: Option<&restyle_invalidation::DirtySet>,
+    scrolled_in_task: bool,
+) -> Result<Vec<usize>, &'static str> {
+    if causes.counts.is_empty()
+        || !causes
+            .counts
+            .iter()
+            .all(|(kind, _)| matches!(kind, "script_mutation" | "timer" | "observer_callback"))
+    {
+        return Err("cause");
+    }
+    let Some(dirty) = dirty else {
+        return Err("no_set");
+    };
+    if dirty.full.is_some() {
+        return Err("full");
+    }
+    if dirty.nodes.is_empty() {
+        return Err("empty");
+    }
+    if dirty.nodes.len() > SCRIPT_RESTYLE_MAX_WRITTEN {
+        return Err("too_many");
+    }
+    if !dirty
+        .nodes
+        .values()
+        .all(|bits| bits & !(restyle_invalidation::STYLE | restyle_invalidation::PAINT) == 0)
+    {
+        return Err("not_paint");
+    }
+    if scrolled_in_task {
+        return Err("scrolled");
+    }
+    let mut roots: Vec<usize> = dirty.nodes.keys().copied().collect();
+    roots.sort_unstable();
+    Ok(roots)
+}
+
+/// LPF1, tests only: turn the script-write restyle path off on this thread (`false`) or back on.
+/// The last restyle short path's miss, tests only.
+#[cfg(test)]
+pub(crate) fn last_restyle_miss_for_test() -> String {
+    LAST_RESTYLE_MISS.with(|why| why.borrow().clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Replays a verifying retained build found wrong, over all builds on this thread, for tests.
+    static RETAINED_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Element cascades run on this thread (`compute_style_for_element`), for tests.
+    static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Elements the builds on this thread walked into (the element arm of the build), for tests.
+    static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Builds this thread spliced into a kept box tree (PR 3), for tests.
+    static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
+    static SPLICE_MISMATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RETAINED_STYLES_TEST: std::cell::Cell<Option<RetainedStyles>> = const { std::cell::Cell::new(None) };
+}
+
+/// Splices `boxes-verify` builds in this process found different from the full build beside them.
+static SPLICE_DIFFERENCES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many splices `RUSTKIT_RETAINED_STYLES=boxes-verify` has found different from a full build in
+/// this process: the number the batch gate reads (0 to turn `boxes` on). Each one is also logged
+/// as an error, `Kept box tree: the splice differs from a full build`, with the running `total`.
+pub fn splice_differences() -> usize {
+    SPLICE_DIFFERENCES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Splices `boxes-verify` builds on this thread found different from a full build so far (tests).
+#[cfg(test)]
+pub(crate) fn splice_mismatches_for_test() -> usize {
+    SPLICE_MISMATCHES.with(std::cell::Cell::get)
+}
+
+/// Builds this thread has spliced into a kept box tree so far, and why the last one that could
+/// did not (tests).
+#[cfg(test)]
+pub(crate) fn splices_for_test() -> (usize, String) {
+    (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
+}
+
+/// Elements this thread's builds have walked into so far (tests).
+#[cfg(test)]
+pub(crate) fn built_elements_for_test() -> usize {
+    BUILT_ELEMENTS.with(std::cell::Cell::get)
+}
+
+/// Replays verifying retained builds on this thread have found wrong so far (tests).
+#[cfg(test)]
+pub(crate) fn retained_mismatches_for_test() -> usize {
+    RETAINED_MISMATCHES.with(std::cell::Cell::get)
+}
+
+/// Element cascades this thread has run so far (tests).
+#[cfg(test)]
+pub(crate) fn cascades_for_test() -> usize {
+    CASCADES.with(std::cell::Cell::get)
+}
+
+/// TREE-REUSE: `RUSTKIT_RETAINED_STYLES` keeps each view's per-element styles from one build to
+/// the next across script writes, and replays an element's style when nothing it depends on was
+/// written: `on`, `verify` (cascade anyway and count the replays that would differ), or `off`
+/// (default) (`docs/design/INCREMENTAL_RESTYLE.md` §3.3 item 1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RetainedStyles {
+    Off,
+    On,
+    Verify,
+    /// `On`, and the view keeps its last build's box tree too: a relayout builds the elements the
+    /// writes reached and splices them into it (TREE-REUSE, `INCREMENTAL_RESTYLE.md` PR 3).
+    Boxes,
+    /// `Boxes`, checked: every element cascades (as `Verify`), and after each splice a full build
+    /// runs beside it; the two box trees are compared and the first difference is logged and
+    /// counted, and the full build's tree is the one laid out. The gate for turning `Boxes` on.
+    BoxesVerify,
+}
+
+impl RetainedStyles {
+    fn keeps_boxes(self) -> bool {
+        matches!(self, RetainedStyles::Boxes | RetainedStyles::BoxesVerify)
+    }
+
+    fn verifies(self) -> bool {
+        matches!(self, RetainedStyles::Verify | RetainedStyles::BoxesVerify)
+    }
+}
+
+fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
+    match value {
+        Some("on") | Some("1") => RetainedStyles::On,
+        Some("verify") => RetainedStyles::Verify,
+        Some("boxes") => RetainedStyles::Boxes,
+        Some("boxes-verify") => RetainedStyles::BoxesVerify,
+        _ => RetainedStyles::Off,
+    }
+}
+
+fn retained_styles_mode() -> RetainedStyles {
+    #[cfg(test)]
+    if let Some(mode) = RETAINED_STYLES_TEST.with(std::cell::Cell::get) {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<RetainedStyles> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| retained_styles_from(std::env::var("RUSTKIT_RETAINED_STYLES").ok().as_deref()))
+}
+
+/// Run this thread's builds with retained styles `mode`; `None` goes back to the environment's.
+#[cfg(test)]
+pub(crate) fn set_retained_styles_for_test(mode: Option<RetainedStyles>) {
+    RETAINED_STYLES_TEST.with(|m| m.set(mode));
+}
+
+#[cfg(test)]
+pub(crate) fn set_script_restyle_for_test(on: bool) {
+    SCRIPT_RESTYLE_OFF.with(|off| off.set(!on));
+}
+
+/// LPF1's switch: `RUSTKIT_SCRIPT_RESTYLE=0` turns the script restyle path off (on by default), so a
+/// batch can tell a mover from it; tests turn it off per thread.
+fn script_restyle_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_SCRIPT_RESTYLE").is_none_or(|v| v != "0"))
+        && !SCRIPT_RESTYLE_OFF.with(std::cell::Cell::get)
+}
+
 fn restyle_repaint_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUSTKIT_RESTYLE_REPAINT").is_none_or(|v| v != "0"))
@@ -46777,18 +49645,44 @@ struct RestyleBuild {
     /// children are skipped, as nothing they hold is read under a root.
     pending: HashMap<usize, usize>,
     found: HashMap<usize, LayoutBox>,
+    /// BOXES-DIFF: the roots in `found` whose box their parent's build drops (a full build has no
+    /// box for them), and why a splice of this build must not be made, if it must not.
+    dropped: std::collections::HashSet<usize>,
+    refused: Option<&'static str>,
     /// The child nodes the build went into.
     walked: usize,
 }
 
 thread_local! {
+    /// LPF1, tests only: script style writes take the full rebuild (the cross-check's other arm).
+    static SCRIPT_RESTYLE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// LINKS-SLOW: the real time the content loop's clock kept from this turn (see
+    /// [`Engine::pump_live_real_at`]).
+    static LIVE_FRACTION_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// LINKS-SLOW part 2, diagnostics only (`HIWAVE_LINKS_TRACE`): this pump's first live turn's
+    /// entry, and its timer slice's start and end ([`links_trace_take`]).
+    static LINKS_TRACE: std::cell::Cell<[Option<std::time::Instant>; 3]> = const { std::cell::Cell::new([None; 3]) };
     static RESTYLE_BUILD: std::cell::RefCell<Option<RestyleBuild>> = const { std::cell::RefCell::new(None) };
+    /// Why the last relayout that could splice into the kept box tree built in full (PR 3).
+    static LAST_SPLICE_MISS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// The child nodes the last pointer restyle's two builds went into.
     static LAST_RESTYLE_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Milliseconds of the last pointer restyle without layout: the two
     /// builds with the compare and the patch, the display list, the
     /// geometry snapshot, the render.
     static LAST_RESTYLE_SPLIT: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+}
+
+/// LINKS-SLOW part 2, diagnostics only: whether `HIWAVE_LINKS_TRACE` is set (read once).
+pub(crate) fn links_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HIWAVE_LINKS_TRACE").is_some())
+}
+
+/// LINKS-SLOW part 2, diagnostics only: the stamps the last pump left (its first live turn's
+/// entry, its timer slice's start and end), cleared for the next.
+pub(crate) fn links_trace_take() -> [Option<std::time::Instant>; 3] {
+    LINKS_TRACE.with(|t| t.replace([None; 3]))
 }
 
 /// Whether the build in progress is a pointer restyle's partial build
@@ -46954,6 +49848,228 @@ fn with_root_scrollbar(
     Some(Arc::new(combined))
 }
 
+/// The build a set of written elements needs: the topmost of them (`roots`), the elements above
+/// them (`path`), and for each of those how many of its children on the way down the build has to
+/// reach (`pending`). Refused when a written element left the document or the root element or
+/// body was written (they have no box of their own to put back).
+struct RestylePlan {
+    roots: Vec<usize>,
+    path: std::collections::HashSet<usize>,
+    pending: HashMap<usize, usize>,
+}
+
+fn restyle_plan(document: &Document, written: &[usize]) -> Result<RestylePlan, &'static str> {
+    let body = document.body().map(|body| body.id.raw());
+    let mut above: HashMap<usize, Vec<usize>> = HashMap::new();
+    for raw in written {
+        let Some(node) = document.get_node(rustkit_dom::NodeId::new(*raw)) else {
+            return Err("a written element left the document");
+        };
+        let mut chain = Vec::new();
+        let mut parent = node.parent();
+        while let Some(p) = parent {
+            chain.push(p.id.raw());
+            parent = p.parent();
+        }
+        above.insert(*raw, chain);
+    }
+    let written_set: std::collections::HashSet<usize> = written.iter().copied().collect();
+    let roots: Vec<usize> = written
+        .iter()
+        .copied()
+        .filter(|raw| !above[raw].iter().any(|up| written_set.contains(up)))
+        .collect();
+    let mut path = std::collections::HashSet::new();
+    for root in &roots {
+        // The root element and body have no box of their own to patch.
+        if !body.is_some_and(|body| above[root].contains(&body)) {
+            return Err("the root element or body was written");
+        }
+        path.extend(above[root].iter().copied());
+    }
+    let mut pending: HashMap<usize, usize> = HashMap::new();
+    let mut steps = std::collections::HashSet::new();
+    for root in &roots {
+        let mut child = *root;
+        for parent in &above[root] {
+            if steps.insert((*parent, child)) {
+                *pending.entry(*parent).or_insert(0) += 1;
+            }
+            child = *parent;
+        }
+    }
+    Ok(RestylePlan { roots, path, pending })
+}
+
+/// Where two box trees as built (before layout) first differ, as the path of child indices to it
+/// and what differs; `None` when they are the same box for box, element numbers included (#1247 R1
+/// item 3: they are document order, and a splice must number its boxes as a full build would).
+fn first_box_difference(a: &LayoutBox, b: &LayoutBox, path: &mut Vec<usize>) -> Option<String> {
+    let at = |path: &[usize], what: String| format!("at {path:?} (node {:?}): {what}", a.node_id);
+    if a.node_id != b.node_id {
+        return Some(at(path, format!("node {:?} vs {:?}", a.node_id, b.node_id)));
+    }
+    if !same_computed_style(&a.style, &b.style) {
+        return Some(at(path, "style".to_string()));
+    }
+    let shallow = |x: &LayoutBox| {
+        let mut x = x.clone();
+        x.children.clear();
+        x.style = Box::new(ComputedStyle::new());
+        format!("{x:?}")
+    };
+    let (sa, sb) = (shallow(a), shallow(b));
+    if sa != sb {
+        return Some(at(
+            path,
+            format!("box fields differ: {}", differing_fields(&sa, &sb)),
+        ));
+    }
+    if a.children.len() != b.children.len() {
+        let kids = |x: &LayoutBox| {
+            x.children
+                .iter()
+                .map(|c| match (c.node_id, c.identity.as_ref()) {
+                    (Some(n), Some(i)) => format!("{n}:{}", i.tag),
+                    (Some(n), None) => format!("{n}"),
+                    (None, _) => format!("anon {:?}", c.box_type),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Some(at(
+            path,
+            format!(
+                "{} children vs {}: [{}] vs [{}]",
+                a.children.len(),
+                b.children.len(),
+                kids(a),
+                kids(b)
+            ),
+        ));
+    }
+    for (i, (ca, cb)) in a.children.iter().zip(&b.children).enumerate() {
+        path.push(i);
+        if let Some(difference) = first_box_difference(ca, cb, path) {
+            return Some(difference);
+        }
+        path.pop();
+    }
+    None
+}
+
+/// Each top-level field of two boxes' shallow `Debug` text (`LayoutBox { a: .., b: .. }`) that
+/// differs, as `name: left vs right` (BOXES-DIFF: the log names every differing field of the first
+/// differing box, not only that it differs).
+fn differing_fields(a: &str, b: &str) -> String {
+    fn fields(s: &str) -> Vec<&str> {
+        let body = s
+            .find('{')
+            .map_or(s, |open| &s[open + 1..s.len().saturating_sub(1)]);
+        let (mut out, mut depth, mut quoted, mut escaped, mut start) =
+            (Vec::new(), 0i32, false, false, 0);
+        for (i, c) in body.char_indices() {
+            if quoted {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(body[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(body[start..].trim());
+        out.retain(|f| !f.is_empty());
+        out
+    }
+    let (fa, fb) = (fields(a), fields(b));
+    if fa.len() != fb.len() {
+        return format!("{a} vs {b}");
+    }
+    fa.iter()
+        .zip(&fb)
+        .filter(|(x, y)| x != y)
+        .map(|(x, y)| match (x.split_once(": "), y.split_once(": ")) {
+            (Some((name, left)), Some((other, right))) if name == other => {
+                format!("{name}: {left} vs {right}")
+            }
+            _ => format!("{x} vs {y}"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A spliced tree's element numbers, as a full build gives them (#1247 R1 item 3). A full build
+/// numbers each element's box as it builds it, before its children (`attach_identity`), so in the
+/// order of the tree; a box split in two (an inline around a block) shares its element's number.
+/// Each number met is given the next one in that order, and a number met again its first one. The
+/// numbers on entry must tell elements apart (`number_spliced_boxes`). The layout memo, the
+/// intrinsic-size cache, the incremental layout's comparison and the grid read these numbers:
+/// renumbered, they read what a full build would give them. boxes-verify compares them.
+fn number_in_document_order(tree: &mut LayoutBox) {
+    fn walk(b: &mut LayoutBox, seen: &mut HashMap<usize, usize>) {
+        if let Some(identity) = b.identity.as_mut() {
+            let next = seen.len() + 1;
+            let number = *seen.entry(identity.element_id).or_insert(next);
+            identity.element_id = number;
+            b.element_id = Some(number);
+        }
+        for c in b.children.iter_mut() {
+            walk(c, seen);
+        }
+    }
+    walk(tree, &mut HashMap::new());
+}
+
+/// The largest element number in `tree`.
+fn max_element_id(tree: &LayoutBox) -> usize {
+    tree.children
+        .iter()
+        .map(max_element_id)
+        .fold(tree.element_id().unwrap_or(0), usize::max)
+}
+
+/// A spliced subtree's element numbers: a build of a few elements numbers them from 1, so each box
+/// takes the number its kept box had (`adopt_build_ids`) and any other one a number no box in the
+/// tree has.
+fn number_spliced_boxes(fresh: &mut LayoutBox, kept: Option<&LayoutBox>, next: &mut usize) {
+    fn mark(b: &mut LayoutBox) {
+        if let Some(identity) = b.identity.as_mut() {
+            identity.element_id = usize::MAX;
+            b.element_id = Some(usize::MAX);
+        }
+        b.children.iter_mut().for_each(mark);
+    }
+    fn fill(b: &mut LayoutBox, next: &mut usize) {
+        if let Some(identity) = b.identity.as_mut() {
+            if identity.element_id == usize::MAX {
+                identity.element_id = *next;
+                b.element_id = Some(*next);
+                *next += 1;
+            }
+        }
+        for c in b.children.iter_mut() {
+            fill(c, next);
+        }
+    }
+    mark(fresh);
+    if let Some(kept) = kept {
+        adopt_build_ids(fresh, kept);
+    }
+    fill(fresh, next);
+}
+
 fn box_of_node(tree: &LayoutBox, raw: usize) -> Option<&LayoutBox> {
     if tree.node_id == Some(raw) {
         return Some(tree);
@@ -46969,6 +50085,88 @@ fn box_of_node_mut(tree: &mut LayoutBox, raw: usize) -> Option<&mut LayoutBox> {
 }
 
 /// What the build gives a box besides its style and its children.
+/// LPF2: a transform that stays a transform, or an opacity that stays below 1 (or stays 1), is
+/// paint: the box keeps its stacking context and its containing block for fixed and absolute
+/// descendants (Chrome, `transform_paint_probe_cft148.json`), and layout reads neither (the painter
+/// does, from the style). One that comes or goes is not: it falls to [`restyle_needs_layout`].
+fn keeps_what_it_establishes(kept: &ComputedStyle, fresh: &ComputedStyle) -> bool {
+    kept.transform.ops.is_empty() == fresh.transform.ops.is_empty() && (kept.opacity < 1.0) == (fresh.opacity < 1.0)
+}
+
+/// [`restyle_needs_layout`] for a script write (LPF2): where a box keeps what it establishes, its
+/// transform, transform origin and opacity are compared as paint.
+fn script_restyle_needs_layout(kept: &LayoutBox, fresh: &LayoutBox) -> Option<String> {
+    if !built_alike(kept, fresh) {
+        return Some("boxes".to_string());
+    }
+    let mut masked = fresh.clone();
+    masked.children.clear();
+    if keeps_what_it_establishes(&kept.style, &fresh.style) {
+        masked.style.transform = kept.style.transform.clone();
+        masked.style.transform_origin = kept.style.transform_origin.clone();
+        masked.style.opacity = kept.style.opacity;
+    }
+    let mut shallow = kept.clone();
+    shallow.children.clear();
+    if let Some(why) = restyle_needs_layout(&shallow, &masked) {
+        return Some(why);
+    }
+    if kept.children.len() != fresh.children.len() {
+        return Some("boxes".to_string());
+    }
+    kept.children
+        .iter()
+        .zip(&fresh.children)
+        .find_map(|(kept, fresh)| script_restyle_needs_layout(kept, fresh))
+}
+
+/// LPF1 R1: copy onto `laid` every box's paint from `fresh` (one shape), whether or not it differs
+/// from the kept tree: the pointer restyle and paint-only animation frames patch the laid-out
+/// tree's paint without the kept tree, so only the fresh build says what is painted now. The kept
+/// tree answers only whether more than paint changed, which those paths never change.
+fn copy_all_paint(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    if let (BoxType::Image { url, .. }, BoxType::Image { url: is, .. }) = (&mut laid.box_type, &fresh.box_type) {
+        if url != is {
+            *url = is.clone();
+        }
+    }
+    laid.style.copy_paint_only(&fresh.style);
+    laid.focused_caret = fresh.focused_caret;
+    laid.focused_selection = fresh.focused_selection.clone();
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_all_paint(laid, fresh);
+    }
+}
+
+/// LPF2: copy the transform, its origin and the opacity of every box of `fresh` onto `laid` (one
+/// shape), after `copy_changed_paint`; [`script_restyle_needs_layout`] let only boxes that keep
+/// what they establish differ in them.
+fn copy_transform_and_opacity(laid: &mut LayoutBox, fresh: &LayoutBox) {
+    laid.style.transform = fresh.style.transform.clone();
+    laid.style.transform_origin = fresh.style.transform_origin.clone();
+    laid.style.opacity = fresh.style.opacity;
+    for (laid, fresh) in laid.children.iter_mut().zip(&fresh.children) {
+        copy_transform_and_opacity(laid, fresh);
+    }
+}
+
+/// LPF1: `fresh` (a build of a few elements) takes the element numbers `kept` (the full build) gave
+/// the same boxes, where the two have one shape; the build-order numbers are all that differ.
+fn adopt_build_ids(fresh: &mut LayoutBox, kept: &LayoutBox) {
+    if fresh.node_id != kept.node_id {
+        return;
+    }
+    fresh.element_id = kept.element_id;
+    if let (Some(f), Some(k)) = (fresh.identity.as_mut(), kept.identity.as_ref()) {
+        f.element_id = k.element_id;
+    }
+    if fresh.children.len() == kept.children.len() {
+        for (f, k) in fresh.children.iter_mut().zip(&kept.children) {
+            adopt_build_ids(f, k);
+        }
+    }
+}
+
 fn built_alike(a: &LayoutBox, b: &LayoutBox) -> bool {
     // CH2.E19: an inline svg whose markup changed only in author paint
     // (another key, the same natural size) is the same box: the new icon
@@ -47110,6 +50308,19 @@ struct BoxPositioning {
 /// Neither of those can change between the two builds a memo spans: it is
 /// armed only inside `load_subresources`, after the sheets are assigned and
 /// before any script runs, and it is gone when that returns.
+///
+/// Retained styles (TREE-REUSE) keep a memo across script writes, so any
+/// input a cascade reads that a script write does not record must be here,
+/// or must reach the build only through a relayout script did not ask for
+/// (which starts the styles over). Not here today, because none can change:
+/// - `:target`: the matcher answers it false (`pseudo_class_is_static_false`).
+///   When it is implemented, the target element (a hash change records no DOM
+///   write) belongs in this key.
+/// - `prefers-color-scheme`: the media evaluator answers `light` always
+///   (`rustkit-css` `media.rs`); a live scheme belongs in this key.
+/// - Page zoom: the engine has no zoom input; a zoom that changes the viewport
+///   or the device pixel ratio arrives as a resize, a relayout script did not
+///   ask for.
 #[derive(Clone, PartialEq, Debug)]
 struct StyleMemoKey {
     view: Option<EngineViewId>,
@@ -47188,9 +50399,69 @@ struct StyleMemo {
     tree_unusable: bool,
     /// Boxes a verifying build found different from the kept tree.
     tree_mismatches: usize,
+    /// TREE-REUSE (a): kept across script writes (`RetainedStylesScope`). Its entries are then
+    /// replayed only for elements outside `stale` whose parents' styles did not change.
+    retained: bool,
+    /// Elements script writes reached since their entry was cascaded.
+    stale: HashSet<rustkit_dom::NodeId>,
+    /// Elements this build cascaded to a style other than their entry's (or with no entry): their
+    /// children cascade too.
+    changed: HashSet<rustkit_dom::NodeId>,
+    /// Elements this build cascaded: their `::before`/`::after` cascade too.
+    recomputed: HashSet<rustkit_dom::NodeId>,
+    /// The script-set control state (checkedness, values) the entries were cascaded with.
+    controls: u64,
+    /// Relayouts in a row the styles were not kept across (`RETAINED_IDLE`).
+    untrusted_run: u32,
+}
+
+/// After this many relayouts in a row that script writes alone did not ask for (an animation, a
+/// resize, a load), a view lets its retained styles go and its builds stop recording them, until
+/// script writes come again: the memo holds a computed style per element (#1246 R1 item 5), and
+/// recording one costs every such build a copy of each.
+const RETAINED_IDLE: u32 = 8;
+
+/// The script-set control state a cascade reads (`:checked`, `:placeholder-shown`): retained
+/// styles cascaded under other control state are not replayed (TREE-REUSE a).
+fn retained_controls_fingerprint(lay: &layout_ctx::ViewLayout) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut checked: Vec<(usize, bool)> = lay.checked_states.borrow().iter().map(|(k, v)| (*k, *v)).collect();
+    checked.sort_unstable();
+    checked.hash(&mut h);
+    let mut values: Vec<(usize, String)> =
+        lay.edit_states.borrow().iter().map(|(k, v)| (*k, v.value())).collect();
+    values.sort_unstable();
+    values.hash(&mut h);
+    h.finish()
 }
 
 impl StyleMemo {
+    /// An empty memo a view keeps across script writes (TREE-REUSE a). It keeps no box tree.
+    fn retained(verify: bool) -> Self {
+        StyleMemo {
+            verify,
+            key: None,
+            styles: HashMap::new(),
+            pseudos: HashMap::new(),
+            in_build: None,
+            hits: 0,
+            misses: 0,
+            mismatches: 0,
+            tree_reuse: TreeReuse::Off,
+            tree: None,
+            tree_images: HashMap::new(),
+            tree_unusable: false,
+            tree_mismatches: 0,
+            retained: true,
+            stale: HashSet::new(),
+            changed: HashSet::new(),
+            recomputed: HashSet::new(),
+            controls: 0,
+            untrusted_run: 0,
+        }
+    }
+
     /// A recording starts: nothing kept for an earlier one describes it.
     fn forget_tree(&mut self) {
         self.tree = None;
@@ -47209,6 +50480,24 @@ thread_local! {
     /// Set by `StyleMemoScope` for the span of `load_subresources`.
     static STYLE_MEMO: std::cell::RefCell<Option<StyleMemo>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Sets a view's build flag (`ViewLayout::retain_script_unlaid_now`, `keep_forced_tree_now`) for
+/// one build, and clears it when dropped, also if the build unwinds: a flag left set would make a
+/// later build keep a tree it should not.
+struct FlagGuard<'a>(&'a Cell<bool>);
+
+impl<'a> FlagGuard<'a> {
+    fn set(flag: &'a Cell<bool>) -> Self {
+        flag.set(true);
+        Self(flag)
+    }
+}
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
 }
 
 /// Holds the armed memo aside for one build that must neither replay nor
@@ -47282,6 +50571,12 @@ impl StyleMemoScope {
                 tree_images: HashMap::new(),
                 tree_unusable: false,
                 tree_mismatches: 0,
+                retained: false,
+                stale: HashSet::new(),
+                changed: HashSet::new(),
+                recomputed: HashSet::new(),
+                controls: 0,
+                untrusted_run: 0,
             })
         });
         Some(StyleMemoScope { owner: true })
@@ -47332,10 +50627,13 @@ impl StyleMemoBuild {
                     memo.key = Some(key);
                     memo.styles.clear();
                     memo.pseudos.clear();
+                    memo.stale.clear();
                     memo.forget_tree();
                     MemoUse::Record
                 }
             };
+            memo.changed.clear();
+            memo.recomputed.clear();
             memo.in_build = Some(use_);
             memo.hits = 0;
             memo.misses = 0;
@@ -47374,6 +50672,126 @@ fn memoized_style(
     node: rustkit_dom::NodeId,
     compute: impl FnOnce() -> ComputedStyle,
 ) -> Box<ComputedStyle> {
+    memoized_element_style(node, None, compute)
+}
+
+/// [`memoized_style`] for an element under `dom_parent`. A retained memo (TREE-REUSE a) replays
+/// the element's entry only when no script write reached it and neither its DOM parent nor the
+/// element whose children are being built (`RetainParent`) cascaded to a new style this build.
+/// Otherwise it cascades, keeps the result, and marks the element changed if the style moved.
+fn memoized_element_style(
+    node: rustkit_dom::NodeId,
+    dom_parent: Option<rustkit_dom::NodeId>,
+    compute: impl FnOnce() -> ComputedStyle,
+) -> Box<ComputedStyle> {
+    // In a retained build: Some(true) replays, Some(false) cascades and keeps.
+    let retained = STYLE_MEMO.with(|m| {
+        let slot = m.borrow();
+        let memo = slot.as_ref()?;
+        if !memo.retained || !matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+            return None;
+        }
+        let parent_changed = |p: Option<rustkit_dom::NodeId>| p.is_some_and(|p| memo.changed.contains(&p));
+        let built_under = RETAIN_PARENTS.with(|s| s.borrow().last().copied());
+        // Built outside every element's scope (body, under the root): any change may be its parent's.
+        let unknown_parent = built_under.is_none() && !memo.changed.is_empty();
+        // A replay would serve the element: no write reached it, it has an entry, and no element its
+        // style inherits from cascaded to a new style this build.
+        let serves = !(memo.stale.contains(&node)
+            || parent_changed(dom_parent)
+            || parent_changed(built_under)
+            || unknown_parent
+            || !memo.styles.contains_key(&node));
+        Some((serves && !memo.verify, serves))
+    });
+    match retained {
+        None => memoized_style_through_memo(node, compute),
+        Some((true, _)) => {
+            let hit = STYLE_MEMO.with(|m| {
+                let mut slot = m.borrow_mut();
+                let memo = slot.as_mut()?;
+                memo.hits += 1;
+                memo.styles.get(&node).cloned()
+            });
+            hit.unwrap_or_else(|| Box::new(compute()))
+        }
+        Some((false, serves)) => {
+            let fresh = Box::new(compute());
+            STYLE_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    memo.stale.remove(&node);
+                    let differs = memo.styles.get(&node).is_none_or(|old| !same_computed_style(old, &fresh));
+                    if differs {
+                        memo.changed.insert(node);
+                    }
+                    memo.misses += 1;
+                    // A verifying build counts the elements a replay would have served, and wrongly:
+                    // not the ones a write reached or whose parent changed, which cascade anyway.
+                    if memo.verify && differs && serves {
+                        memo.mismatches += 1;
+                        #[cfg(test)]
+                        RETAINED_MISMATCHES.with(|c| c.set(c.get() + 1));
+                        warn!(?node, "Retained styles: a replay would differ from a fresh cascade");
+                    }
+                    memo.recomputed.insert(node);
+                    memo.styles.insert(node, fresh.clone());
+                }
+            });
+            fresh
+        }
+    }
+}
+
+/// In a retained build, `node` animates or may: its children and its pseudos cascade.
+///
+/// Cost: "may" includes declaring a transition, so `transition: all` (or any
+/// transition) on a page wrapper makes its whole subtree cascade on every
+/// script relayout, as without retained styles; the retained build saves
+/// nothing under it. Telling a transition on a non-inherited property (or one
+/// that is not running) apart would recover that; it is left conservative.
+fn note_retained_animating(node: rustkit_dom::NodeId) {
+    STYLE_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if memo.retained && matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+                memo.changed.insert(node);
+                memo.recomputed.insert(node);
+            }
+        }
+    });
+}
+
+thread_local! {
+    /// The elements whose children the build is building, innermost last (`RetainParent`).
+    static RETAIN_PARENTS: std::cell::RefCell<Vec<rustkit_dom::NodeId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Names `node` as the element whose children are built inside this scope: a child a retained
+/// memo replays must not be under an element whose style changed (TREE-REUSE a).
+struct RetainParent;
+
+impl RetainParent {
+    fn enter(node: rustkit_dom::NodeId) -> Self {
+        RETAIN_PARENTS.with(|s| s.borrow_mut().push(node));
+        RetainParent
+    }
+}
+
+impl Drop for RetainParent {
+    fn drop(&mut self) {
+        // try_: a panic inside a borrow must not become a double panic.
+        RETAIN_PARENTS.with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                s.pop();
+            }
+        });
+    }
+}
+
+fn memoized_style_through_memo(
+    node: rustkit_dom::NodeId,
+    compute: impl FnOnce() -> ComputedStyle,
+) -> Box<ComputedStyle> {
     through_memo(
         |m| &mut m.styles,
         node,
@@ -47391,6 +50809,32 @@ fn memoized_pseudo_style(
     pseudo: Pseudo,
     compute: impl FnOnce() -> Option<ComputedStyle>,
 ) -> Option<ComputedStyle> {
+    // A retained memo (TREE-REUSE a): an element that cascaded this build cascades its pseudos.
+    let retained = STYLE_MEMO.with(|m| {
+        let slot = m.borrow();
+        let memo = slot.as_ref()?;
+        if !memo.retained || !matches!(memo.in_build, Some(MemoUse::Replay | MemoUse::Verify)) {
+            return None;
+        }
+        Some(memo.recomputed.contains(&node) || memo.verify || !memo.pseudos.contains_key(&(node, pseudo)))
+    });
+    if let Some(must) = retained {
+        if !must {
+            let hit = STYLE_MEMO.with(|m| {
+                m.borrow().as_ref().and_then(|memo| memo.pseudos.get(&(node, pseudo)).map(|s| s.as_deref().cloned()))
+            });
+            if let Some(hit) = hit {
+                return hit;
+            }
+        }
+        let fresh = compute();
+        STYLE_MEMO.with(|m| {
+            if let Some(memo) = m.borrow_mut().as_mut() {
+                memo.pseudos.insert((node, pseudo), fresh.as_ref().map(|s| Box::new(s.clone())));
+            }
+        });
+        return fresh;
+    }
     through_memo(
         |m| &mut m.pseudos,
         (node, pseudo),
@@ -48899,7 +52343,7 @@ mod windows_a_leg_pins {
             <div><a class="btn"><svg viewbox="0 0 24 24"><rect width="24" height="24"/></svg></a></div>
             </body></html>"#;
         let d = Document::parse_html(html).expect("parse");
-        e.lctx.cache_inline_svgs(&d);
+        e.lctx.cache_inline_svgs(&d, None);
         let mut root = e.build_layout_from_document(&d, &[]);
         root.layout(&Dimensions {
             content: Rect::new(0.0, 0.0, 800.0, 600.0),

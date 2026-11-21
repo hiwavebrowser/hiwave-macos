@@ -1,0 +1,11 @@
+{
+ "note": "long_analysis.html in the engine: parity-capture (release, batch 90's tree 52798b9b) --live-ms 60000 --post-load-live --timer-horizon-ms 100 --interrupt-scripts. Wall-clock on this Mac at a 1-minute load near 3.5: read the ratio to long_analysis_cft148.json, not the milliseconds. With the default live-turn budget (5000 ms) the task is stopped 5001 ms in and the page never reports; these numbers are with --live-turn-budget-ms 120000.",
+ "default_budget": { "finished": false, "stopped_at_ms": 5001, "source": "timers" },
+ "raised_budget": {
+  "runs": [
+   { "rows": 560, "iterations": 2500, "totalMs": 3546, "sortMs": 2836, "fitMs": 196, "compares": 10954422, "slope": -0.000037 },
+   { "rows": 1700, "iterations": 2500, "totalMs": 12397, "sortMs": 10259, "fitMs": 589, "compares": 40011549, "slope": -0.000009 }
+  ],
+  "finished": true
+ }
+}

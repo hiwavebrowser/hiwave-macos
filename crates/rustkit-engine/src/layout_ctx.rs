@@ -54,6 +54,10 @@ pub(crate) struct LayoutCtx {
     /// `drawImage` of an SVG `<img>` rasterizes its path list (STR-7
     /// slice 3).
     pub(crate) canvas_svgs: crate::canvas_paint::CanvasSvgs,
+    /// Moves whenever an SVG image (fetched or a `data:` URL) enters `svg_cache`: an `<img>`'s
+    /// natural size can come from there, so a kept box tree built before it is stale
+    /// ([`Self::image_generation`]).
+    pub(crate) svg_images: std::cell::Cell<u64>,
     /// The SVG paint declarations (`fill`, `stroke`, `stop-color`, ...)
     /// author rules give each element inside an inline `<svg>`, by raw
     /// NodeId. Filled by `cache_svg_paint_styles` before each build (a
@@ -66,6 +70,9 @@ pub(crate) struct LayoutCtx {
     /// What the inline svg pre-pass keeps between builds: the id index,
     /// each svg's markup key and the paint maps (`svg_prepass`, LAT4b).
     pub(crate) svg_prepass: RefCell<crate::svg_prepass::SvgPrepass>,
+    /// `EngineConfig::nested_contexts`, for the build: an `<iframe>` is a
+    /// replaced box with a 2px border only with it on.
+    pub(crate) nested_contexts: std::cell::Cell<bool>,
 }
 
 impl Default for LayoutCtx {
@@ -77,9 +84,20 @@ impl Default for LayoutCtx {
             building: RefCell::default(),
             svg_cache: RefCell::default(),
             canvas_svgs: Default::default(),
+            svg_images: std::cell::Cell::new(0),
             svg_paint_styles: RefCell::default(),
             svg_prepass: RefCell::default(),
+            nested_contexts: std::cell::Cell::new(false),
         }
+    }
+}
+
+impl LayoutCtx {
+    /// What an `<img>`'s natural size can come from has changed when this moves: a raster image
+    /// entered or left the image cache, or an SVG image entered the SVG cache. The kept box tree
+    /// records it at its build and is refused when it differs (#1304; the SVG half after batch 108).
+    pub(crate) fn image_generation(&self) -> u64 {
+        self.image_manager.cache_generation().wrapping_add(self.svg_images.get())
     }
 }
 
@@ -179,9 +197,11 @@ impl LayoutCtx {
         // A pointer restyle sets this before its builds and takes it
         // after them: read before `build`, while it is certainly set.
         let partial_build = crate::restyle_build_active();
+        crate::relayout_cause::set_last_build_partial(false);
         let prev = self.building.replace(Some(Rc::new(view)));
         let _restore = Restore { ctx: self, prev };
         let built = build();
+        let partial_build = build_was_partial(partial_build);
         // What the build did not visit has no computed style: its
         // transitions end here. Not after a build that took the kept box
         // tree (it visited nothing) or a partial restyle build (it skipped
@@ -198,20 +218,22 @@ impl LayoutCtx {
     /// view being built (`Animations::on_style`); nothing outside a build.
     /// A `@keyframes` an animation names is resolved here: each block's
     /// declarations applied to the element's cascaded style, and the values
-    /// of the properties they set read back.
+    /// of the properties they set read back. True when the element animates or
+    /// may (it names an animation or a transition, script animates it, or it
+    /// has running records): its style is then more than its cascade.
     pub(crate) fn animate_style(
         &self,
         node: usize,
         style: &mut crate::ComputedStyle,
         stylesheets: &[rustkit_css::Stylesheet],
-    ) {
+    ) -> bool {
         let lay = self
             .building
             .borrow()
             .as_ref()
             .and_then(|view| view.lay.clone());
         let Some(lay) = lay else {
-            return;
+            return false;
         };
         let resolve =
             |name: &str, base: &crate::ComputedStyle| -> Option<Vec<crate::animations::Frame>> {
@@ -258,11 +280,24 @@ impl LayoutCtx {
             .animations
             .iter()
             .any(|item| !item.name.trim().is_empty() && !item.name.trim().eq_ignore_ascii_case("none"));
-        let cascaded = (named || !style.transitions.is_empty() || entries.is_some() || {
+        let may_animate = named || !style.transitions.is_empty() || entries.is_some() || {
             lay.animations.borrow().has_records(node)
-        })
-        .then(|| style.clone());
-        lay.animations.borrow_mut().on_style(node, style, &resolve);
+        };
+        let cascaded = may_animate.then(|| style.clone());
+        {
+            let mut anims = lay.animations.borrow_mut();
+            // TRANS-F: the registered custom properties of this build.
+            let registry = crate::registered_props::current();
+            let same = match (&anims.registry, &registry) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                anims.registry = registry;
+            }
+            anims.on_style(node, style, &resolve);
+        }
         // Script's animated values, above the CSS ones: each entry parsed
         // against the style as it stands and composed on it.
         self.apply_script_layer(style, entries.as_deref());
@@ -283,6 +318,23 @@ impl LayoutCtx {
                 anims.captured.remove(&node);
             }
         }
+        may_animate
+    }
+
+    /// TRANS-F: the registered custom property values `node`'s running
+    /// transitions set in this build, for the element's second cascade.
+    pub(crate) fn take_custom_overlay(&self, node: usize) -> Option<std::collections::HashMap<String, String>> {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone())?;
+        let mut anims = lay.animations.borrow_mut();
+        anims.take_custom_overlay(node)
+    }
+
+    /// The style `node` cascaded to before its animations, as
+    /// `animate_style` kept it.
+    pub(crate) fn cascaded_style(&self, node: usize) -> Option<crate::ComputedStyle> {
+        let lay = self.building.borrow().as_ref().and_then(|view| view.lay.clone())?;
+        let anims = lay.animations.borrow();
+        anims.captured.get(&node).map(|c| c.cascaded.clone())
     }
 
     /// Script's animated-style entries for one element (Web Animations),
@@ -343,6 +395,27 @@ impl LayoutCtx {
             // (detached, or under `display: none`) paints nothing, and
             // the frame has nothing of it to place (LAT14: until
             // 2026-11-08 such an entry laid out every frame of the page).
+            // TRANS-F: what reads a registered custom property (`var()`)
+            // is known only to a cascade.
+            if anims.custom_running() {
+                // REG-TRANS-FASTPATH: every element that animates (a frame's values move on all
+                // of them), for the relayout's short path to restyle alone: what reads a moving
+                // registered value through `var()` is its own declarations or, for an
+                // `inherits: true` property, its subtree's.
+                let mut roots: Vec<usize> = anims
+                    .record_nodes()
+                    .into_iter()
+                    // Script-layer entries unfiltered: one on an element no build reaches
+                    // (detached, `display: none`) is a root the short path cannot find, a miss
+                    // and the full build, as now.
+                    .chain(script.keys().copied())
+                    .map(|key| crate::animations::split_key(key).0)
+                    .collect();
+                roots.sort_unstable();
+                roots.dedup();
+                *lay.animation_roots.borrow_mut() = Some(roots);
+                return Err("a registered custom property animates".into());
+            }
             if let Some(node) = anims
                 .record_nodes()
                 .into_iter()
@@ -582,6 +655,20 @@ pub(crate) struct ViewLayout {
     /// raw NodeId and pseudo name, for `getComputedStyle(el, pseudo)`. Kept
     /// like `boxless_styles`.
     pub(crate) pseudo_styles: RefCell<HashMap<(usize, &'static str), crate::ComputedStyle>>,
+    /// The document and author svg paint map this view's last build
+    /// styled its inline svgs with, for `getComputedStyle(fill / stroke)`
+    /// on svg content (`svg_computed`, A2.1).
+    pub(crate) svg_paint: RefCell<Option<Rc<crate::svg_computed::SvgPaintSnapshot>>>,
+    /// The keys of the engine's `svg_cache` that this view's inline svg
+    /// passes parsed for an svg holding a moving svg paint value (A2.2):
+    /// one per frame, evicted by this view's next pass that no longer uses
+    /// them, so a long transition keeps the cache flat. Per view: the cache
+    /// is shared, and another view's pass must not evict what this one
+    /// paints.
+    pub(crate) svg_transient_keys: RefCell<Vec<String>>,
+    /// MEDIA-AVF: each video's display size once its metadata is in, with the key its
+    /// frames paint under, by raw NodeId: what its replaced box is built at (`media.rs`).
+    pub(crate) media_sizes: RefCell<HashMap<usize, (u32, u32, String)>>,
     /// This view's running CSS transitions and the values they compare
     /// against, read and advanced by every build (`animations.rs`).
     pub(crate) animations: RefCell<crate::animations::Animations>,
@@ -616,6 +703,11 @@ pub(crate) struct ViewLayout {
     pub(crate) forced_build_reasons: RefCell<std::collections::BTreeMap<String, u32>>,
     /// LAT22 probe: the shadow trees' sheet cost in the view's last build.
     pub(crate) last_shadow_build: Cell<crate::shadow_tree::ShadowBuildStats>,
+    /// FORCED-READ: the elements the view's last build walked (styled and given an identity).
+    pub(crate) last_build_elements: Cell<u32>,
+    /// FORCED-READ: the document's forced builds so far, the time in their build stage and in
+    /// their layout stage, in ms (the relayout summary takes them).
+    pub(crate) forced_stage_ms: Cell<(f64, f64)>,
     /// Element cascades of the view's last build that had no rule index.
     pub(crate) last_unindexed_cascades: Cell<u32>,
     /// LAT22: the document's shadow tree styles across builds.
@@ -637,6 +729,73 @@ pub(crate) struct ViewLayout {
     /// box, so its build may be skipped (`Engine::relayout` sets it, the
     /// next build takes it).
     pub(crate) incremental_skip_build: Cell<bool>,
+    /// LPF1: the view's last full build as built (before layout), kept while script writes
+    /// change only paint (`want_script_unlaid`), so a relayout for such writes builds only the
+    /// written elements and compares them with their boxes here; patched along with the laid-out
+    /// tree. `None` after any full build that was not asked to keep it.
+    pub(crate) script_unlaid: RefCell<Option<rustkit_layout::LayoutBox>>,
+    pub(crate) want_script_unlaid: Cell<bool>,
+    /// TREE-REUSE (PR 3): the elements this relayout's script writes reached, when its build may
+    /// build them alone and splice them into `script_unlaid` (`Engine::relayout` sets it while
+    /// `RUSTKIT_RETAINED_STYLES=boxes`; the relayout's own build takes it).
+    pub(crate) splice_roots: RefCell<Option<Vec<usize>>>,
+    /// A transition or animation was moving when the kept tree (`script_unlaid`) was built, so
+    /// boxes no later write reaches may hold a value it has moved on from, or that went when it
+    /// ended: the kept tree is not spliced into (#1247 R1 item 2).
+    pub(crate) script_unlaid_animated: Cell<bool>,
+    /// The script animation layer's generation (`animated.generation`) when the kept tree was
+    /// built. Script animations (`element.animate`) are applied in the build from that layer and
+    /// can start, move or fill in paint-only frames no build sees; when the layer has been written
+    /// since, the kept tree is not spliced into (#1247 delta R1).
+    pub(crate) script_unlaid_generation: Cell<u64>,
+    /// The image cache's generation (`ImageManager::cache_generation`) when the kept tree was built.
+    /// An image that arrives later is laid out by its own relayout (`ImageLoaded`, a full build), but
+    /// a script relayout can run before it; the kept tree holds the image's natural size as of its
+    /// build, so once any image has arrived since, the kept tree is not spliced into (BOXES-DIFF).
+    pub(crate) script_unlaid_images: Cell<u64>,
+    /// TREE-REUSE step (1): set by a forced layout (a geometry read after a write) for its own
+    /// build while `RUSTKIT_RETAINED_STYLES=boxes`: that build keeps its tree, built from the DOM as
+    /// it was at the read, so the end-of-task relayout splices the task's writes into it instead of
+    /// building the whole document a second time. Its dirty set holds every write of the task, those
+    /// before the read too, so building them again over the forced tree is exact.
+    pub(crate) keep_forced_tree_now: Cell<bool>,
+    /// The kept tree is a forced layout's, not the one the view laid out and published. LPF1's short
+    /// path compares written boxes with the kept tree and patches the published tree to match, which
+    /// is right only when the two are the same tree: it does not take a forced read's.
+    pub(crate) script_unlaid_unpublished: Cell<bool>,
+    /// Set by `Engine::relayout_uncounted` for its own build only: the tree a relayout builds and
+    /// publishes is the one kept. Any other build (a forced layout for a geometry read) drops the
+    /// kept tree, since the published boxes were not laid out from it, except a forced layout's
+    /// in `boxes` mode (`keep_forced_tree_now`).
+    pub(crate) retain_script_unlaid_now: Cell<bool>,
+    /// After a script write that changed more than paint, the relayouts the short path sits out
+    /// (no kept tree, no attempt) before it tries again: a page that keeps changing layout does
+    /// not pay for a kept copy of its tree every frame.
+    pub(crate) script_cooldown: Cell<u32>,
+    /// LPF3: the cooldown the short path's last miss set, while its run of misses goes on; `None`
+    /// once it has ended (a hit, `SCRIPT_RESTYLE_IDLE` relayouts with no script paint write, a
+    /// navigation). A miss with a run going is one in a row: it sits out twice the last cooldown
+    /// (at least 1, at most `SCRIPT_RESTYLE_COOLDOWN`); a one-off miss sits out none. A relayout
+    /// the path refuses leaves the run as it is (R1: a scroll between two misses ended it).
+    pub(crate) script_last_cooldown: Cell<Option<u32>>,
+    /// A window or element scroll happened in the task that dirtied the page: the short path,
+    /// which re-stamps no scroll offset, is not taken for the relayout (R1). Cleared by it.
+    pub(crate) scrolled_in_task: Cell<bool>,
+    /// Relayouts in a row that no script paint write asked for; at 8 the kept tree is let go.
+    pub(crate) script_idle: Cell<u32>,
+    /// The written elements (raw NodeIds) the coming relayout may restyle alone
+    /// (`Engine::relayout` sets it, `relayout_uncounted` takes it), and the child nodes the last
+    /// such restyle's build went into.
+    pub(crate) script_roots: RefCell<Option<Vec<usize>>>,
+    pub(crate) script_walked: Cell<Option<usize>>,
+    /// REG-TRANS-FASTPATH: a registered custom property's transition runs, so the animation frame
+    /// took no paint-only path (`animation_frame`); the elements that animate (raw NodeIds), for
+    /// the coming relayout to restyle alone on the LPF1 short path (`Engine::relayout`). Under
+    /// each the build restyles its subtree, which is where an `inherits: true` value reaches (a
+    /// host's shadow tree included). Set by a refused frame and taken by the next relayout, which
+    /// keeps it only when every cause is `animation` with nothing else dirty: a list left from an
+    /// earlier frame is at worst a superset of what animates, and only costs a wider restyle.
+    pub(crate) animation_roots: RefCell<Option<Vec<usize>>>,
     /// LAT9: the URL each `<img>` (raw NodeId) last painted with a loaded
     /// image. When script swaps its `src`, the box keeps painting this one
     /// while the new image is in flight, so a card does not go blank
@@ -649,6 +808,20 @@ pub(crate) struct ViewLayout {
     pub(crate) failed_images: RefCell<FailedImages>,
     /// E54: which `<img>` elements have heard `load`, and for which image.
     pub(crate) loaded_images: RefCell<LoadedImages>,
+}
+
+impl ViewLayout {
+    /// A navigation committed: the script restyle path starts the new document afresh. No kept
+    /// tree (its node ids were the old document's), no cooldown, and no run of misses (LPF3 R1).
+    pub(crate) fn forget_script_restyle(&self) {
+        self.script_unlaid.borrow_mut().take();
+        self.script_unlaid_animated.set(false);
+        self.script_unlaid_unpublished.set(false);
+        self.want_script_unlaid.set(false);
+        self.script_cooldown.set(0);
+        self.script_last_cooldown.set(None);
+        self.script_idle.set(0);
+    }
 }
 
 /// The current document's loaded images, as its script has been told of
@@ -861,4 +1034,26 @@ pub(crate) struct FrameChange {
     pub(crate) props: Vec<(usize, crate::animations::AnimValue, crate::animations::AnimValue)>,
     /// `animation_settled_opacity`, painted last and now.
     pub(crate) settled: Option<(Option<f32>, Option<f32>)>,
+}
+
+/// Whether the build `with_building` just ran visited only part of the document, so the animation
+/// state keeps what it did not visit (`Animations::end_build`): `started_partial` (a pointer
+/// restyle set its restyle build before the build), or the last build ran under a restyle build. A
+/// kept-tree splice (TREE-REUSE) starts its restyle build inside the build, so only the second
+/// sees it; a splice that missed after its partial build, and `boxes-verify`, build in full
+/// afterwards, which says otherwise. `boxes-verify` asks it too, for what a splice's sweep would
+/// drop (`Animations::would_sweep`).
+pub(crate) fn build_was_partial(started_partial: bool) -> bool {
+    #[cfg(test)]
+    if IGNORE_LAST_BUILD_PARTIAL.with(|c| c.get()) {
+        return started_partial;
+    }
+    started_partial || crate::relayout_cause::last_build_partial()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: `build_was_partial` as before #1257's fix (a splice swept like a full build), so a
+    /// test can show that `boxes-verify` sees that class of bug.
+    pub(crate) static IGNORE_LAST_BUILD_PARTIAL: Cell<bool> = const { Cell::new(false) };
 }

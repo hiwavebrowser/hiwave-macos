@@ -1049,13 +1049,21 @@ impl Array {
         };
 
         // 5. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        // HIWAVE PATCH (string-length): R's length is counted as it grows and refused once it passes
+        // the limit (Chrome 148 stops reading elements there), and the reservation is not taken from
+        // an array-like's `length` (2^32 - 1 would ask for tens of gigabytes before any element).
+        let mut r = Vec::with_capacity((len as usize).saturating_mul(2).min(1 << 12));
+        let mut r_len: u64 = 0;
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
-                r.push(separator.clone());
+                r_len += separator.len() as u64;
+                super::string::String::check_length(r_len)?;
+                if !separator.is_empty() {
+                    r.push(separator.clone());
+                }
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
             let element = o.get(k, context)?;
@@ -1068,7 +1076,11 @@ impl Array {
                 element.to_string(context)?
             };
             // d. Set R to the string-concatenation of R and next.
-            r.push(next.clone());
+            r_len += next.len() as u64;
+            super::string::String::check_length(r_len)?;
+            if !next.is_empty() {
+                r.push(next);
+            }
             // e. Set k to k + 1.
         }
         // 8. Return R.
@@ -2229,7 +2241,9 @@ impl Array {
         let separator = js_string!(",");
 
         // 4. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        // HIWAVE PATCH (string-length): as `join`: shared pieces, refused once R passes the limit,
+        // and no reservation taken from the array-like's `length`.
+        let mut r = super::string::Pieces::immediate();
 
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
@@ -2237,7 +2251,7 @@ impl Array {
             // a. If k > 0, then
             if k > 0 {
                 // i. Set R to the string-concatenation of R and separator.
-                r.extend(separator.iter());
+                r.string(separator.clone())?;
             }
 
             // b. Let nextElement be ? Get(array, ! ToString(k)).
@@ -2255,12 +2269,12 @@ impl Array {
                     .to_string(context)?;
 
                 // ii. Set R to the string-concatenation of R and S.
-                r.extend(s.iter());
+                r.string(s)?;
             }
             //     d. Increase k by 1.
         }
         // 7. Return R.
-        Ok(js_string!(&r[..]).into())
+        Ok(r.finish().js_expect("an immediate builder has thrown before passing the limit")?.into())
     }
 
     /// Gets the delete count of a splice operation.
@@ -2669,7 +2683,9 @@ impl Array {
     {
         // 1. Let items be a new empty List.
         // doesn't matter if it clamps since it's just a best-effort optimization
-        let mut items = Vec::with_capacity(len as usize);
+        // HIWAVE PATCH (array-like-length): not reserved from `length`, which the page sets (a sparse
+        // array of 2^32 - 1 slots would ask for 32 GiB before reading its few elements).
+        let mut items = Vec::with_capacity((len as usize).min(1 << 12));
 
         // 2. Let k be 0.
         // 3. Repeat, while k < len,
@@ -2758,10 +2774,11 @@ impl Array {
         let len = obj.length_of_array_like(context)?;
 
         // 4. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
+        let diff = comparefn.as_ref().and_then(numeric_difference_comparator);
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<Ordering> {
                 // a. Return ? CompareArrayElements(x, y, comparefn).
-                compare_array_elements(x, y, comparefn.as_ref(), context)
+                compare_array_elements(x, y, comparefn.as_ref(), diff, context)
             };
 
         // 5. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, skip-holes).
@@ -2824,10 +2841,11 @@ impl Array {
         let arr = Array::array_create(len, None, context)?;
 
         // 5. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
+        let diff = comparefn.as_ref().and_then(numeric_difference_comparator);
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<Ordering> {
                 // a. Return ? CompareArrayElements(x, y, comparefn).
-                compare_array_elements(x, y, comparefn.as_ref(), context)
+                compare_array_elements(x, y, comparefn.as_ref(), diff, context)
             };
 
         // 6. Let sortedList be ? SortIndexedProperties(O, len, SortCompare, read-through-holes).
@@ -3371,6 +3389,18 @@ impl Array {
     }
 }
 
+/// HIWAVE PATCH (sort-diff): `Some(swapped)` when `comparefn` is an ordinary function whose whole body is
+/// `return a - b` (`swapped`: `return b - a`) over its two plain parameters (see the bytecompiler).
+fn numeric_difference_comparator(comparefn: &JsObject) -> Option<bool> {
+    let f = comparefn.downcast_ref::<crate::builtins::function::OrdinaryFunction>()?;
+    let flags = f.code.flags.get();
+    if flags.contains(crate::vm::CodeBlockFlags::NUMERIC_DIFF) {
+        Some(flags.contains(crate::vm::CodeBlockFlags::NUMERIC_DIFF_SWAPPED))
+    } else {
+        None
+    }
+}
+
 /// [`CompareArrayElements ( x, y, comparefn )`][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-comparearrayelements
@@ -3378,6 +3408,7 @@ fn compare_array_elements(
     x: &JsValue,
     y: &JsValue,
     comparefn: Option<&JsObject>,
+    diff: Option<bool>,
     context: &mut Context,
 ) -> JsResult<Ordering> {
     match (x.is_undefined(), y.is_undefined()) {
@@ -3392,6 +3423,15 @@ fn compare_array_elements(
 
     // 4. If comparefn is not undefined, then
     if let Some(cmp) = comparefn {
+        // HIWAVE PATCH (sort-diff): for `(a, b) => a - b` over two Numbers the call computes exactly this
+        // difference and has no other effect, so it is not made. Any other pair of values calls the function.
+        if let (Some(swapped), Some(a), Some(b)) = (diff, x.as_number(), y.as_number()) {
+            // A call checks the interrupt word at its entry; this pair makes none, so a huge sort is
+            // stopped here.
+            context.check_interrupt()?;
+            let v = if swapped { b - a } else { a - b };
+            return Ok(v.partial_cmp(&0.0).unwrap_or(Ordering::Equal));
+        }
         let args = [x.clone(), y.clone()];
         //     a. Let v be ? ToNumber(? Call(comparefn, undefined, « x, y »)).
         let v = cmp

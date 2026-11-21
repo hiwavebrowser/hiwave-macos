@@ -48,12 +48,22 @@ use std::sync::Arc;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
+/// A shadow mesh cell whose alpha nowhere reaches this is not drawn: under
+/// a quarter of a level.
+const SHADOW_ALPHA_FLOOR: f32 = 0.25 / 255.0;
+
+
 pub mod dither;
+mod canvas_gpu;
+pub use canvas_gpu::{CanvasReplay, CANVAS_OVER_CAP_LIMIT, CANVAS_SCRATCH_BUDGET, CANVAS_TEXTURE_BUDGET, CANVAS_VERTEX_CAP};
 mod cull;
+mod shadow_blur;
 mod frame_stats;
 mod glyph_grid;
 #[cfg(test)]
 mod scroll_cost_tests;
+#[cfg(test)]
+mod image_update_tests;
 #[cfg(test)]
 mod layer_cost_tests;
 #[cfg(test)]
@@ -399,6 +409,51 @@ impl TextureCache {
         self.textures.get(key).unwrap()
     }
 
+    /// Replace the pixels under `key`: written into its texture when the size is the
+    /// same (no new texture, no new bind group), else a new texture (MEDIA-AVF §3.3: a
+    /// video's frames, one key for the video's life).
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: &str,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) {
+        let same = self.textures.get(key).is_some_and(|t| {
+            t.width == width && t.height == height && {
+                let size = t.texture.size();
+                size.width == width && size.height == height
+            }
+        });
+        if !same {
+            self.textures.remove(key);
+            self.get_or_create(device, queue, key, width, height, data);
+            return;
+        }
+        let texture = &self.textures[key].texture;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     /// Check if a texture exists.
     pub fn contains(&self, key: &str) -> bool {
         self.textures.contains_key(key)
@@ -479,6 +534,8 @@ pub struct Renderer {
     image_vertices: Vec<TextureVertex>,
     image_indices: Vec<u32>,
     image_runs: Vec<(String, u32)>,
+    /// Blurred box shadow meshes by shape (`shadow_mesh`).
+    shadow_meshes: shadow_blur::MeshCache,
 
     // GPU gradient queues for batched rendering
     gradient_queue: Vec<QueuedLinearGradient>,
@@ -566,6 +623,9 @@ pub struct Renderer {
 
     // Caches
     texture_cache: TextureCache,
+    /// GPU canvas A1: pipelines and scratch for canvas replays, made on the
+    /// first one (`canvas_gpu.rs`).
+    canvas_gpu: Option<Box<canvas_gpu::CanvasGpu>>,
     glyph_cache: GlyphCache,
 
     // Texture bind group layout (for sharing)
@@ -848,6 +908,7 @@ impl Renderer {
             image_vertices: Vec::with_capacity(256),
             image_indices: Vec::with_capacity(512),
             image_runs: Vec::with_capacity(64),
+            shadow_meshes: shadow_blur::MeshCache::default(),
             gradient_queue: Vec::with_capacity(64),
             radial_gradient_queue: Vec::with_capacity(16),
             conic_gradient_queue: Vec::with_capacity(16),
@@ -882,6 +943,7 @@ impl Renderer {
             legacy_layers: false,
             per_pass: false,
             texture_cache,
+            canvas_gpu: None,
             glyph_cache,
             texture_bind_group_layout,
             intermediate_texture: None,
@@ -1414,6 +1476,8 @@ impl Renderer {
         target: &wgpu::TextureView,
     ) -> Result<(), RendererError> {
         self.last_list = (commands.as_ptr() as usize, commands.len());
+        // A frame: the shadow meshes' build budget starts over.
+        self.shadow_meshes.begin_frame();
         #[cfg(test)]
         {
             self.glyph_grid.scan_only = self.reference;
@@ -3905,6 +3969,16 @@ impl Renderer {
         ]);
     }
 
+    /// `push_screen_corners` with a colour per corner, interpolated across
+    /// the quad.
+    fn push_screen_corners_shaded(&mut self, p: [[f32; 2]; 4], c: [[f32; 4]; 4]) {
+        let base = self.color_vertices.len() as u32;
+        for (position, color) in p.into_iter().zip(c) {
+            self.color_vertices.push(ColorVertex { position, color });
+        }
+        self.color_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
     /// Draw a rounded rectangle using SDF-based rendering.
     ///
     /// Each corner is a quarter ellipse `(h, v)`; the interior is painted as
@@ -4448,71 +4522,165 @@ impl Renderer {
         if color.a == 0.0 {
             return;
         }
-        
-        // Calculate shadow rectangle
-        let shadow_rect = if inset {
-            // Inset shadow is inside the box
-            Rect::new(
-                rect.x + offset_x.max(0.0),
-                rect.y + offset_y.max(0.0),
-                rect.width - spread_radius * 2.0 - offset_x.abs(),
-                rect.height - spread_radius * 2.0 - offset_y.abs(),
-            )
-        } else {
-            // Outer shadow is outside the box
-            Rect::new(
-                rect.x + offset_x - spread_radius,
-                rect.y + offset_y - spread_radius,
-                rect.width + spread_radius * 2.0,
-                rect.height + spread_radius * 2.0,
-            )
-        };
-        
-        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+        // Nothing sensible to draw from a non-finite length; an infinite blur
+        // is clamped by `sigma_of`.
+        if ![offset_x, offset_y, spread_radius, rect.x, rect.y, rect.width, rect.height]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return;
+        }
+        let sigma = shadow_blur::sigma_of(blur_radius);
+        if inset {
+            self.draw_inset_shadow(rect, radius, offset_x, offset_y, sigma, spread_radius, color);
             return;
         }
 
-        if !inset {
-            let shadow_radius = radius.spread(spread_radius);
-            for (r, alpha) in Self::outer_shadow_paint_rects(
-                rect,
-                radius,
-                shadow_rect,
-                shadow_radius,
-                blur_radius,
-                color.a,
-            ) {
+        // The shadow shape: the border box moved by the offset and grown by
+        // the spread.
+        let shadow_rect = Rect::new(
+            rect.x + offset_x - spread_radius,
+            rect.y + offset_y - spread_radius,
+            rect.width + spread_radius * 2.0,
+            rect.height + spread_radius * 2.0,
+        );
+        if shadow_rect.width <= 0.0 || shadow_rect.height <= 0.0 {
+            return;
+        }
+        let shadow_radius = radius.spread(spread_radius);
+        if sigma <= 0.0 {
+            for (r, alpha) in
+                Self::outer_shadow_paint_rects(rect, radius, shadow_rect, shadow_radius, 0.0, color.a)
+            {
                 self.draw_solid_rect(r, Color::new(color.r, color.g, color.b, alpha));
             }
             return;
         }
 
-        // Inset: for blur, draw multiple layers with decreasing opacity, shrinking
-        // inward. This is a simplified approximation - real blur would use GPU shaders
-        if blur_radius > 0.0 {
-            let steps = (blur_radius / 2.0).ceil().max(1.0) as u32;
-            let step_size = blur_radius / steps as f32;
-
-            for i in 0..steps {
-                let layer = steps - i; // Draw outer layers first
-                let expansion = step_size * layer as f32;
-                let layer_alpha = color.a / (steps as f32 * 1.5); // Fade out
-
-                let layer_rect = Rect::new(
-                    shadow_rect.x + expansion,
-                    shadow_rect.y + expansion,
-                    shadow_rect.width - expansion * 2.0,
-                    shadow_rect.height - expansion * 2.0,
+        // Blurred: a mesh over the shape grown by the blur's reach, each
+        // cell's corners carrying the exact blurred value, clipped to
+        // outside the border box (CSS Backgrounds 3 §7.1).
+        let shape = shadow_blur::Shape::new(shadow_rect, shadow_radius);
+        let hole = shadow_blur::Shape::new(rect, radius);
+        let origin = (shadow_rect.x, shadow_rect.y);
+        let mesh = self.shadow_mesh(&shape, &hole, sigma, false, origin);
+        for j in 0..mesh.ys.len() - 1 {
+            for i in 0..mesh.xs.len() - 1 {
+                let c = mesh.cell(i, j);
+                if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
+                    continue;
+                }
+                let cell = Rect::new(
+                    origin.0 + mesh.xs[i],
+                    origin.1 + mesh.ys[j],
+                    mesh.xs[i + 1] - mesh.xs[i],
+                    mesh.ys[j + 1] - mesh.ys[j],
                 );
-
-                if layer_rect.width > 0.0 && layer_rect.height > 0.0 {
-                    let layer_color = Color::new(color.r, color.g, color.b, layer_alpha);
-                    self.draw_solid_rect(layer_rect, layer_color);
+                if cell.intersect(&rect).is_none() {
+                    self.draw_shadow_cell(cell, cell, c, color, 1.0);
+                    continue;
+                }
+                for (piece, coverage) in rounded_difference_pieces(cell, Default::default(), rect, radius) {
+                    self.draw_shadow_cell(piece, cell, c, color, coverage);
                 }
             }
-        } else {
-            // No blur - just draw solid shadow
-            self.draw_solid_rect(shadow_rect, color);
+        }
+    }
+
+    /// The shadow's mesh from `shadow_blur::MeshCache`: cached by shape
+    /// (a grid of cards draws one), built within the frame's budget, or
+    /// coarse past it.
+    fn shadow_mesh(
+        &mut self,
+        shape: &shadow_blur::Shape,
+        other: &shadow_blur::Shape,
+        sigma: f32,
+        inset: bool,
+        origin: (f32, f32),
+    ) -> Arc<shadow_blur::Mesh> {
+        self.shadow_meshes.get(shape, other, sigma, inset, origin)
+    }
+
+    /// An inset shadow (CSS Backgrounds 3 §7.1): inside `clip` (the padding
+    /// box, `radius` its corners), everything outside the shadow shape —
+    /// `clip` moved by the offset and shrunk by the spread — blurred.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_inset_shadow(
+        &mut self,
+        clip: Rect,
+        radius: rustkit_layout::BorderRadius,
+        offset_x: f32,
+        offset_y: f32,
+        sigma: f32,
+        spread: f32,
+        color: Color,
+    ) {
+        if clip.width <= 0.0 || clip.height <= 0.0 {
+            return;
+        }
+        let inner_rect = Rect::new(
+            clip.x + offset_x + spread,
+            clip.y + offset_y + spread,
+            clip.width - spread * 2.0,
+            clip.height - spread * 2.0,
+        );
+        let inner_radius = radius.spread(-spread);
+        if inner_rect.width <= 0.0 || inner_rect.height <= 0.0 {
+            // Nothing is left of the shape: the whole box is shadow.
+            self.draw_rounded_rect(clip, color, radius);
+            return;
+        }
+        if sigma <= 0.0 {
+            for (piece, coverage) in rounded_difference_pieces(clip, radius, inner_rect, inner_radius) {
+                self.draw_solid_rect(piece, Color::new(color.r, color.g, color.b, color.a * coverage));
+            }
+            return;
+        }
+        let inner = shadow_blur::Shape::new(inner_rect, inner_radius);
+        let outer = shadow_blur::Shape::new(clip, radius);
+        let origin = (clip.x, clip.y);
+        let mesh = self.shadow_mesh(&inner, &outer, sigma, true, origin);
+        self.push_clip_rounded(clip, radius);
+        for j in 0..mesh.ys.len() - 1 {
+            for i in 0..mesh.xs.len() - 1 {
+                let c = mesh.cell(i, j);
+                if c.iter().fold(0.0f32, |m, v| m.max(*v)) * color.a < SHADOW_ALPHA_FLOOR {
+                    continue;
+                }
+                let cell = Rect::new(
+                    origin.0 + mesh.xs[i],
+                    origin.1 + mesh.ys[j],
+                    mesh.xs[i + 1] - mesh.xs[i],
+                    mesh.ys[j + 1] - mesh.ys[j],
+                );
+                self.draw_shadow_cell(cell, cell, c, color, 1.0);
+            }
+        }
+        self.pop_clip();
+    }
+
+    /// `piece` of the shadow mesh cell `cell`, whose corners carry the
+    /// blurred values `c` (top-left, top-right, bottom-right, bottom-left):
+    /// clipped like any quad, its colour's alpha scaled by the value
+    /// interpolated at each corner and by `coverage`.
+    fn draw_shadow_cell(&mut self, piece: Rect, cell: Rect, c: [f32; 4], color: Color, coverage: f32) {
+        if piece.width <= 0.0 || piece.height <= 0.0 || cell.width <= 0.0 || cell.height <= 0.0 {
+            return;
+        }
+        let tex = [
+            (piece.x - cell.x) / cell.width,
+            (piece.y - cell.y) / cell.height,
+            (piece.right() - cell.x) / cell.width,
+            (piece.bottom() - cell.y) / cell.height,
+        ];
+        let rgb = [color.r as f32 / 255.0, color.g as f32 / 255.0, color.b as f32 / 255.0];
+        for (corners, t, clip_coverage) in self.textured_pieces(piece, tex) {
+            let at = |u: f32, v: f32| {
+                let a = color.a * shadow_blur::bilinear(c, u, v) * coverage * clip_coverage;
+                [rgb[0], rgb[1], rgb[2], a]
+            };
+            let colors = [at(t[0], t[1]), at(t[2], t[1]), at(t[2], t[3]), at(t[0], t[3])];
+            self.push_screen_corners_shaded(corners, colors);
         }
     }
 
@@ -6719,20 +6887,37 @@ impl Renderer {
             #[cfg(target_os = "macos")]
             let drawn = self.glyph_cache.get_or_rasterize_faced(&self.queue, &key);
             #[cfg(windows)]
-            let drawn = {
-                let _ = &face;
-                let colour = if rustkit_text::is_emoji(ch) {
+            let drawn = match crate::glyph::windows_paint(ch, face) {
+                // A text-presentation symbol, or a character the run's face
+                // lacks: the coverage mask from the text face layout measured
+                // it in (Segoe UI Symbol, Cambria Math, ...), as Chrome draws
+                // it, not Segoe UI Emoji's colour artwork.
+                crate::glyph::WindowsPaint::TextFallback => {
+                    let symbol = GlyphKey {
+                        font_family: crate::glyph::windows_text_fallback_family(ch, font_family),
+                        font_weight: 400,
+                        font_style: 0,
+                        web_face: 0,
+                        ..key.clone()
+                    };
                     self.glyph_cache
-                        .get_or_rasterize_color(&self.device, &self.queue, &key)
-                        .map(|entry| (entry, true))
-                } else {
-                    None
-                };
-                colour.or_else(|| {
-                    self.glyph_cache
-                        .get_or_rasterize(&self.device, &self.queue, &key)
+                        .get_or_rasterize(&self.device, &self.queue, &symbol)
                         .map(|entry| (entry, false))
-                })
+                }
+                paint => {
+                    let colour = if paint == crate::glyph::WindowsPaint::Colour {
+                        self.glyph_cache
+                            .get_or_rasterize_color(&self.device, &self.queue, &key)
+                            .map(|entry| (entry, true))
+                    } else {
+                        None
+                    };
+                    colour.or_else(|| {
+                        self.glyph_cache
+                            .get_or_rasterize(&self.device, &self.queue, &key)
+                            .map(|entry| (entry, false))
+                    })
+                }
             };
             #[cfg(not(any(target_os = "macos", windows)))]
             let drawn = {
@@ -7078,6 +7263,28 @@ impl Renderer {
         Ok(())
     }
     
+    /// Upload RGBA that changes under one key (a video's frames, MEDIA-AVF §3.3): the
+    /// texture already under `url` is written in place when the size matches, and is
+    /// only made anew when the size differs.
+    pub fn update_image(
+        &mut self,
+        url: &str,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), RendererError> {
+        if rgba_data.len() != (width as usize) * (height as usize) * 4 {
+            return Err(RendererError::TextureUpload(format!(
+                "Invalid image data size: expected {} bytes, got {}",
+                (width as usize) * (height as usize) * 4,
+                rgba_data.len()
+            )));
+        }
+        self.texture_cache
+            .update(&self.device, &self.queue, url, width, height, rgba_data);
+        Ok(())
+    }
+
     /// Upload premultiplied RGBA (a canvas bitmap, STR-7b). Its quads
     /// filter the premultiplied texels, as Chrome composites a canvas, so a
     /// scaled bitmap blends an opaque texel with a transparent neighbour
@@ -7122,11 +7329,13 @@ impl Renderer {
     /// Remove an image from the cache.
     pub fn remove_image(&mut self, url: &str) {
         self.texture_cache.remove(url);
+        self.forget_canvases(|k| k != url);
     }
 
     /// Drop the uploaded images whose key `keep` rejects.
-    pub fn retain_images(&mut self, keep: impl FnMut(&str) -> bool) {
-        self.texture_cache.retain(keep);
+    pub fn retain_images(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.texture_cache.retain(&mut keep);
+        self.forget_canvases(keep);
     }
 
 

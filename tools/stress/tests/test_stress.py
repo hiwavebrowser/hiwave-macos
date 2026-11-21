@@ -5,7 +5,9 @@ of the page channel, and the score readers.
 """
 
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -18,10 +20,10 @@ sys.path.insert(0, str(HERE))
 import run  # noqa: E402
 
 
-def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0):
+def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0, budget=None):
     r = {"schema": 1, "suite": suite, "engine": "hiwave", "label": label, "status": status, "score": score,
          "partial": partial, "binary_sha1": label * 5, "suite_sha": "0" * 40, "wall_s": 60.0,
-         "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}}
+         "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}, "live_turn_budget_ms": budget}
     (tmp / ("%s_%s_%d.json" % (suite, label, n))).write_text(json.dumps(r))
 
 
@@ -112,22 +114,6 @@ def test_jetstream_score_is_the_geomean_of_its_report():
     assert abs(score - 6.0) < 1e-9 and sub == {"a": 4.0, "b": 9.0}
 
 
-def test_no_window_between_five_and_half_past_seven_eastern(monkeypatch, tmp_path):
-    monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
-    monkeypatch.setattr(run, "hid_idle_seconds", lambda: 9999.0)
-    for now, ok in ((16 * 60, False),      # a 30-minute run would not cross 17:00, a 2-hour one would
-                    (17 * 60 + 5, False), (19 * 60 + 29, False), (19 * 60 + 30, True), (9 * 60, True)):
-        monkeypatch.setattr(run, "eastern_minutes", lambda offset_s=0, now=now: (now + offset_s // 60) % 1440)
-        limit = 2 * 3600 if now == 16 * 60 else 1800
-        try:
-            with run.WindowLock(limit, 0):
-                entered = True
-        except SystemExit:
-            entered = False
-        assert entered == ok, (now, entered)
-        assert not (tmp_path / "lock").exists()  # released either way
-
-
 # ── R1 on #1083 ────────────────────────────────────────────────────────────
 
 class Clock:
@@ -143,9 +129,6 @@ class Clock:
     def sleep(self, seconds):
         self.t += seconds
 
-    def minutes(self, offset_s=0):
-        return int((self.t + offset_s) // 60) % 1440
-
     def idle(self):
         return 9999.0 if self.t >= self.idle_from else 0.0
 
@@ -153,42 +136,55 @@ class Clock:
 def moving(monkeypatch, tmp_path, hhmm):
     clock = Clock(hhmm)
     monkeypatch.setattr(run, "time", clock)
-    monkeypatch.setattr(run, "eastern_minutes", clock.minutes)
     monkeypatch.setattr(run, "hid_idle_seconds", clock.idle)
     monkeypatch.setattr(run, "LOCK", tmp_path / "lock")
     return clock
 
 
-def test_a_wait_for_an_idle_seat_that_runs_toward_five_is_refused_after_the_wait(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run: fine at entry (ends 16:30). The seat goes
-    # idle at 16:45; by then the run would end at 17:05.
+def test_a_run_at_half_past_five_with_an_idle_seat_is_allowed(monkeypatch, tmp_path):
+    # There is no time-of-day rule (the evening no-window rule was removed 2026-11-16): at any hour,
+    # for any wall limit, an idle seat gets the lock and the last check before launch passes.
+    assert not hasattr(run, "QUIET") and not hasattr(run.WindowLock, "check_quiet")
+    for hhmm, limit in ((1730, 30 * 60), (1610, 2 * 3600), (1929, 60), (900, 1800), (2359, 4 * 3600)):
+        moving(monkeypatch, tmp_path, hhmm)
+        with run.WindowLock(limit, 0) as lock:
+            assert (tmp_path / "lock").is_dir()
+            lock.clear_to_launch()
+        assert not (tmp_path / "lock").exists(), hhmm
+
+
+def test_a_busy_seat_is_waited_for_and_the_run_starts_once_it_is_idle(monkeypatch, tmp_path):
+    # 16:10: somebody is at the Mac until 16:45. The lock waits for the seat, then the run goes
+    # ahead, whatever the hour has become.
     clock = moving(monkeypatch, tmp_path, 1610)
     clock.idle_from = 16 * 3600 + 45 * 60
+    with run.WindowLock(20 * 60, 3600) as lock:
+        assert clock.t >= clock.idle_from, "it did wait for the seat"
+        lock.clear_to_launch()
+    assert not (tmp_path / "lock").exists()
+
+
+def test_a_seat_that_stays_busy_past_the_wait_is_refused_and_the_lock_released(monkeypatch, tmp_path):
+    clock = moving(monkeypatch, tmp_path, 1610)
+    clock.idle_from = clock.t + 2 * 3600
     try:
-        with run.WindowLock(20 * 60, 3600):
+        with run.WindowLock(20 * 60, 600):
             entered = True
     except SystemExit as e:
         entered, code = False, e.code
     assert not entered and code == 2
-    assert clock.t >= clock.idle_from, "it did wait for the seat"
+    assert clock.t >= 16 * 3600 + 10 * 60 + 600, "it waited as long as it was allowed"
     assert not (tmp_path / "lock").exists()
 
 
-def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_path):
-    # 16:10, a 20-minute run, idle seat: the lock is given. The load wait
-    # that follows lasts until 16:45: launching now could show a window at 17:05.
+def test_the_last_check_before_launch_reads_the_seat_again(monkeypatch, tmp_path):
+    # An idle seat: the lock is given. During the load wait that follows somebody sits down:
+    # the check immediately before the window goes up sees it.
     clock = moving(monkeypatch, tmp_path, 1610)
     with run.WindowLock(20 * 60, 0) as lock:
-        lock.clear_to_launch()  # 16:10: fine
+        lock.clear_to_launch()  # idle: fine
         clock.sleep(35 * 60)
-        try:
-            lock.clear_to_launch()
-            refused = False
-        except SystemExit:
-            refused = True
-        assert refused
-        # ... and somebody sitting down in the meantime is seen as well
-        clock.t = 9 * 3600.0
+        lock.clear_to_launch()  # still idle, 35 minutes later: fine at any hour
         clock.idle_from = clock.t + 1
         try:
             lock.clear_to_launch()
@@ -197,16 +193,6 @@ def test_the_last_check_before_launch_reads_the_clock_again(monkeypatch, tmp_pat
             refused = True
         assert refused
     assert not (tmp_path / "lock").exists()
-
-
-def test_a_run_whose_wall_limit_crosses_five_is_refused_at_entry(monkeypatch, tmp_path):
-    moving(monkeypatch, tmp_path, 1610)
-    try:
-        with run.WindowLock(60 * 60, 0):
-            entered = True
-    except SystemExit:
-        entered = False
-    assert not entered and not (tmp_path / "lock").exists()
 
 
 def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
@@ -223,10 +209,31 @@ def test_socket_and_log_readers_name_what_is_not_this_machine(tmp_path):
     assert run.off_machine("hiwave", None, [], [], {"non_loopback_origins": []}) == {}
 
 
+def test_the_record_says_whose_wait_the_headless_live_loop_uses(monkeypatch):
+    class Done:
+        def __init__(self, out):
+            self.stdout = out
+    helps = {"new": b"  --live-ms <LIVE_MS>\n  --window-thread-pacing\n", "old": b"  --live-ms <LIVE_MS>\n",
+             "other": b"usage: something else\n"}
+    monkeypatch.setattr(run.subprocess, "run", lambda argv, **kw: Done(helps[argv[0]]))
+    assert run.headless_pacing("new") == "content-thread"
+    assert run.headless_pacing("old") == "window-thread"
+    assert run.headless_pacing("other") is None
+
+    def missing(argv, **kw):
+        raise OSError("no such file")
+    monkeypatch.setattr(run.subprocess, "run", missing)
+    assert run.headless_pacing("gone") is None
+
+
+# The first line goes to stderr (the run's engine log) before any import beyond sys and time, so a
+# run that never reached the runner says whether the fake engine started at all, and when (FLK8).
 FAKE_ENGINE = '''#!/usr/bin/env python3
-import sys, json, time, urllib.request
+import sys, time
+sys.stderr.write("fake engine started at %.3f\\n" % time.time()); sys.stderr.flush()
+import json, urllib.request
 url = sys.argv[sys.argv.index("--url") + 1]
-base = url.split("/index.html")[0]
+base = "/".join(url.split("/")[:3])
 NETLOG
 urllib.request.urlopen(url).read()
 EXTRA
@@ -235,10 +242,12 @@ time.sleep(30)
 '''
 
 
-def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True):
+def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True, suite_name="speedometer", more_argv=()):
     suite = tmp_path / "suite"
     suite.mkdir(parents=True)
-    (suite / "index.html").write_text("<!doctype html><html><head></head><body></body></html>")
+    for page in ("index.html", "MotionMark/index.html"):
+        (suite / page).parent.mkdir(exist_ok=True)
+        (suite / page).write_text("<!doctype html><html><head></head><body></body></html>")
     engine = tmp_path / "engine.py"
     netlog = 'print("INFO hiwave::console: net start GET " + url + " status=- issued nav=1", flush=True)' if request_log else ""
     engine.write_text(FAKE_ENGINE.replace("EXTRA", extra).replace("NETLOG", netlog))
@@ -246,8 +255,9 @@ def run_with_fake_engine(monkeypatch, tmp_path, extra, request_log=True):
     monkeypatch.setattr(run, "check_pin", lambda s: (suite, {"version": "t", "sha": "0" * 40}))
     monkeypatch.setattr(run, "wait_for_load", lambda limit, wait: True)
     out = tmp_path / "out"
-    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "speedometer", "--engine", "hiwave-headless",
-                                      "--binary", str(engine), "--label", "fake", "--out", str(out), "--timeout", "20"])
+    monkeypatch.setattr(sys, "argv", ["run.py", "--suite", suite_name, "--engine", "hiwave-headless",
+                                      "--binary", str(engine), "--label", "fake", "--out", str(out), "--timeout", "20",
+                                      *more_argv])
     code = run.main()
     return code, json.loads(next(out.glob("*.json")).read_text())
 
@@ -399,3 +409,523 @@ def test_a_run_is_unobserved_without_its_request_log_or_on_the_webkit_chrome(mon
     # End to end: an engine whose request log says nothing is not an offline run.
     code, rec = run_with_fake_engine(monkeypatch, tmp_path / "quiet", "", request_log=False)
     assert code == 1 and rec["status"] == "invalid" and rec["score"] is None and "unobserved" in rec["off_machine"], rec
+
+
+def test_the_turn_budget_is_raised_only_when_its_variable_is_set(monkeypatch, tmp_path):
+    # A stress run may raise the engine's live-turn watchdog so a long computation (MotionMark's end-of-test
+    # analysis) finishes and the next blocker shows. Without the variable the engine keeps its own default.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    assert run.turn_budget_ms() is None
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, None)
+    assert "--live-turn-budget-ms" not in argv and "--interrupt-scripts" in argv
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "600000")
+    assert run.turn_budget_ms() == 600000
+    argv = run.headless_argv(pathlib.Path("pc"), "http://127.0.0.1:1/", tmp_path, 60, 600000)
+    assert argv[argv.index("--live-turn-budget-ms") + 1] == "600000"
+    for bad in ("", "abc", "0", "-5"):
+        monkeypatch.setenv(run.TURN_BUDGET_ENV, bad)
+        try:
+            run.turn_budget_ms()
+            raise AssertionError("accepted %r" % bad)
+        except SystemExit:
+            pass
+
+
+def test_a_raised_budget_run_never_enters_a_default_comparison(tmp_path):
+    # Same suite, engine and label: a raised-budget run is still not folded into the default median.
+    record(tmp_path, "motionmark", "base", 100.0, 0)
+    record(tmp_path, "motionmark", "cand", 100.0, 0)
+    record(tmp_path, "motionmark", "cand", 5000.0, 1, budget=60000)
+    record(tmp_path, "motionmark", "cand", 5000.0, 2, budget=60000)
+    code, rows = compare(tmp_path)
+    assert code == 0 and rows["motionmark"]["cand"]["n"] == 1, rows
+    # On its own, with --raised-budget, it is reported, and only it.
+    p = subprocess.run([sys.executable, str(HERE / "report.py"), "--raised-budget", "--json", str(tmp_path)],
+                       capture_output=True, text=True)
+    rows = json.loads(p.stdout)
+    assert [(r["label"], r["n"], r["median"]) for r in rows] == [("cand", 2, 5000.0)], rows
+
+
+def test_the_turn_budget_takes_plain_digits_up_to_an_hour(monkeypatch):
+    for bad in (" 60000 ", "+5", "1_000", "６０", "3600001", "99999999999"):
+        monkeypatch.setenv(run.TURN_BUDGET_ENV, bad)
+        try:
+            run.turn_budget_ms()
+            raise AssertionError("accepted %r" % bad)
+        except SystemExit:
+            pass
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "3600000")
+    assert run.turn_budget_ms() == run.TURN_BUDGET_MAX_MS == 3600000
+
+
+def test_a_raised_budget_is_refused_for_chrome_only(monkeypatch, tmp_path):
+    # Chrome has no such watchdog. The app reads the variable (it is what run.py starts it with), and
+    # the headless engine takes it as an argument: neither is refused here (this run stops later, at
+    # its missing binary).
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
+    for engine, said in (("chrome", "HiWave engines only"), ("hiwave", "no binary at"), ("hiwave-headless", "no binary at")):
+        monkeypatch.setattr(sys, "argv", ["run.py", "--suite", "motionmark", "--engine", engine,
+                                          "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")])
+        try:
+            run.main()
+            raise AssertionError("ran %s with no binary" % engine)
+        except SystemExit as e:
+            assert said in str(e.code), (engine, e.code)
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_budget_is_not_taken_through_env_and_the_app_takes_at_most_five_minutes(monkeypatch, tmp_path):
+    # Through --env the variable would reach the app with no flag in the record and no raised-budget line:
+    # a score nobody could tell from a default one. And the app ignores more than five minutes.
+    monkeypatch.delenv(run.TURN_BUDGET_ENV, raising=False)
+    base = ["run.py", "--suite", "motionmark", "--binary", str(tmp_path / "nothing"), "--out", str(tmp_path / "out")]
+    for engine in ("hiwave", "hiwave-headless"):
+        monkeypatch.setattr(sys, "argv", base + ["--engine", engine, "--env", run.TURN_BUDGET_ENV + "=60000"])
+        try:
+            run.main()
+            raise AssertionError("took the budget through --env for %s" % engine)
+        except SystemExit as e:
+            assert "is not a --env variable" in str(e.code), e.code
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, str(run.APP_TURN_BUDGET_MAX_MS + 1))
+    monkeypatch.setattr(sys, "argv", base + ["--engine", "hiwave"])
+    try:
+        run.main()
+        raise AssertionError("started the app with more than it honours")
+    except SystemExit as e:
+        assert "at most 300000 ms for the app" in str(e.code), e.code
+    # The app honours the variable only beside the console log switch, which every app run has.
+    assert run.NET_LOG_ENV["HIWAVE_CONSOLE_LOG"] == "1"
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_app_is_started_with_the_runs_budget_and_never_with_the_shells(monkeypatch):
+    # A raised run: the app's environment has the run's number (the one after the clamp), and the record's
+    # flags say so. A default run: nothing is passed, and a value the shell had is taken out of what the
+    # app inherits, so a score without the flag never ran under one.
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "999999")
+    assert run.app_turn_budget_env(60000) == {run.TURN_BUDGET_ENV: "60000"}
+    assert os.environ[run.TURN_BUDGET_ENV] == "999999"
+    assert run.app_turn_budget_env(None) == {}
+    assert run.TURN_BUDGET_ENV not in os.environ
+    shell = {run.TURN_BUDGET_ENV: "999999", "HIWAVE_FROM_THE_SHELL": "yes"}
+    assert run.engine_flags("hiwave", {}, inherited=shell, turn_budget=60000)[run.TURN_BUDGET_ENV] == "60000"
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave", {}, inherited=shell)
+    # The headless engine takes an argument, not the variable; Chrome reads nothing.
+    assert run.TURN_BUDGET_ENV not in run.engine_flags("hiwave-headless", {}, inherited=shell, turn_budget=60000)
+    assert run.engine_flags("chrome", {}, inherited=shell, turn_budget=60000) == {}
+
+
+# The one failure FLK8 saw (once in 26, a loaded Mac): the run came back invalid after its full wall
+# limit with no request-log line, so the fake engine never reached the runner. Its cause is not known.
+NEVER_REACHED = "no request-log line for the runner page"
+
+
+def outcome(code, rec):
+    """What a fake-engine run did, for an assertion message: status, exit codes, wall time, and the
+    engine's own log (its first line says when it started)."""
+    return "run.py exit %r, status %r, engine exit %r, %s s after launch, off_machine %r; engine log:\n%s" % (
+        code, rec.get("status"), rec.get("exit_code"), rec.get("wall_s"), rec.get("off_machine"),
+        rec.get("log_tail", "(no tail: the run was ok)"))
+
+
+def run_ok_with_fake_engine(monkeypatch, tmp_path, capsys):
+    """A fake-engine run that must succeed. Retried once, and only on the FLK8 signature (the engine
+    never reached the runner); any other failure, or that one twice, fails with the run's outcome.
+    Returns the run and what it printed."""
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "first", "")
+    printed = capsys.readouterr()
+    if code != 0 and NEVER_REACHED in json.dumps(rec.get("off_machine")):
+        print("FLK8 signature, retrying once:", outcome(code, rec), file=sys.stderr)
+        code, rec = run_with_fake_engine(monkeypatch, tmp_path / "retry", "")
+        printed = capsys.readouterr()
+    assert code == 0 and rec.get("status") == "ok", outcome(code, rec)
+    return rec, printed
+
+
+def test_a_raised_budget_run_says_so_and_records_it(monkeypatch, tmp_path, capsys):
+    # The fake engine is started the way the real one is (sandbox-exec on the Mac).
+    monkeypatch.setenv(run.TURN_BUDGET_ENV, "60000")
+    rec, cap = run_ok_with_fake_engine(monkeypatch, tmp_path / "raised", capsys)
+    # The run's wall limit is 20 s here, so the budget is clamped to it.
+    assert rec["live_turn_budget_ms"] == 20000, rec
+    assert "TURN BUDGET RAISED" in cap.err and "clamped to the run's wall limit, 20000 ms" in cap.err, cap.err
+    assert "TURN BUDGET RAISED to 20000 ms" in cap.out, cap.out
+    monkeypatch.delenv(run.TURN_BUDGET_ENV)
+    rec, cap = run_ok_with_fake_engine(monkeypatch, tmp_path / "default", capsys)
+    assert rec["live_turn_budget_ms"] is None, rec
+    assert "TURN BUDGET RAISED" not in cap.err + cap.out, cap
+
+
+def test_motionmark_is_given_the_frames_flag_and_the_other_suites_are_not():
+    # MotionMark's runner loads each test in an iframe and waits for its load event; the engine makes
+    # no request for a frame unless HIWAVE_NESTED_CONTEXTS=1, so without it the suite never starts.
+    assert run.suite_env("motionmark", {}) == {"HIWAVE_NESTED_CONTEXTS": "1"}
+    for other in ("speedometer", "jetstream", "control"):
+        assert run.suite_env(other, {}) == {}, other
+    # The caller's --env is applied over the suite's (a run that looks at the suite without frames) ...
+    assert run.suite_env("motionmark", {"HIWAVE_NESTED_CONTEXTS": "0", "KEEP": "me"}) == \
+        {"HIWAVE_NESTED_CONTEXTS": "0", "KEEP": "me"}
+    # ... and the offline checks' settings still go on last.
+    env, _ = run.engine_env(run.suite_env("motionmark", {"HIWAVE_RUSTKIT_CHROME": "0"}), inherited={})
+    assert env["HIWAVE_NESTED_CONTEXTS"] == "1" and env["HIWAVE_RUSTKIT_CHROME"] == "1", env
+
+
+def test_the_engine_flags_are_what_the_engine_process_is_started_with():
+    shell = {"HIWAVE_CONTENT_THREAD": "0", "HIWAVE_FROM_THE_SHELL": "yes", "HOME": "/x", run.TURN_BUDGET_ENV: "60000"}
+    asked = run.suite_env("motionmark", {"HIWAVE_ASKED": "1", "RUST_BACKTRACE": "1"})
+    # Every HIWAVE_ variable in the engine's environment, the shell's included; not the dropped one, not
+    # the shell's own turn-budget variable (only a run that raised the budget passes one, to the app), nothing else.
+    assert run.engine_flags("hiwave-headless", asked, inherited=shell) == {
+        "HIWAVE_ASKED": "1", "HIWAVE_CONSOLE_LOG": "1", "HIWAVE_FROM_THE_SHELL": "yes",
+        "HIWAVE_NESTED_CONTEXTS": "1", "HIWAVE_RUSTKIT_CHROME": "1"}
+    # The app is also started with its test hooks off.
+    assert run.engine_flags("hiwave", asked, inherited={})["HIWAVE_TEST_HOOKS"] == "0"
+    # And with its sidebar closed, unless the run asked for it open.
+    assert run.engine_flags("hiwave", asked, inherited=shell)["HIWAVE_TEST_SIDEBAR"] == "closed"
+    assert run.engine_flags("hiwave", {"HIWAVE_TEST_SIDEBAR": "open"}, inherited={})["HIWAVE_TEST_SIDEBAR"] == "open"
+    # Chrome reads none of them.
+    assert run.engine_flags("chrome", asked, inherited=shell) == {}
+
+
+FLAG_ECHO = 'import os; print("fake engine sees nested=" + os.environ.get("HIWAVE_NESTED_CONTEXTS", "unset"), flush=True)'
+
+
+def test_a_motionmark_run_starts_the_engine_with_the_frames_flag_and_records_it(monkeypatch, tmp_path):
+    monkeypatch.delenv("HIWAVE_NESTED_CONTEXTS", raising=False)
+
+    def engine_saw(tmp):
+        log = next((tmp / "out").glob("*.work/app.log")).read_text()
+        return [line for line in log.splitlines() if line.startswith("fake engine sees")]
+
+    # motionmark: on, in the engine's environment and in the record.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "mm", FLAG_ECHO, suite_name="motionmark", more_argv=("--keep",))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "1", rec["engine_flags"]
+    assert engine_saw(tmp_path / "mm") == ["fake engine sees nested=1"]
+    # another suite: not set, and the record says so by not listing it.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "sp", FLAG_ECHO, more_argv=("--keep",))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert "HIWAVE_NESTED_CONTEXTS" not in rec["engine_flags"] and rec["engine_flags"]["HIWAVE_RUSTKIT_CHROME"] == "1", rec
+    assert engine_saw(tmp_path / "sp") == ["fake engine sees nested=unset"]
+    # motionmark with the flag switched off by the caller: off, and recorded as off.
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "off", FLAG_ECHO, suite_name="motionmark",
+                                     more_argv=("--keep", "--env", "HIWAVE_NESTED_CONTEXTS=0"))
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_flags"]["HIWAVE_NESTED_CONTEXTS"] == "0", rec["engine_flags"]
+    assert engine_saw(tmp_path / "off") == ["fake engine sees nested=0"]
+
+
+def test_the_engines_own_uncaught_errors_are_read_from_its_log(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("\x1b[2m2026-11-16T01:21:24.9Z\x1b[0m  INFO hiwave::console: uncaught TypeError: cannot convert at script#9:94:31\n"
+                   "    at script#9:94:31\n"
+                   "2026-11-16T01:21:25.0Z  INFO hiwave::console: console log inline#1:2:3 uncaught is only a word here\n"
+                   "2026-11-16T01:21:25.1Z  INFO hiwave::console: unhandled rejection Error: boom at script#2:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught TypeError: cannot convert at script#9:94:31",
+                                     "unhandled rejection Error: boom at script#2:1:1"]
+    assert run.log_uncaught(tmp_path / "missing.log") == []
+
+
+def test_an_error_the_page_cancelled_is_among_the_engines_uncaught_errors_with_its_mark(tmp_path):
+    # The engine writes an error the page cancelled (window.onerror returned true, or a listener called
+    # preventDefault) with a mark after the word the reader matches on: a page cannot keep it out of the record.
+    log = tmp_path / "app.log"
+    log.write_text("2026-11-16T17:00:00.0Z  INFO hiwave::console: uncaught (cancelled by the page) Error: boom at inline#2:1:7\n"
+                   "2026-11-16T17:00:00.1Z  INFO hiwave::console: uncaught RangeError: left alone at inline#3:1:7\n")
+    assert run.log_uncaught(log) == ["uncaught (cancelled by the page) Error: boom at inline#2:1:7",
+                                     "uncaught RangeError: left alone at inline#3:1:7"]
+
+
+def test_a_message_with_an_escaped_line_break_is_one_error_to_the_reader(tmp_path):
+    # The engine writes control characters in page text escaped, so text shaped like a log line inside a
+    # message stays inside its own line.
+    log = tmp_path / "app.log"
+    log.write_text("2026-11-16T17:00:00.0Z  INFO hiwave::console: uncaught Error: first\\n2026-11-16T00:00:00.0Z  INFO "
+                   "hiwave::console: uncaught Error: second at inline#9:1:1 at inline#1:1:1\n    at inline#1:1:1\n"
+                   "2026-11-16T17:00:00.1Z  INFO hiwave::console: unhandled rejection (cancelled by the page) Error: boom at inline#2:1:1\n")
+    found = run.log_uncaught(log)
+    assert len(found) == 2 and found[0].startswith("uncaught Error: first\\n2026-11-16T00:00:00.0Z") and "second" in found[0]
+    assert found[1] == "unhandled rejection (cancelled by the page) Error: boom at inline#2:1:1"
+
+
+def test_the_stress_reader_matches_the_engines_line_prefix(tmp_path):
+    # A record is a physical line that starts with the engine's own prefix: a timestamp, a level, and the
+    # console target right after them. The same words anywhere else on a line (in the middle or at the start
+    # of another target's message, after other text) are not a record.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    log.write_text(
+        stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n"
+        + stamp + "  WARN rustkit_engine: Web font not loaded family=x " + stamp + "  INFO hiwave::console: uncaught Error: in the middle at inline#9:1:1\n"
+        + stamp + "  INFO rustkit_engine: hiwave::console: uncaught Error: at the start of a message at inline#9:1:1\n"
+        + stamp + "  INFO rustkit_net::policy: " + stamp + "  INFO hiwave::console: unhandled rejection Error: after a target at inline#9:1:1\n"
+        + "hiwave::console: uncaught Error: no prefix at inline#9:1:1\n"
+        + "  INFO hiwave::console: uncaught Error: no timestamp at inline#9:1:1\n"
+        + stamp + " hiwave::console: uncaught Error: no level at inline#9:1:1\n"
+        + "\x1b[2m" + stamp + "\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mhiwave::console\x1b[0m\x1b[2m:\x1b[0m unhandled rejection Error: coloured, as the app writes it at inline#2:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught Error: the real one at inline#1:1:1",
+                                     "unhandled rejection Error: coloured, as the app writes it at inline#2:1:1"]
+
+
+def test_a_record_written_inside_the_engines_spans_is_listed(tmp_path):
+    # The logger writes the open spans between the level and the target. The engine's own, with the fields
+    # they have, are part of its prefix; a span the reader does not know, or other text in the braces, is not.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    spans = "relayout{id=EngineViewId(1) view_id=EngineViewId(1)}:relayout{id=EngineViewId(1)}:build_layout_tree"
+    log.write_text(
+        stamp + "  INFO " + spans + ": hiwave::console: uncaught Error: inside a relayout at inline#1:1:1\n"
+        + stamp + "  INFO render{id=EngineViewId(12) view_id=EngineViewId(12)}:renderer_execute{cmd_count=40}: hiwave::console: unhandled rejection Error: inside a render at inline#2:1:1\n"
+        + stamp + "  INFO layout_compute: hiwave::console: uncaught Error: a span with no fields at inline#3:1:1\n"
+        + stamp + "  INFO " + spans + ": rustkit_engine: Style share verify=false\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1) title=x}: hiwave::console: uncaught Error: text in the braces at inline#9:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)} hiwave::console: uncaught Error: no colon at inline#9:1:1\n"
+        + stamp + "  INFO page_span{id=EngineViewId(1)}: hiwave::console: uncaught Error: a span that is not the engine's at inline#9:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)}:rustkit_engine: hiwave::console: uncaught Error: after a target at inline#9:1:1\n")
+    assert run.log_uncaught(log) == ["uncaught Error: inside a relayout at inline#1:1:1",
+                                     "unhandled rejection Error: inside a render at inline#2:1:1",
+                                     "uncaught Error: a span with no fields at inline#3:1:1"]
+
+
+def test_a_finished_motionmark_tests_frames_are_kept_by_test_name():
+    progress = [{"event": "test", "test": "Multiply"}, {"event": "test-done", "test": "Multiply", "frames": {"samples": 3}},
+                {"event": "test-done", "test": "Leaves", "frames": None}, {"event": "start"}]
+    assert run.frames_by_test(progress) == {"Multiply": {"samples": 3}}
+
+
+# The spans the engine's code opens: `info_span!("name", ..)` and its siblings at every level,
+# `span!(Level::X, "name", ..)`, and `#[instrument]` (the span is named after the function unless the
+# attribute gives `name = ".."`). Comment lines are not code.
+SPAN_MACRO = re.compile(r'\b(?:(?:trace|debug|info|warn|error)_span|span)!\s*\(')
+SPAN_MACRO_NAME = re.compile(
+    r'\b(?:(?:trace|debug|info|warn|error)_span!\s*\(|span!\s*\(\s*(?:target\s*:\s*"[^"]*"\s*,\s*)?(?:tracing::)?Level::[A-Z]+\s*,)'
+    r'\s*(?:target\s*:\s*"[^"]*"\s*,\s*)?(?:parent\s*:\s*[^,]+,\s*)?"([^"]+)"')
+INSTRUMENT = re.compile(r'#\[\s*(?:tracing::)?instrument\b(\s*\((?:[^()]|\([^()]*\))*\))?\s*\]')
+INSTRUMENT_NAME = re.compile(r'\bname\s*=\s*"([^"]+)"')
+INSTRUMENTED_FN = re.compile(r'(?:\s*(?:#\[[^\]]*\]|pub(?:\([^)]*\))?|const|async|unsafe|extern\s*"[^"]*"))*\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def span_names(source):
+    """The names of the spans a Rust source opens, and how many span sites it has that gave no name
+    this could read (a name that is not a string literal)."""
+    code = "\n".join("" if line.lstrip().startswith("//") else line for line in source.splitlines())
+    names, unread = set(), 0
+    for m in SPAN_MACRO.finditer(code):
+        named = SPAN_MACRO_NAME.match(code, m.start())
+        if named:
+            names.add(named.group(1))
+        else:
+            unread += 1
+    for m in INSTRUMENT.finditer(code):
+        given = INSTRUMENT_NAME.search(m.group(1) or "")
+        fn = INSTRUMENTED_FN.match(code, m.end())
+        if given:
+            names.add(given.group(1))
+        elif fn:
+            names.add(fn.group(1))
+        else:
+            unread += 1
+    return names, unread
+
+
+def test_the_span_collector_reads_every_form_a_span_is_opened_in():
+    names, unread = span_names('''
+        let _a = tracing::info_span!("first", ?id).entered();
+        let _b = debug_span!(
+            "second"
+        );
+        let _c = trace_span!(target: "x", "third", n = 1);
+        let _d = span!(Level::WARN, "fourth");
+        let _e = tracing::span!(tracing::Level::INFO, "fifth", a = 1);
+        // let _f = info_span!("in a comment");
+        #[tracing::instrument(skip(self), fields(view_id = ?id))]
+        /// A comment between the attribute and the function.
+        #[inline]
+        pub(crate) fn sixth(&mut self) {}
+        #[instrument(name = "seventh", skip_all)]
+        async fn not_this_name() {}
+        #[instrument]
+        fn eighth() {}
+        let table_span = TableSpan::default();
+        let _g = info_span!(NAME_IN_A_CONST);
+    ''')
+    assert names == {"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"}
+    assert unread == 1
+
+
+def test_every_span_the_engine_opens_is_one_the_reader_knows():
+    # The reader takes a console record only behind the spans it knows by name (ENGINE_SPAN). A span
+    # added to the engine and not to that list would drop every record written inside it, silently:
+    # this reads the spans out of the engine's source and holds the list to them.
+    crates = pathlib.Path(__file__).resolve().parents[3] / "crates"
+    found, unread = {}, []
+    for path in sorted(crates.rglob("*.rs")):
+        if "target" in path.relative_to(crates).parts:
+            continue
+        names, n = span_names(path.read_text(errors="replace"))
+        for name in names:
+            found.setdefault(name, str(path.relative_to(crates)))
+        if n:
+            unread.append(str(path.relative_to(crates)))
+    assert not unread, "a span whose name is not a string literal: the reader cannot be held to it: %s" % unread
+    # The collector found the engine's code at all.
+    assert {"relayout", "render", "renderer_execute"} <= set(found), sorted(found)
+    missing = {name: where for name, where in found.items() if name not in run.ENGINE_SPAN_NAMES}
+    assert not missing, "spans the stress reader does not know (add them to ENGINE_SPAN_NAMES in tools/stress/run.py): %s" % missing
+    # And every name on the list is one the pattern takes as a prefix.
+    stamp = "2026-11-16T17:00:00.000000Z"
+    for name in run.ENGINE_SPAN_NAMES:
+        line = stamp + "  INFO " + name + ": hiwave::console: uncaught Error: x at inline#1:1:1"
+        assert run.ENGINE_CONSOLE_RECORD.search(line), name
+
+
+def test_console_lines_with_a_prefix_the_reader_refused_are_counted(tmp_path):
+    # A line that carries the console target and an uncaught record's words, but not behind the engine's
+    # own prefix, is not listed. It is counted, so a record lost to a span the reader does not know (or
+    # text made to look like a record) shows in the run record as a number that is not zero.
+    log = tmp_path / "app.log"
+    stamp = "2026-11-16T17:00:00.000000Z"
+    log.write_text(
+        stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n"
+        + stamp + "  INFO relayout{id=EngineViewId(1)}: hiwave::console: uncaught Error: inside a span at inline#1:1:1\n"
+        + stamp + "  INFO hiwave::console: uncaught Error: first\\n" + stamp + "  INFO hiwave::console: uncaught Error: quoted in a message at inline#1:1:1\n"
+        + stamp + "  INFO hiwave::console: console log inline#1:2:3 uncaught is only a word here\n"
+        + stamp + "  INFO rustkit_engine: Style share verify=false\n"
+        + stamp + "  INFO a_new_span{id=EngineViewId(1)}: hiwave::console: uncaught Error: behind a span the reader does not know at inline#9:1:1\n"
+        + stamp + "  WARN rustkit_engine: Web font not loaded family=x " + stamp + "  INFO hiwave::console: unhandled rejection Error: in the middle at inline#9:1:1\n"
+        + "hiwave::console: uncaught Error: no prefix at inline#9:1:1\n"
+        + "\x1b[2m" + stamp + "\x1b[0m \x1b[32m INFO\x1b[0m page{title=x}: \x1b[2mhiwave::console\x1b[0m\x1b[2m:\x1b[0m unhandled rejection Error: coloured at inline#2:1:1\n")
+    assert len(run.log_uncaught(log)) == 3
+    assert run.log_console_refused(log) == 4
+    clean = tmp_path / "clean.log"
+    clean.write_text(stamp + "  INFO hiwave::console: uncaught Error: the real one at inline#1:1:1\n")
+    assert run.log_console_refused(clean) == 0
+    assert run.log_console_refused(tmp_path / "missing.log") == 0
+
+
+REFUSED_LINE = ('print("2026-11-16T17:00:00.000000Z  INFO hiwave::console: uncaught Error: listed at inline#1:1:1", flush=True); '
+                'print("2026-11-16T17:00:00.000000Z  INFO a_new_span: hiwave::console: uncaught Error: refused at inline#9:1:1", flush=True)')
+
+
+def test_the_run_record_carries_the_count_of_refused_console_lines(monkeypatch, tmp_path, capsys):
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "one", REFUSED_LINE)
+    assert code == 0 and rec["status"] == "ok", outcome(code, rec)
+    assert rec["engine_errors"] == ["uncaught Error: listed at inline#1:1:1"]
+    assert rec["engine_errors_refused"] == 1, rec
+    assert "engine_errors_refused=1" in capsys.readouterr().out
+    code, rec = run_with_fake_engine(monkeypatch, tmp_path / "none", "")
+    assert code == 0 and rec["engine_errors_refused"] == 0, outcome(code, rec)
+    assert "engine_errors_refused" not in capsys.readouterr().out
+
+
+# ── FRAME-STAGES: the per-frame stage split (MotionMark at a fixed complexity) ──
+
+class _Args:
+    only = ["Canvas Arcs"]
+    test_interval = 10
+    complexity = None
+    iterations = None
+
+
+def test_a_fixed_complexity_run_uses_the_suites_fixed_controller():
+    a = _Args()
+    assert "controller=ramp" in run.runner_url("http://h", "motionmark", a)
+    a.complexity = 100
+    url = run.runner_url("http://h", "motionmark", a)
+    assert "controller=fixed&complexity=100" in url and "controller=ramp" not in url
+    assert "test-name=CanvasArcs" in url and "test-interval=10" in url
+
+
+def test_frame_stages_asks_each_engine_for_its_own_account(tmp_path):
+    argv = run.headless_argv(tmp_path / "pc", "http://h/", tmp_path, 30, None, frame_stages=True)
+    assert argv.count("--frame-stages") == 1
+    assert "--frame-stages" not in run.headless_argv(tmp_path / "pc", "http://h/", tmp_path, 30, None)
+    chrome = run.chrome_trace_args(tmp_path / "trace.json", 40)
+    keys = [a.split("=", 1)[0] for a in chrome]
+    assert keys == ["--trace-startup", "--trace-startup-format", "--trace-startup-file", "--trace-startup-duration"]
+    assert "--trace-startup-format=json" in chrome and "--trace-startup-duration=40" in chrome
+
+
+def _engine_frame_stage_fields():
+    """FRAME_STAGE_FIELDS as the engine's source lists them."""
+    src = (HERE.parents[1] / "crates" / "rustkit-engine" / "src" / "frame_stages.py".replace(".py", ".rs")).read_text()
+    body = re.search(r"pub const FRAME_STAGE_FIELDS: &\[&str\] = &\[(.*?)\];", src, re.S).group(1)
+    return re.findall(r'"([a-z_]+)"', body)
+
+
+def _hiwave_line(fields, **values):
+    return "Frame stages " + " ".join("%s=%s" % (k, values.get(k, 0)) for k in fields)
+
+
+def test_the_hiwave_reader_knows_every_stage_the_engine_prints():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    assert fields[:4] == ["turn", "t_ms", "busy_ms", "wait_ms"], fields
+    assert set(frame_stages.HIWAVE_STAGES) <= set(fields), set(frame_stages.HIWAVE_STAGES) - set(fields)
+    assert set(fields) - set(frame_stages.HIWAVE_STAGES) == {"turn", "t_ms", "host_calls", "canvas_draws", "renders"}
+
+
+def test_the_hiwave_reader_takes_the_middle_of_the_longest_run_of_rendering_turns():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    lines = [_hiwave_line(fields, turn=1, t_ms=0, renders=1, script_ms=99)]  # the load, apart
+    for i in range(20):  # the test: 20 rendering turns 20 ms apart, idle turns between
+        lines.append(_hiwave_line(fields, turn=2 + 2 * i, t_ms=5000 + 20 * i, renders=1, script_ms=i, canvas_draws=3))
+        lines.append(_hiwave_line(fields, turn=3 + 2 * i, t_ms=5010 + 20 * i, renders=0))
+    out = frame_stages.hiwave_summary("noise\n" + "\n".join(lines) + "\nmore noise\n")
+    assert out["turns"] == 41 and out["frames"] == 12, out  # 20 frames, the middle 60 %
+    assert out["stages"]["script_ms"] == 9.5 and out["frame_interval_ms"] == 20.0
+    assert out["canvas_draws_per_frame"] == 3
+    assert set(out["stages"]) == set(frame_stages.HIWAVE_STAGES)
+
+
+def test_the_hiwave_reader_splits_script_into_js_and_host_calls_with_per_frame_rows():
+    import frame_stages
+    fields = _engine_frame_stage_fields()
+    lines, rows = [], {}
+    for i in range(20):  # 20 frames, each 4 arc calls (0.1 ms each) and one fill (0.5 ms)
+        lines.append(_hiwave_line(fields, turn=1 + i, t_ms=1000 + 16 * i, renders=1, script_ms=3.0, host_ms=1.0,
+                                  canvas_raster_ms=0.4, host_calls=5))
+        rows[("__rustkit_canvas", "arc")] = (4 * (i + 1), 0.4 * (i + 1))
+        rows[("__rustkit_canvas", "fill")] = (i + 1, 0.5 * (i + 1))
+        rows[("__rustkit_dom_attr", "")] = (0, 0.0)
+        if (i + 1) % 5 == 0:
+            lines.append("Host calls turn=%d rows=%s" % (i + 1, ",".join(
+                "%s/%s:%d:%.3f" % (n, o, c, m) for (n, o), (c, m) in rows.items())))
+    out = frame_stages.hiwave_summary("\n".join(lines))
+    assert out["js_ms"] == 2.0 and out["host_less_raster_ms"] == 0.6 and out["host_calls_per_frame"] == 5, out
+    by = {(r["name"], r["op"]): r for r in out["host_rows_per_frame"]}
+    assert set(by) == {("__rustkit_canvas", "arc"), ("__rustkit_canvas", "fill")}, by  # no calls: left out
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "arc")]["us_per_call"] == 100.0
+    assert by[("__rustkit_canvas", "fill")]["ms"] == 0.5
+    assert out["host_rows_per_frame"][0]["op"] == "fill"  # the most time first
+    # A heavy cell: no line before the first steady frame; the nearest inside the steady frames is used.
+    late = "\n".join(l for l in lines if not l.startswith("Host calls turn=5 "))
+    by = {(r["name"], r["op"]): r for r in frame_stages.hiwave_summary(late)["host_rows_per_frame"]}
+    assert by[("__rustkit_canvas", "arc")]["calls"] == 4.0 and by[("__rustkit_canvas", "fill")]["ms"] == 0.5, by
+
+
+def _x(name, ts, dur, tid=1, pid=10):
+    return {"ph": "X", "name": name, "ts": ts, "dur": dur, "pid": pid, "tid": tid}
+
+
+def test_the_chrome_reader_splits_main_thread_self_time_and_counts_other_threads_tasks():
+    import frame_stages
+    ev = [{"ph": "M", "name": "thread_name", "pid": 10, "tid": 1, "args": {"name": "CrRendererMain"}},
+          {"ph": "M", "name": "thread_name", "pid": 10, "tid": 2, "args": {"name": "Compositor"}},
+          {"ph": "M", "name": "thread_name", "pid": 20, "tid": 3, "args": {"name": "CrGpuMain"}},
+          {"ph": "M", "name": "thread_name", "pid": 30, "tid": 4, "args": {"name": "CrBrowserMain"}}]
+    for i in range(10):  # 10 frames, 16 ms apart
+        t = 1_000_000 + i * 16_000
+        ev += [_x("ProxyMain::BeginMainFrame", t, 5000),
+               _x("FireAnimationFrame", t + 100, 2000), _x("FunctionCall", t + 200, 1500),  # script 2.0 ms
+               _x("UpdateLayoutTree", t + 2200, 1000), _x("Layout", t + 3300, 500), _x("Paint", t + 3900, 400),
+               _x("ThreadControllerImpl::RunTask", t + 5100, 800, tid=2),
+               _x("RunTask", t + 6000, 300, tid=3, pid=20), _x("Inner", t + 6000, 100, tid=3, pid=20),
+               _x("RunTask", t + 6000, 999, tid=4, pid=30)]  # the browser's: left out
+    out = frame_stages.chrome_summary({"traceEvents": ev})
+    s = out["stages"]
+    assert (s["script"], s["style"], s["layout"], s["paint"]) == (2.0, 1.0, 0.5, 0.4), out
+    assert s["main_other"] == 1.1  # BeginMainFrame's own time: 5.0 - 3.9
+    assert (s["compositor"], s["gpu_main"]) == (0.8, 0.3), out  # whole tasks, children once
+    assert out["frame_interval_ms"] == 16.0 and out["frames"] >= 4

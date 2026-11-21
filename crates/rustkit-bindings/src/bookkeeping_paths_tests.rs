@@ -174,6 +174,63 @@ fn the_next_timer_is_read_without_the_pages_math() {
     assert_eq!((delay, clock, ran.as_str()), (Some(1000), 0.0, "0"), "the delay, the clock, and calls of the page's functions");
 }
 
+/// An interval held back on the real clock keeps its grid, and a turn's
+/// frame budget is timed, with the arithmetic and clock of install time: a
+/// page whose `Math.floor` returns `NaN` still has its interval run, once,
+/// and on its grid, and its `Date.now` is not what ends a turn.
+#[test]
+fn an_interval_keeps_its_grid_without_the_pages_math_or_clock() {
+    let got = bounded(|| {
+        let (b, _) = bindings(false);
+        b.evaluate(KIT).unwrap();
+        b.evaluate(
+            "var n = 0, realFloor = Math.floor, realNow = Date.now;
+             setInterval(function () { n++; }, 10);
+             Math.floor = function () { ran++; return NaN; }; Date.now = counted;",
+        )
+        .unwrap();
+        b.advance_real_timers_for_frame(55, 1000, 16).unwrap();
+        let next = b.next_timer_delay();
+        b.evaluate("Math.floor = realFloor; Date.now = realNow;").unwrap();
+        (next.map(|d| d % 10), text(b.evaluate("'n=' + n + ' ran=' + ran").unwrap()))
+    });
+    assert_eq!(got, (Some(5), "n=1 ran=0".to_string()), "the next run's place on the grid, and the page's counts");
+}
+
+/// Animation frames are put on their grid, and a turn's frame budget is
+/// timed, with the arithmetic and clock of install time: a page whose
+/// `Math.floor` returns 0, or whose `Math` is a plain object, still gets its
+/// frames on the grid, and its `Date.now` is not what ends a turn.
+#[test]
+fn frames_and_the_frame_budget_run_without_the_pages_math_or_clock() {
+    let got = bounded(|| {
+        let (b, _) = bindings(false);
+        b.evaluate(KIT).unwrap();
+        b.evaluate(
+            "var frames = 0, threw = '', realMath = Math, realNow = Date.now;
+             Math.floor = counted; Date.now = counted;
+             (function f() { requestAnimationFrame(function () { frames++; f(); }); })();",
+        )
+        .unwrap();
+        let first = b.next_timer_delay();
+        b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        let second = b.next_timer_delay();
+        b.evaluate(
+            "Math = {};
+             try { requestAnimationFrame(function () { frames++; }); } catch (e) { threw = String(e); }",
+        )
+        .unwrap();
+        let ran_round = b.advance_timers_for_frame(17, 1000, 16).unwrap();
+        b.evaluate("Math = realMath; Date.now = realNow;").unwrap();
+        (first, second, ran_round, text(b.evaluate("'frames=' + frames + ' ran=' + ran + ' threw=' + threw").unwrap()))
+    });
+    assert_eq!(
+        got,
+        (Some(17), Some(17), (2, false), "frames=3 ran=0 threw=".to_string()),
+        "the first and next frame's delay, the second turn's callbacks, and the page's counts"
+    );
+}
+
 /// Timers are set and cleared while the page has its own array methods in
 /// place: the timer table never passes through them, and reading the next
 /// timer runs nothing of the page's.
@@ -359,4 +416,64 @@ fn an_engine_events_dispatch_state_is_its_own() {
         text(b.evaluate("String(calls)").unwrap())
     });
     assert_eq!(calls, "0", "accessor calls");
+}
+
+/// The fields of an event the engine makes are read from its init record with the own-property
+/// helper of install time: they are the same whatever `Object.prototype.hasOwnProperty` and
+/// `Function.prototype.call` are when the event is made.
+#[test]
+fn an_engine_events_fields_are_read_with_the_install_time_own_property_helper() {
+    let got = bounded(|| {
+        let (b, _doc) = bindings(false);
+        b.evaluate_as_page_script(
+            "var calls = 0, seen = [], p;
+             window.addEventListener('unhandledrejection', function (e) {
+                 seen.push([e.type, e.cancelable, e.promise === p, e.reason, e.isTrusted].join(':'));
+             });
+             Object.prototype.hasOwnProperty = function () { calls++; return false; };
+             Function.prototype.call = function () { calls++; return false; };
+             p = Promise.reject('r');",
+        )
+        .unwrap();
+        text(b.evaluate("seen.join() + ' calls=' + calls").unwrap())
+    });
+    assert_eq!(got, "unhandledrejection:true:true:r:true calls=0");
+}
+
+/// The load-listener check made when a frame goes into the document reads
+/// the tree and the handler attribute from the engine's own records: an
+/// ancestor lookup or attribute read the page has replaced is not asked,
+/// nor is a set constructor the page put in the built-in's place;
+/// the check ends, and its answers are the same. (The check is called
+/// here as web_frames.js calls it; an insertion made with these accessors
+/// replaced has other readers of the tree.)
+#[test]
+fn the_load_listener_check_asks_nothing_of_the_page() {
+    let (ran, heard) = bounded(|| {
+        let (b, _) = bindings(false);
+        b.enable_frames().unwrap();
+        b.evaluate(
+            "var ran = 0, none = function () {};
+             var box = document.createElement('div'); box.addEventListener('load', none, true); document.body.appendChild(box);
+             var marked = document.createElement('iframe'); marked.setAttribute('onload', '0');
+             var plain = document.createElement('iframe'), inner = document.createElement('iframe');
+             document.body.appendChild(plain); document.body.appendChild(marked); box.appendChild(inner);
+             Object.defineProperty(Node.prototype, 'parentNode', { get: function () { ran++; return this; }, configurable: true });
+             Object.defineProperty(Node.prototype, 'parentElement', { get: function () { ran++; return this; }, configurable: true });
+             Element.prototype.getAttribute = function () { ran++; return null; };
+             Element.prototype.hasAttribute = function () { ran++; return false; };
+             window.WeakSet = function () { ran++; this.add = function () { ran++; }; this.has = function () { ran++; return false; }; };",
+        )
+        .unwrap();
+        let heard = b
+            .host_turn(
+                "var H = __rk.domHooks, d = document; \
+                 return [!!H.loadSnapshot(d.querySelectorAll('iframe')[0]), !!H.loadSnapshot(d.querySelectorAll('iframe')[1]), \
+                         !!H.loadSnapshot(d.querySelectorAll('iframe')[2])].join();",
+                &[],
+            )
+            .unwrap();
+        (text(b.evaluate("String(ran)").unwrap()), text(heard))
+    });
+    assert_eq!((ran.as_str(), heard.as_str()), ("0", "true,false,true"), "page functions run; the check for the frame under a capturing listener, a plain frame, a frame with the attribute");
 }

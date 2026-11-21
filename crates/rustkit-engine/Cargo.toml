@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "Browser engine orchestration layer for RustKit"
 authors = ["HiWave Team"]
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [features]
 default = []
 # Headless mode: Enables offscreen rendering without window surfaces
 # Useful for testing, CI/CD, and server-side rendering
 headless = []
+# MEDIA-AVF step 3: `EngineBuilder::avfoundation_media`, media elements' players on the
+# main-thread MediaHost (docs/design/MEDIA_AVF.md §3.2). Off until Milestone 1 step 6.
+media-avf = ["rustkit-media/media-avf"]
 
 [dependencies]
 # RustKit crates
@@ -26,6 +29,9 @@ rustkit-net = { path = "../rustkit-net" }
 rustkit-http = { path = "../rustkit-http" }
 rustkit-image = { path = "../rustkit-image" }
 rustkit-svg = { path = "../rustkit-svg" }
+# MEDIA-AVF: <video> / <audio> (wired from M1 step 2; step 1 adds the dependency and
+# its notices).
+rustkit-media = { path = "../rustkit-media" }
 rustkit-renderer = { path = "../rustkit-renderer" }
 # The presenter names the texture a frame is drawn into
 wgpu = "24"

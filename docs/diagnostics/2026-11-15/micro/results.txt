@@ -1,0 +1,11 @@
+# micro-loop timings: file, RustKit ms, V8 --jitless ms, V8 --always-sparkplug --no-maglev --no-turbofan ms
+# 2M loop turns per runIteration; median of iterations 2..N (RustKit N=5, V8 N=7); timer wraps runIteration only; Linux i7-10750H, 2026-11-15
+alloc_object.js 735.5450000000001 52.455 34.815
+array_index.js 94.53 31.119999999999997 20.57
+call_empty.js 360.525 44.72 22.935000000000002
+empty_loop.js 41.565 17.055 9.615
+local_arith.js 82.49000000000001 43.43 25.189999999999998
+method_call_this.js 407.315 52.685 42.905
+prop_read_hit.js 86.635 21.695 13.915
+prop_write_hit.js 92.61500000000001 26.17 15.085
+proto_method_read.js 376.08000000000004 23.93 20.47

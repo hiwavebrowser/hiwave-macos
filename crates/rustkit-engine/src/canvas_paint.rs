@@ -181,6 +181,102 @@ pub(crate) fn bitmap_frame(key: &str) -> Option<std::sync::Arc<CanvasFrame>> {
     FRAMES.lock().ok()?.get(key).cloned()
 }
 
+/// GPU canvas A1: a canvas's batches on their way from the page thread
+/// (display-list build) to the presenter (`upload_display_list_images`),
+/// which replays them into the canvas's texture. Batches wait here, not in
+/// the frame commit: a commit can be replaced before it is drawn, and its
+/// batches would be lost with it.
+#[derive(Default)]
+pub(crate) struct Mailbox {
+    batches: Vec<rustkit_bindings::canvas::GpuBatch>,
+    bytes: usize,
+    /// The presenter could not draw the batches onto a texture as it was
+    /// (missing, or batches dropped here): the next batch must be a reset.
+    needs_reset: bool,
+    /// The presenter keeps no texture for this canvas: CPU bitmap for good.
+    denied: bool,
+}
+
+/// The most bytes of batches a mailbox holds: past it (a window that is
+/// not presenting) they are dropped and the canvas starts over from its
+/// bitmap at the next batch.
+const MAILBOX_BYTE_CAP: usize = rustkit_bindings::canvas::PENDING_BYTE_BUDGET;
+
+/// Mailboxes by GPU key (`rustkit-canvas:<node>@g<context id>`); one goes
+/// when the paint that made it is dropped.
+static MAILBOXES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Mailbox>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether `url` names a canvas's GPU texture.
+pub(crate) fn is_gpu_key(url: &str) -> bool {
+    url.strip_prefix(KEY_PREFIX).is_some_and(|rest| rest.contains("@g"))
+}
+
+/// Presenter: the batches waiting for `key`, taken.
+pub(crate) fn take_gpu_batches(key: &str) -> Vec<rustkit_bindings::canvas::GpuBatch> {
+    let Ok(mut boxes) = MAILBOXES.lock() else { return Vec::new() };
+    let Some(m) = boxes.get_mut(key) else { return Vec::new() };
+    m.bytes = 0;
+    std::mem::take(&mut m.batches)
+}
+
+/// Presenter: what the replay of `key`'s batches came to.
+pub(crate) fn gpu_replayed(key: &str, result: rustkit_renderer::CanvasReplay) {
+    let Ok(mut boxes) = MAILBOXES.lock() else { return };
+    let Some(m) = boxes.get_mut(key) else { return };
+    match result {
+        rustkit_renderer::CanvasReplay::Drawn => {}
+        rustkit_renderer::CanvasReplay::NeedsReset => m.needs_reset = true,
+        rustkit_renderer::CanvasReplay::Denied => m.denied = true,
+    }
+}
+
+/// Page thread: hands `node`'s new draws to the presenter under `key`;
+/// `false` when the presenter denied the canvas a texture (the caller shows
+/// the CPU bitmap). A mailbox made here starts with a reset: the texture
+/// under a key nobody posted to is unknown.
+fn post_gpu_batch(source: &CanvasSource, node: usize, key: &str) -> bool {
+    let Ok(mut boxes) = MAILBOXES.lock() else { return false };
+    let fresh = !boxes.contains_key(key);
+    let m = boxes.entry(key.to_string()).or_default();
+    if m.denied {
+        return false;
+    }
+    let force = fresh || std::mem::take(&mut m.needs_reset);
+    let Some(batch) = source.take_gpu_batch(node, force) else { return false };
+    if batch.reset.is_some() {
+        m.batches.clear();
+        m.bytes = 0;
+    }
+    m.bytes += batch.bytes();
+    m.batches.push(batch);
+    if m.bytes > MAILBOX_BYTE_CAP {
+        m.batches.clear();
+        m.bytes = 0;
+        m.needs_reset = true;
+    }
+    true
+}
+
+/// Whether a `w` x `h` canvas can have a texture: some area, within the
+/// largest texture every device takes (wgpu's default limit), and its
+/// scratch within the renderer's budget. Checked here so a canvas that
+/// cannot is never posted (the presenter's own check stays).
+fn gpu_fits(w: u32, h: u32) -> bool {
+    const MAX_SIDE: u32 = 8192;
+    w > 0 && h > 0 && w <= MAX_SIDE && h <= MAX_SIDE && w as u64 * h as u64 * 20 <= rustkit_renderer::CANVAS_SCRATCH_BUDGET
+}
+
+/// Whether the presenter asked `key` for a reset.
+fn gpu_needs_reset(key: &str) -> bool {
+    MAILBOXES.lock().ok().and_then(|b| b.get(key).map(|m| m.needs_reset)).unwrap_or(false)
+}
+
+/// Whether the presenter denied `key` a texture.
+fn gpu_denied(key: &str) -> bool {
+    MAILBOXES.lock().ok().and_then(|b| b.get(key).map(|m| m.denied)).unwrap_or(false)
+}
+
 /// A canvas's paint as the last display list built it: for the bitmap at
 /// `generation`, in a box whose fitted image rect was `dest` and content
 /// box `content`.
@@ -197,6 +293,12 @@ pub(crate) struct CanvasPaint {
 
 impl Drop for CanvasPaint {
     fn drop(&mut self) {
+        if is_gpu_key(&self.key) {
+            if let Ok(mut boxes) = MAILBOXES.lock() {
+                boxes.remove(&self.key);
+            }
+            return;
+        }
         if let Ok(mut frames) = FRAMES.lock() {
             frames.remove(&self.key);
         }
@@ -226,6 +328,47 @@ impl CanvasPaint {
         };
         let (dest, content) = (*dest, *content);
         let generation = source.generation(node)?;
+        // GPU canvas A1: the canvas's texture under a key that stays while
+        // the context lives; each new paint hands the draws since the last
+        // one to the presenter instead of copying the bitmap.
+        let gpu_key = match source.gpu_context(node) {
+            Some((id, w, h)) if gpu_fits(w, h) => Some(format!("{KEY_PREFIX}{node}@g{id}")),
+            Some(_) => {
+                // No texture this size: from the bitmap for good.
+                source.leave_gpu(node);
+                None
+            }
+            None => None,
+        };
+        let mut last = last;
+        if let Some(key) = &gpu_key {
+            if gpu_denied(key) {
+                if let Ok(mut boxes) = MAILBOXES.lock() {
+                    boxes.remove(key);
+                }
+                source.leave_gpu(node);
+            } else {
+                let mut kept = None;
+                if let Some(l) = last.as_mut().filter(|l| &l.key == key) {
+                    if l.generation == generation && same(l.dest, dest) && same(l.content, content) && !gpu_needs_reset(key) {
+                        return last;
+                    }
+                    // Taken, so that dropping `l` keeps the mailbox.
+                    kept = Some((l.generation, std::mem::take(&mut l.key)));
+                }
+                drop(last.take());
+                let drew = kept.as_ref().is_none_or(|(g, _)| *g != generation) || gpu_needs_reset(key);
+                if !drew || post_gpu_batch(source, node, key) {
+                    let paint = Self::paint_with_key(source, node, image, generation, dest, content, key.clone());
+                    return Some(paint);
+                }
+                // Denied just now: from the bitmap from here on.
+                if let Ok(mut boxes) = MAILBOXES.lock() {
+                    boxes.remove(key);
+                }
+                source.leave_gpu(node);
+            }
+        }
         let reused_key = match last {
             Some(last) if last.generation == generation => {
                 if same(last.dest, dest) && same(last.content, content) {
@@ -256,6 +399,19 @@ impl CanvasPaint {
                 key
             }
         };
+        Some(Self::paint_with_key(source, node, image, generation, dest, content, key))
+    }
+
+    /// The paint naming the bitmap or texture `key`, with the text overlay.
+    fn paint_with_key(
+        source: &CanvasSource,
+        node: usize,
+        image: &DisplayCommand,
+        generation: u64,
+        dest: Rect,
+        content: Rect,
+        key: String,
+    ) -> CanvasPaint {
         let mut commands = Vec::new();
         let mut bitmap = image.clone();
         if let DisplayCommand::Image { url, .. } = &mut bitmap {
@@ -283,7 +439,7 @@ impl CanvasPaint {
             }
         }
         PAINTS.with(|p| p.set(p.get() + 1));
-        Some(CanvasPaint { generation, dest, content, key, commands })
+        CanvasPaint { generation, dest, content, key, commands }
     }
 }
 

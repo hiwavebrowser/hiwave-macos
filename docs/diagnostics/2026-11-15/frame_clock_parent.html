@@ -1,0 +1,7 @@
+<!doctype html><meta charset=utf-8><body><button id=pb>p</button>
+<script>
+// Hold the parent's script for a while, so the frame's document starts measurably later.
+var spin = performance.now(); while (performance.now() - spin < 150) {}
+</script>
+<iframe id=f src="frame_clock_child.html" width=200 height=100></iframe>
+<script src="frame_clock_page.js"></script>

@@ -101,7 +101,18 @@ impl FontFamilyChain {
     }
 
     /// Create default font chain for sans-serif.
-    #[cfg(not(target_os = "macos"))]
+    /// Arial first: it is Chrome's `sans-serif` on Windows (Chrome 157, Windows 11: the same width
+    /// as Arial, not Segoe UI, which is `system-ui`).
+    #[cfg(windows)]
+    pub fn sans_serif() -> Self {
+        Self::new("Arial")
+            .with_fallback("Segoe UI")
+            .with_fallback("Microsoft YaHei")
+            .with_fallback("sans-serif")
+    }
+
+    /// Create default font chain for sans-serif.
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn sans_serif() -> Self {
         Self::new("Segoe UI")
             .with_fallback("Arial")
@@ -157,7 +168,17 @@ impl FontFamilyChain {
     pub const UA_DEFAULT_FAMILY: &'static str = "Times";
 
     /// Create default font chain for monospace.
-    #[cfg(not(target_os = "macos"))]
+    /// Consolas first: it is Chrome's `monospace` on Windows (Chrome 157, Windows 11: the same width
+    /// as Consolas; Cascadia Code is not a default Chrome uses).
+    #[cfg(windows)]
+    pub fn monospace() -> Self {
+        Self::new("Consolas")
+            .with_fallback("Courier New")
+            .with_fallback("monospace")
+    }
+
+    /// Create default font chain for monospace.
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn monospace() -> Self {
         Self::new("Cascadia Code")
             .with_fallback("Consolas")
@@ -215,11 +236,19 @@ impl FontFamilyChain {
             "serif" => Self::serif(),
             "monospace" => Self::monospace(),
             "system-ui" | "blinkmacsystemfont" => Self::system_ui(),
+            // Chrome's faces on Windows: Comic Sans MS and Impact (Chrome 157, Windows 11). Papyrus
+            // is not Chrome's `fantasy` there even where Office installed it.
+            #[cfg(windows)]
+            "cursive" => Self::new("Comic Sans MS").with_fallback("cursive"),
+            #[cfg(windows)]
+            "fantasy" => Self::new("Impact").with_fallback("fantasy"),
             // Chrome's faces on macOS lead: Apple Chancery and Papyrus.
+            #[cfg(not(windows))]
             "cursive" => Self::new("Apple Chancery")
                 .with_fallback("Comic Sans MS")
                 .with_fallback("Brush Script MT")
                 .with_fallback("cursive"),
+            #[cfg(not(windows))]
             "fantasy" => Self::new("Papyrus")
                 .with_fallback("Impact")
                 .with_fallback("fantasy"),
@@ -691,6 +720,35 @@ impl GlyphRun {
     }
 }
 
+/// A run's line extents united with those of the fallback faces it drew characters from, as Blink
+/// unites every used font into the line box under `line-height: normal`
+/// (`NGInlineBoxState::AccumulateUsedFonts`). Each argument is (ascent, descent, line gap) in px.
+///
+/// Each face carries ITS OWN half-leading (half its rounded line gap) before the max is taken, so a
+/// primary face's gap never rides on top of a taller fallback face, and the united run then carries
+/// no gap of its own. Shared by every platform shaper; each collects its fallback faces' extents
+/// its own way.
+///
+/// Several fallback faces fold one at a time: the united run has no gap, so
+/// `unite(unite(p, f1), f2)` is the max over every face of its ascent (and descent) plus its own
+/// half-gap. Folding the faces' raw extents together first (the max ascent with the max gap of
+/// any face) is not the same when their gaps differ: that pairs one face's ascent with another
+/// face's gap.
+pub fn unite_fallback_extents(
+    primary: (f32, f32, f32),
+    fallback: (f32, f32, f32),
+) -> (f32, f32, f32) {
+    let (ascent, descent, gap) = primary;
+    let (fb_ascent, fb_descent, fb_gap) = fallback;
+    let primary_half = gap.round() / 2.0;
+    let fallback_half = fb_gap.round() / 2.0;
+    (
+        (ascent + primary_half).max(fb_ascent + fallback_half),
+        (descent + primary_half).max(fb_descent + fallback_half),
+        0.0,
+    )
+}
+
 /// The word separators a justified line widens (`TextLine::is_word_separator`).
 fn is_justify_separator(c: char) -> bool {
     matches!(c, ' ' | '\u{a0}')
@@ -946,6 +1004,54 @@ pub fn collapse_whitespace(text: &str, white_space: WhiteSpace) -> String {
     }
 }
 
+/// The face a family chain resolves to on Windows, for measuring (shaping) and for painting a
+/// per-character glyph alike: for each family in order, a face the document registered via
+/// `@font-face` (it outranks the system, as on macOS), then the system collection, where a name
+/// Windows substitutes ("Times" is Times New Roman) resolves to its substitute. Returns the face,
+/// the family that resolved and the face's PostScript name; `None` when no family in the chain
+/// resolves (the caller's own last resort applies).
+#[cfg(windows)]
+pub fn resolve_windows_face(
+    chain: &FontFamilyChain,
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: FontStretch,
+) -> Option<(rustkit_text::FontFace, String, String)> {
+    let collection = RkFontCollection::system().ok()?;
+    resolve_windows_face_in(&collection, chain, weight, style, stretch)
+}
+
+#[cfg(windows)]
+fn resolve_windows_face_in(
+    collection: &RkFontCollection,
+    chain: &FontFamilyChain,
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: FontStretch,
+) -> Option<(rustkit_text::FontFace, String, String)> {
+    let dw_weight = RkFontWeight::from_u32(weight.0 as u32);
+    let dw_style = match style {
+        FontStyle::Normal => RkFontStyle::Normal,
+        FontStyle::Italic => RkFontStyle::Italic,
+        FontStyle::Oblique => RkFontStyle::Oblique,
+    };
+    let dw_stretch = RkFontStretch::from_u32(stretch.to_dwrite_value());
+    for family_name in chain.all_families() {
+        if let Some(face) = rustkit_text::web_font_face(family_name, weight.0, style == FontStyle::Italic) {
+            let postscript_name = face.postscript_name();
+            return Some((face, family_name.to_string(), postscript_name));
+        }
+        if let Ok(Some(family)) = collection.font_family_by_name(family_name) {
+            if let Ok(font) = family.first_matching_font(dw_weight, dw_stretch, dw_style) {
+                if let Ok(face) = font.create_font_face() {
+                    return Some((face, family_name.to_string(), font.postscript_name()));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Font cache for reusing font objects.
 #[derive(Default)]
 pub struct FontCache {
@@ -996,6 +1102,15 @@ impl FontCache {
             },
             stretch: stretch.to_dwrite_value() as u8,
         };
+
+        // A face the document registered via @font-face outranks every platform lookup (as on
+        // macOS). Not cached by family name: the same name resolves to another face once the
+        // document's faces change.
+        if let Some(face) = rustkit_text::web_font_face(family, weight.0, style == FontStyle::Italic) {
+            if let Ok(design_metrics) = face.metrics() {
+                return Ok(Self::metrics_from_design(&design_metrics, size));
+            }
+        }
 
         // Try cache first
         {
@@ -1057,31 +1172,37 @@ impl FontCache {
                     .metrics()
                     .map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
-                // Convert design units to pixels (DWRITE uses camelCase)
-                let units_per_em = design_metrics.design_units_per_em as f32;
-                let scale = size / units_per_em;
-
-                let ascent = design_metrics.ascent as f32 * scale;
-                let descent = design_metrics.descent as f32 * scale;
-                let leading = design_metrics.line_gap as f32 * scale;
-
-                return Ok(TextMetrics {
-                    width: 0.0,
-                    height: ascent + descent + leading,
-                    ascent,
-                    descent,
-                    leading,
-                    underline_offset: design_metrics.underline_position as f32 * scale,
-                    underline_thickness: design_metrics.underline_thickness as f32 * scale,
-                    strikethrough_offset: design_metrics.strikethrough_position as f32 * scale,
-                    strikethrough_thickness: design_metrics.strikethrough_thickness as f32 * scale,
-                    overline_offset: -ascent,
-                });
+                return Ok(Self::metrics_from_design(&design_metrics, size));
             }
         }
 
         // Fallback to computed metrics
         Ok(TextMetrics::with_font_size(size))
+    }
+
+    /// A face's design metrics at `size` px.
+    #[cfg(windows)]
+    fn metrics_from_design(design_metrics: &rustkit_text::FontMetrics, size: f32) -> TextMetrics {
+        // Convert design units to pixels (DWRITE uses camelCase)
+        let units_per_em = design_metrics.design_units_per_em as f32;
+        let scale = size / units_per_em;
+
+        let ascent = design_metrics.ascent as f32 * scale;
+        let descent = design_metrics.descent as f32 * scale;
+        let leading = design_metrics.line_gap as f32 * scale;
+
+        TextMetrics {
+            width: 0.0,
+            height: ascent + descent + leading,
+            ascent,
+            descent,
+            leading,
+            underline_offset: design_metrics.underline_position as f32 * scale,
+            underline_thickness: design_metrics.underline_thickness as f32 * scale,
+            strikethrough_offset: design_metrics.strikethrough_position as f32 * scale,
+            strikethrough_thickness: design_metrics.strikethrough_thickness as f32 * scale,
+            overline_offset: -ascent,
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1175,6 +1296,63 @@ thread_local! {
     static MISSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Test-only: shapes that missed the memo on this thread so far.
+#[cfg(test)]
+pub(crate) fn shape_memo_misses() -> usize {
+    MISSES.with(|c| c.get())
+}
+
+/// Bytes the per-thread shaped-text memo of [`TextShaper::shape`] may hold
+/// (SHAPED-CAP), its queue of turned-away strings included; past it, entries
+/// are evicted one at a time (`text_memo`), never all at once. Each entry is
+/// weighed by [`shaped_entry_bytes`]: its key, its run with its glyphs, and
+/// the memo's bookkeeping. A relayout shapes each text row under at least two
+/// keys (layout, display list): a 16,384-entry cap made relayouts above about
+/// 16 k distinct rows re-shape most of them. A short row (a 5-digit number)
+/// weighs about 500 bytes, so this holds about 60,000 of them.
+pub(crate) const SHAPED_TEXT_MEMO_BYTES: usize = 32 << 20;
+
+type ShapedKey = (String, String, Vec<String>, u16, u8, u8, u32);
+
+/// What one shaped-memo entry costs: the key and the run with everything
+/// they own on the heap (texts, family names, glyphs, face name) and the
+/// memo's per-entry bookkeeping. Allocator rounding is not counted.
+fn shaped_entry_bytes(key: &ShapedKey, run: &std::rc::Rc<ShapedRun>) -> usize {
+    use std::mem::size_of;
+    let key_bytes = size_of::<ShapedKey>()
+        + key.0.capacity()
+        + key.1.capacity()
+        + key.2.capacity() * size_of::<String>()
+        + key.2.iter().map(String::capacity).sum::<usize>();
+    let run_bytes = 2 * size_of::<usize>()
+        + size_of::<ShapedRun>()
+        + run.text.capacity()
+        + run.font_family.capacity()
+        + run.glyphs.capacity() * size_of::<PositionedGlyph>()
+        + run
+            .face
+            .as_ref()
+            .map_or(0, |face| face.postscript_name.capacity());
+    key_bytes
+        + run_bytes
+        + crate::text_memo::bookkeeping_bytes::<ShapedKey, std::rc::Rc<ShapedRun>>()
+}
+
+thread_local! {
+    static SHAPED_MEMO: std::cell::RefCell<
+        crate::text_memo::TextMemo<ShapedKey, std::rc::Rc<ShapedRun>>,
+    > = std::cell::RefCell::new(crate::text_memo::TextMemo::with_byte_budget(
+        SHAPED_TEXT_MEMO_BYTES,
+        shaped_entry_bytes,
+    ));
+}
+
+/// Test-only: the bytes this thread's shaped-text memo holds.
+#[cfg(test)]
+pub(crate) fn shaped_memo_bytes() -> usize {
+    SHAPED_MEMO.with(|m| m.borrow().weight())
+}
+
 /// Text shaper for complex text layout.
 pub struct TextShaper {
     #[allow(dead_code)]
@@ -1186,6 +1364,19 @@ impl TextShaper {
     pub fn new() -> Self {
         Self {
             cache: FontCache::new(),
+        }
+    }
+
+    /// Whether `c`, a character the primary face lacks, takes the emoji
+    /// presentation on Windows (Unicode TR51 ED-9, as Chrome's
+    /// `SymbolsIterator`): U+FE0F after it asks for the emoji face if `c` can
+    /// be one, U+FE0E for a text face, and otherwise Emoji_Presentation decides.
+    #[cfg(windows)]
+    fn windows_presentation(c: char, next: Option<char>) -> bool {
+        match rustkit_text::Variation::after(next) {
+            rustkit_text::Variation::Emoji => rustkit_text::has_emoji_property(c),
+            rustkit_text::Variation::Text => false,
+            rustkit_text::Variation::None => rustkit_text::has_emoji_presentation(c),
         }
     }
 
@@ -1218,33 +1409,18 @@ impl TextShaper {
         let collection =
             RkFontCollection::system().map_err(|e| TextError::DirectWriteError(e.to_string()))?;
 
-        // Find first available font in chain
+        // The first family in the chain that resolves (`resolve_windows_face`, which paint uses
+        // too, so the glyphs drawn are the face measured here).
         let mut font_family_name = font_chain.primary.clone();
-        let mut found_font = None;
-
-        for family_name in font_chain.all_families() {
-            if let Ok(Some(family)) = collection.font_family_by_name(family_name) {
-                let dw_weight = RkFontWeight::from_u32(weight.0 as u32);
-                let dw_style = match style {
-                    FontStyle::Normal => RkFontStyle::Normal,
-                    FontStyle::Italic => RkFontStyle::Italic,
-                    FontStyle::Oblique => RkFontStyle::Oblique,
-                };
-                let dw_stretch = RkFontStretch::from_u32(stretch.to_dwrite_value());
-
-                if let Ok(font) = family.first_matching_font(dw_weight, dw_stretch, dw_style) {
-                    font_family_name = family_name.to_string();
-                    found_font = Some(font);
-                    break;
-                }
-            }
-        }
+        let found_font = resolve_windows_face_in(&collection, font_chain, weight, style, stretch).map(
+            |(face, family, postscript_name)| {
+                font_family_name = family;
+                (face, postscript_name)
+            },
+        );
 
         // If we found a font, use DirectWrite for accurate shaping
-        if let Some(font) = found_font {
-            let face = font
-                .create_font_face()
-                .map_err(|e| TextError::DirectWriteError(e.to_string()))?;
+        if let Some((face, postscript_name)) = found_font {
             let design_metrics = face
                 .metrics()
                 .map_err(|e| TextError::DirectWriteError(e.to_string()))?;
@@ -1270,43 +1446,119 @@ impl TextShaper {
                     // the glyph is centred on the wrong width (image-gallery
                     // placed every emoji 8 px right of Chrome). Looked up
                     // once per shape, only when an emoji actually appears.
+                    //
+                    // A symbol WITHOUT Emoji_Presentation (U+1F6E1, U+2699,
+                    // U+2B07) is not an emoji to Chrome: its DirectWrite
+                    // fallback draws it from Segoe UI Symbol, a text face
+                    // (and so does U+FE0E after any of them). Only an
+                    // Emoji_Presentation character, or one U+FE0F turns into
+                    // an emoji, takes Segoe UI Emoji (`windows_presentation`).
+                    let fallback_advance =
+                        |slot: &mut Option<Option<(rustkit_text::FontFace, f32)>>, family: &str, c: char| -> Option<f32> {
+                            let face = slot.get_or_insert_with(|| {
+                                let family = collection.font_family_by_name(family).ok()??;
+                                let font = family
+                                    .first_matching_font(
+                                        RkFontWeight::from_u32(400),
+                                        RkFontStretch::from_u32(5),
+                                        RkFontStyle::Normal,
+                                    )
+                                    .ok()?;
+                                let face = font.create_font_face().ok()?;
+                                let upem = face.metrics().ok()?.design_units_per_em as f32;
+                                Some((face, size / upem))
+                            });
+                            let (face, scale) = face.as_ref()?;
+                            let ids = face.glyph_indices(&[c as u32]).ok()?;
+                            if ids[0] == 0 {
+                                return None;
+                            }
+                            let m = face.design_glyph_metrics(&ids, false).ok()?;
+                            Some(m[0].advance_width as f32 * scale)
+                        };
                     let mut emoji_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
-                    let mut emoji_advance = |c: char| -> Option<f32> {
-                        let face = emoji_face.get_or_insert_with(|| {
-                            let family = collection.font_family_by_name("Segoe UI Emoji").ok()??;
-                            let font = family
-                                .first_matching_font(
-                                    RkFontWeight::from_u32(400),
-                                    RkFontStretch::from_u32(5),
-                                    RkFontStyle::Normal,
-                                )
-                                .ok()?;
-                            let face = font.create_font_face().ok()?;
-                            let upem = face.metrics().ok()?.design_units_per_em as f32;
-                            Some((face, size / upem))
-                        });
-                        let (face, scale) = face.as_ref()?;
-                        let ids = face.glyph_indices(&[c as u32]).ok()?;
-                        if ids[0] == 0 {
-                            return None;
-                        }
-                        let m = face.design_glyph_metrics(&ids, false).ok()?;
-                        Some(m[0].advance_width as f32 * scale)
-                    };
+                    let mut symbol_face: Option<Option<(rustkit_text::FontFace, f32)>> = None;
+                    // Which fallback faces this run drew a character from: their
+                    // extents are united into the run's line below.
+                    let (mut used_symbol, mut used_emoji) = (false, false);
+                    // Any other face a missing glyph was measured in
+                    // (`rustkit_text::text_fallback_face`: Blink's per-block
+                    // table, then DirectWrite's system fallback), by family,
+                    // with its px-per-design-unit scale.
+                    let mut text_faces: Vec<(String, rustkit_text::FontFace, f32)> = Vec::new();
 
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
                     {
+                        let mut face = GlyphFace::Primary;
                         let advance = if Self::is_default_ignorable(c) {
                             // Variation selectors, joiners and the like take
                             // no space; the primary face's .notdef would.
                             0.0
                         } else if glyph_id == 0 && rustkit_text::is_emoji(c) {
-                            emoji_advance(c).unwrap_or(if i < glyph_metrics.len() {
+                            let notdef = if i < glyph_metrics.len() {
                                 glyph_metrics[i].advance_width as f32 * scale
                             } else {
                                 size * 0.5
-                            })
+                            };
+                            let emoji = Self::windows_presentation(c, text_chars.get(i + 1).copied());
+                            let text_face = if emoji {
+                                None
+                            } else {
+                                fallback_advance(&mut symbol_face, "Segoe UI Symbol", c)
+                            };
+                            match text_face {
+                                Some(advance) => {
+                                    face = GlyphFace::Fallback { emoji: false };
+                                    used_symbol = true;
+                                    advance
+                                }
+                                // An emoji, or a symbol Segoe UI Symbol lacks:
+                                // Segoe UI Emoji's, as before.
+                                None => {
+                                    face = GlyphFace::Fallback { emoji: true };
+                                    match fallback_advance(&mut emoji_face, "Segoe UI Emoji", c) {
+                                        Some(advance) => {
+                                            used_emoji = true;
+                                            advance
+                                        }
+                                        None => notdef,
+                                    }
+                                }
+                            }
+                        } else if glyph_id == 0 && !c.is_control() && !c.is_whitespace() {
+                            // A character the primary face lacks that is not
+                            // an emoji: Chrome draws it from its fallback
+                            // face (U+25BE from Cambria Math under Segoe UI),
+                            // not the primary's .notdef.
+                            let notdef = if i < glyph_metrics.len() {
+                                glyph_metrics[i].advance_width as f32 * scale
+                            } else {
+                                size * 0.5
+                            };
+                            let measured = rustkit_text::text_fallback_face(c, &font_family_name).and_then(|(fb, name)| {
+                                let ids = fb.glyph_indices(&[c as u32]).ok()?;
+                                let upem = fb.metrics().ok()?.design_units_per_em as f32;
+                                let m = fb.design_glyph_metrics(&ids, false).ok()?;
+                                let fb_scale = size / upem;
+                                // Whole-pixel at a size the face has a bitmap
+                                // strike for, as Skia measures it (Cambria Math
+                                // at 12 and 16px).
+                                let advance = fb
+                                    .gdi_classic_advance(ids[0], size)
+                                    .unwrap_or(m[0].advance_width as f32 * fb_scale);
+                                if !text_faces.iter().any(|(n, _, _)| *n == name) {
+                                    text_faces.push((name, fb, fb_scale));
+                                }
+                                Some(advance)
+                            });
+                            match measured {
+                                Some(advance) => {
+                                    face = GlyphFace::Fallback { emoji: false };
+                                    advance
+                                }
+                                None => notdef,
+                            }
                         } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
@@ -1320,15 +1572,48 @@ impl TextShaper {
                             advance,
                             character: c,
                             cluster: i as u32,
-                            face: GlyphFace::Primary,
+                            face,
                         });
 
                         x_offset += advance;
                     }
 
-                    let ascent = design_metrics.ascent as f32 * scale;
-                    let descent = design_metrics.descent as f32 * scale;
-                    let leading = design_metrics.line_gap as f32 * scale;
+                    let mut ascent = design_metrics.ascent as f32 * scale;
+                    let mut descent = design_metrics.descent as f32 * scale;
+                    let mut leading = design_metrics.line_gap as f32 * scale;
+                    // Blink unites every face the run drew from into its line
+                    // under `line-height: normal` (`unite_fallback_extents`,
+                    // shared with the macOS shaper): Chrome for Testing 148
+                    // win64 builds Arial 14px with U+1F6E1 (Segoe UI Symbol)
+                    // a 19px line, plain 16. One face at a time.
+                    //
+                    // Blink rounds each face's ascent, descent and line gap
+                    // to whole pixels before uniting them (SimpleFontData):
+                    // 16px Segoe UI with U+21BB (Cambria Math, typo metrics
+                    // 0.7778 / 0.2222 / gap 0.1724) is 17 + max(4, 4 + 1.5)
+                    // = 22.5, a 23px line, where the raw extents give 22.
+                    let mut united: Vec<(rustkit_text::FontFace, f32)> = Vec::new();
+                    for (used, slot) in [(used_symbol, &symbol_face), (used_emoji, &emoji_face)] {
+                        if let Some(Some((fb_face, fb_scale))) = slot.as_ref().filter(|_| used) {
+                            united.push((fb_face.clone(), *fb_scale));
+                        }
+                    }
+                    united.extend(text_faces.iter().map(|(_, fb, fb_scale)| (fb.clone(), *fb_scale)));
+                    if !united.is_empty() {
+                        (ascent, descent, leading) = (ascent.round(), descent.round(), leading.round());
+                    }
+                    for (fb_face, fb_scale) in &united {
+                        if let Ok(m) = fb_face.metrics() {
+                            (ascent, descent, leading) = unite_fallback_extents(
+                                (ascent, descent, leading),
+                                (
+                                    (m.ascent as f32 * fb_scale).round(),
+                                    (m.descent as f32 * fb_scale).round(),
+                                    (m.line_gap as f32 * fb_scale).round(),
+                                ),
+                            );
+                        }
+                    }
 
                     let metrics = TextMetrics {
                         width: x_offset,
@@ -1350,7 +1635,7 @@ impl TextShaper {
                     // `FaceIdentity`).
                     let face_identity = FaceIdentity {
                         id: rustkit_text::intern_face(&face),
-                        postscript_name: font.postscript_name(),
+                        postscript_name: postscript_name.clone(),
                         face_index: face.index(),
                     };
 
@@ -1455,8 +1740,6 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
-        use std::cell::RefCell;
-
         // `font-size: 0`: no glyph, no advance, no extent. Core Text is not
         // asked: it answers a size of 0 with its default size, so text that
         // a page had hidden this way was measured about 12px tall.
@@ -1475,23 +1758,8 @@ impl TextShaper {
             });
         }
 
-        type Key = (String, String, Vec<String>, u16, u8, u8, u32);
-        struct Memo {
-            generation: u64,
-            runs: HashMap<Key, ShapedRun>,
-        }
-        // Bounds memory on a text-heavy page; refilling costs one shape per
-        // entry, which is what every call cost before the memo.
-        const MAX_ENTRIES: usize = 16384;
-        thread_local! {
-            static MEMO: RefCell<Memo> = RefCell::new(Memo {
-                generation: 0,
-                runs: HashMap::new(),
-            });
-        }
-
         let generation = rustkit_text::webfonts::generation();
-        let key: Key = (
+        let key: ShapedKey = (
             text.to_string(),
             font_chain.primary.clone(),
             font_chain.fallbacks.clone(),
@@ -1500,26 +1768,20 @@ impl TextShaper {
             stretch as u8,
             size.to_bits(),
         );
-        let cached = MEMO.with(|m| {
+        let cached = SHAPED_MEMO.with(|m| {
             let mut m = m.borrow_mut();
-            if m.generation != generation {
-                m.runs.clear();
-                m.generation = generation;
-            }
-            m.runs.get(&key).cloned()
+            m.sync_generation(generation);
+            m.get(&key)
         });
         if let Some(run) = cached {
-            return Ok(run);
+            return Ok((*run).clone());
         }
         #[cfg(test)]
         MISSES.with(|c| c.set(c.get() + 1));
         let run = self.shape_uncached(text, font_chain, weight, style, stretch, size)?;
-        MEMO.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.runs.len() >= MAX_ENTRIES {
-                m.runs.clear();
-            }
-            m.runs.insert(key, run.clone());
+        SHAPED_MEMO.with(|m| {
+            m.borrow_mut()
+                .insert(key, std::rc::Rc::new(run.clone()))
         });
         Ok(run)
     }
@@ -1777,18 +2039,11 @@ impl TextShaper {
             let mut ascent = rustkit_text::macos::blink_ascent(&ct_font);
             let mut descent = ct_font.descent() as f32;
             let mut leading = ct_font.leading() as f32;
-            if let Some((fb_ascent, fb_descent, fb_leading)) = used_fallback_extents {
-                // Blink gives each face ITS OWN half-leading (half its rounded
-                // line gap) before uniting, so a primary face's gap never
-                // rides on top of a taller fallback face: Arial 16px
-                // (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0)
-                // is max(14.5, 20) + max(3.5, 6.25) = 26 in Chrome, not 27.
-                // The run then carries no gap of its own.
-                let primary_half = leading.round() / 2.0;
-                let fallback_half = fb_leading.round() / 2.0;
-                ascent = (ascent + primary_half).max(fb_ascent + fallback_half);
-                descent = (descent + primary_half).max(fb_descent + fallback_half);
-                leading = 0.0;
+            if let Some(fallback) = used_fallback_extents {
+                // Blink's union, shared with the other platform shapers: each face its own
+                // half-leading, the run then no gap (see `unite_fallback_extents`).
+                (ascent, descent, leading) =
+                    unite_fallback_extents((ascent, descent, leading), fallback);
             }
             let underline_position = ct_font.underline_position() as f32;
             let underline_thickness = ct_font.underline_thickness() as f32;
@@ -3130,6 +3385,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_fallback_face_taller_than_the_line_sets_both_extents() {
+        // The arithmetic behind Chrome 148 on Linux's 24px line for Arial 14px with the shield
+        // drawn from Noto Sans Symbols2. The inputs are those faces' whole-pixel extents as
+        // RustKit's Linux backend rounds them (Liberation Sans 13 + 3, Symbols2 15 + 9), not raw
+        // font metrics.
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 0.0), (15.0, 9.0, 0.0)),
+            (15.0, 9.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn the_primary_faces_gap_does_not_ride_on_a_taller_fallback_face() {
+        // Chrome on macOS: Arial 16px (14.48 + 3.39, gap 0.52) with an emoji (20 + 6.25, gap 0) is
+        // max(14.48 + 0.5, 20) + max(3.39 + 0.5, 6.25) = 26 rounded, not 27.
+        assert_eq!(
+            unite_fallback_extents((14.48, 3.39, 0.52), (20.0, 6.25, 0.0)),
+            (20.0, 6.25, 0.0)
+        );
+    }
+
+    #[test]
+    fn several_fallback_faces_fold_one_at_a_time_each_with_its_own_gap() {
+        // f1 is tall with no gap, f2 short with a gap of 4: the line is max(13, 16, 12 + 2) above
+        // and max(3, 3, 3 + 2) below. Folding the raw extents first, (16, 3, 4), would give 18 + 5.
+        let primary = (13.0, 3.0, 0.0);
+        let (f1, f2) = ((16.0, 3.0, 0.0), (12.0, 3.0, 4.0));
+        let folded = unite_fallback_extents(unite_fallback_extents(primary, f1), f2);
+        assert_eq!(folded, (16.0, 5.0, 0.0));
+        assert_eq!(folded, unite_fallback_extents(unite_fallback_extents(primary, f2), f1));
+    }
+
+    #[test]
+    fn a_shorter_fallback_face_leaves_the_primary_line_with_its_gap_split_into_the_extents() {
+        // The primary face's rounded gap 2 becomes 1 above and 1 below; the run keeps no gap.
+        assert_eq!(
+            unite_fallback_extents((13.0, 3.0, 2.0), (12.0, 3.0, 0.0)),
+            (14.0, 4.0, 0.0)
+        );
+    }
+
+    #[test]
     fn test_font_family_chain() {
         let chain = FontFamilyChain::new("Arial")
             .with_fallback("Helvetica")
@@ -3151,13 +3448,17 @@ mod tests {
         let sans = FontFamilyChain::from_css_value("sans-serif");
         #[cfg(target_os = "macos")]
         assert_eq!(sans.primary, "Helvetica");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        assert_eq!(sans.primary, "Arial");
+        #[cfg(not(any(target_os = "macos", windows)))]
         assert_eq!(sans.primary, "Segoe UI");
 
         let mono = FontFamilyChain::from_css_value("monospace");
         #[cfg(target_os = "macos")]
         assert_eq!(mono.primary, "Courier");
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        assert_eq!(mono.primary, "Consolas");
+        #[cfg(not(any(target_os = "macos", windows)))]
         assert_eq!(mono.primary, "Cascadia Code");
 
         // Test system-ui and vendor-prefixed variants
@@ -4025,6 +4326,13 @@ mod tests {
     /// Chrome uses (Segoe UI Emoji's), and a variation selector takes no
     /// space. Otherwise the renderer paints the emoji from Segoe UI Emoji
     /// centred on the wrong width.
+    ///
+    /// Chrome for Testing 148.0.7778.216 win64 at 48px sans-serif
+    /// (CSS.getPlatformFontsForNode + the span's width): U+1F3D4 alone and
+    /// with U+FE0E is Segoe UI Symbol, 48.00 (no Emoji_Presentation); with
+    /// U+FE0F it is Segoe UI Emoji, 65.906, as are U+1F305 and U+1F30A; and
+    /// `a` + U+FE0F is `a` (26.703). This test used to expect the bare
+    /// mountain in Segoe UI Emoji too.
     #[cfg(windows)]
     #[test]
     fn emoji_take_the_emoji_faces_advance_and_selectors_take_none() {
@@ -4037,13 +4345,123 @@ mod tests {
                 .metrics
                 .width
         };
-        let mountain = w("\u{1F3D4}");
-        // Segoe UI Emoji advances are a little over an em; Arial's .notdef
-        // is well under one.
-        assert!(mountain > 48.0 && mountain < 72.0, "{mountain}");
-        assert_eq!(w("\u{1F3D4}\u{FE0F}"), mountain, "FE0F must add nothing");
+        let close = |got: f32, chrome: f32, what: &str| {
+            assert!((got - chrome).abs() < 0.02, "{what}: RustKit {got}, Chrome {chrome}");
+        };
+        close(w("\u{1F3D4}"), 48.0, "mountain, text presentation");
+        close(w("\u{1F3D4}\u{FE0E}"), 48.0, "mountain + FE0E");
+        close(w("\u{1F3D4}\u{FE0F}"), 65.906, "mountain + FE0F");
+        close(w("\u{1F305}"), 65.906, "sunrise");
+        assert_eq!(w("\u{1F3D4}\u{FE0F}"), w("\u{1F305}"), "FE0F adds nothing to the emoji's advance");
         assert_eq!(w("a\u{FE0F}"), w("a"));
         assert_eq!(w("\u{1F305}"), w("\u{1F30A}"), "emoji share the face's advance");
+    }
+
+    /// A symbol WITHOUT Emoji_Presentation that the primary face lacks is drawn
+    /// from a TEXT face, as Chrome's DirectWrite fallback does (Segoe UI
+    /// Symbol), and only an Emoji_Presentation character (or one U+FE0F turns
+    /// into an emoji) takes Segoe UI Emoji. Chrome for Testing 148.0.7778.216
+    /// win64, the chrome board's icons at 14px (CSS.getPlatformFontsForNode +
+    /// the span's width): U+1F6E1 Segoe UI Symbol 14.00, U+2699 Segoe UI Symbol
+    /// 11.81, U+2B07 Segoe UI Symbol 7.66, U+1F50D Segoe UI Emoji 19.23.
+    /// RustKit gave all four Segoe UI Emoji's 19.22.
+    #[cfg(windows)]
+    #[test]
+    fn a_text_presentation_symbol_takes_a_text_face_not_segoe_ui_emoji() {
+        use rustkit_text::GlyphFace;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Arial");
+        let one = |t: &str| {
+            let run = shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, 14.0)
+                .unwrap();
+            (run.metrics.width, run.glyphs[0].face)
+        };
+        for (text, chrome, emoji) in [
+            ("\u{1F6E1}", 14.00, false),
+            ("\u{2699}", 11.8125, false),
+            ("\u{2B07}", 7.65625, false),
+            ("\u{1F50D}", 19.234375, true),
+        ] {
+            let (width, face) = one(text);
+            assert!((width - chrome).abs() < 0.02, "{text:?}: RustKit {width}, Chrome {chrome}");
+            assert_eq!(face, GlyphFace::Fallback { emoji }, "{text:?}");
+        }
+        // U+FE0F asks for the emoji presentation of a character that has one.
+        let (_, gear_emoji) = one("\u{2699}\u{FE0F}");
+        assert_eq!(gear_emoji, GlyphFace::Fallback { emoji: true });
+    }
+
+    /// A run that draws characters from a fallback face unites that face's
+    /// extents into its line (`unite_fallback_extents`), as Chrome does on
+    /// Windows. Chrome for Testing 148.0.7778.216 win64, a `<div>` of the
+    /// text (CSS.getPlatformFontsForNode names the faces): Arial 14px "Plain
+    /// text" 16; with U+1F6E1 (Segoe UI Symbol) or U+1F50D (Segoe UI Emoji)
+    /// 19; Arial 12px with U+2B07 16 (plain 14); Arial 16px with U+1F4F1 21
+    /// (plain 18). The Segoe faces' ascent and descent rounded, united with
+    /// Arial's. RustKit kept Arial's line (16 / 14 / 18).
+    #[cfg(windows)]
+    #[test]
+    fn a_run_drawn_partly_from_a_fallback_face_unites_its_extents() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Arial");
+        // The run's `normal` line: ascent + descent + its line gap (a united
+        // run carries none), rounded, as Chrome's line box is (Arial 16px
+        // plain: 14.48 + 3.39 + 0.52 = 18.4, Chrome 18).
+        let line = |t: &str, size: f32| {
+            let m = shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, size)
+                .unwrap()
+                .metrics;
+            (m.ascent + m.descent + m.leading).round()
+        };
+        for (text, size, chrome) in [
+            ("Plain text", 14.0, 16.0),
+            ("\u{1F6E1} Shield", 14.0, 19.0),
+            ("\u{2699} Gear", 14.0, 19.0),
+            ("\u{1F50D} Search", 14.0, 19.0),
+            ("Plain text", 12.0, 14.0),
+            ("\u{2B07} Down", 12.0, 16.0),
+            ("Plain text", 16.0, 18.0),
+            ("\u{1F4F1} Share", 16.0, 21.0),
+        ] {
+            assert_eq!(line(text, size), chrome, "{text:?} at {size}px");
+        }
+    }
+
+    /// A character the primary face lacks and the emoji path does not take is
+    /// drawn from the face DirectWrite's system font fallback maps it to, as
+    /// Chrome does: Chrome for Testing 148.0.7778.216 win64 draws U+25BE / U+25B8
+    /// / U+21BB (the chrome page's workspace expander and reload) from Cambria
+    /// Math (CSS.getPlatformFontsForNode). Under a Segoe UI primary its advance
+    /// is 10.00 at 12px, 8.36 at 10px, 13.00 at 16px (RustKit took Segoe UI's
+    /// .notdef: 7.75, 6.46, 10.33), and its rounded typo extents (USE_TYPO_METRICS)
+    /// lift the `normal` line: 12px 16 -> 17, 10px 14 -> 14, 16px 21 -> 23.
+    #[cfg(windows)]
+    #[test]
+    fn a_missing_glyph_outside_the_emoji_path_takes_the_system_fallback_face() {
+        use rustkit_text::GlyphFace;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::new("Segoe UI");
+        let run = |t: &str, size: f32| {
+            shaper
+                .shape(t, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal, size)
+                .unwrap()
+        };
+        for (text, size, width, line) in [
+            ("\u{25BE}", 12.0, 10.0, 17.0),
+            ("\u{25B8}", 12.0, 10.0, 17.0),
+            ("\u{25BE}", 10.0, 8.36, 14.0),
+            ("\u{21BB}", 16.0, 13.0, 23.0),
+        ] {
+            let shaped = run(text, size);
+            let w = shaped.metrics.width;
+            assert!((w - width).abs() < 0.02, "{text:?} at {size}px: RustKit {w}, Chrome {width}");
+            assert_eq!(shaped.glyphs[0].face, GlyphFace::Fallback { emoji: false }, "{text:?}");
+            let m = &shaped.metrics;
+            let got = (m.ascent + m.descent + m.leading).round();
+            assert_eq!(got, line, "{text:?} at {size}px line");
+        }
     }
 
     #[test]
@@ -4235,8 +4653,8 @@ mod shape_memo_tests {
         let _ = shape(&shaper, text, 400, 15.0);
         let before = misses();
         let generation = rustkit_text::webfonts::generation();
-        // Bumps the generation where a web-font registry exists (macOS and
-        // Linux); elsewhere it installs nothing and the generation holds still.
+        // Bumps the generation where a web-font registry exists (macOS, Linux and
+        // Windows); elsewhere it installs nothing and the generation holds still.
         rustkit_text::webfonts::install("lat12-shape-memo-probe", &[]);
         let changed = rustkit_text::webfonts::generation() != generation;
         let _ = shape(&shaper, text, 400, 15.0);
@@ -4245,8 +4663,33 @@ mod shape_memo_tests {
         } else {
             assert_eq!(misses(), before, "no change to the set: still a hit");
         }
-        let has_registry = cfg!(any(target_os = "macos", target_os = "linux"));
+        let has_registry = cfg!(any(target_os = "macos", target_os = "linux", windows));
         assert_eq!(changed, has_registry);
+    }
+}
+
+/// The generic families resolve to Chrome's faces on Windows (Chrome 157 on Windows 11, by
+/// width: sans-serif = Arial, serif = Times New Roman, monospace = Consolas, cursive = Comic Sans
+/// MS, fantasy = Impact, system-ui = Segoe UI).
+#[cfg(all(test, windows))]
+mod windows_generic_family_tests {
+    use super::*;
+
+    #[test]
+    fn generic_families_resolve_to_chromes_windows_faces() {
+        for (css, postscript) in [
+            ("sans-serif", "ArialMT"),
+            ("serif", "TimesNewRomanPSMT"),
+            ("monospace", "Consolas"),
+            ("cursive", "ComicSansMS"),
+            ("fantasy", "Impact"),
+            ("system-ui", "SegoeUI"),
+        ] {
+            let chain = FontFamilyChain::from_css_value(css);
+            let resolved = resolve_windows_face(&chain, FontWeight(400), FontStyle::Normal, FontStretch::Normal)
+                .map(|(_, _, ps)| ps);
+            assert_eq!(resolved.as_deref(), Some(postscript), "`{css}` resolves to {resolved:?} (chain {chain:?})");
+        }
     }
 }
 

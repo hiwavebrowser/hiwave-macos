@@ -78,6 +78,25 @@ mod dom_utils_tests;
 #[cfg(test)]
 mod web_cssom_tests;
 #[cfg(test)]
+mod inline_style_cost_tests;
+#[cfg(test)]
+mod dom_accessor_cost_tests;
+#[cfg(test)]
+mod class_list_cost_tests;
+#[cfg(test)]
+mod attr_write_cost_tests;
+#[cfg(test)]
+mod style_set_cost_tests;
+#[cfg(test)]
+mod native_style_tests;
+mod inline_style;
+#[cfg(test)]
+mod style_write_cost_tests;
+#[cfg(test)]
+mod style_value_url_tests;
+#[cfg(test)]
+mod attr_write_tests;
+#[cfg(test)]
 mod node_apis_tests;
 #[cfg(test)]
 mod form_controls_tests;
@@ -108,6 +127,8 @@ mod raw_text_inner_html_tests;
 #[cfg(test)]
 mod svg_name_case_tests;
 #[cfg(test)]
+mod svg_transform_dom_tests;
+#[cfg(test)]
 mod rejection_event_tests;
 #[cfg(test)]
 mod event_target_ctor_tests;
@@ -131,18 +152,41 @@ mod mutation_observer_tests;
 #[cfg(test)]
 mod web_messaging_tests;
 #[cfg(test)]
+mod clock_parity_tests;
+#[cfg(test)]
+mod clock_chain_tests;
+#[cfg(test)]
+mod frame_clock_tests;
+#[cfg(test)]
+mod frame_grid_tests;
+#[cfg(test)]
+mod timeline_tests;
+#[cfg(test)]
+mod named_collections_tests;
+#[cfg(test)]
+mod unhandled_rejection_tests;
+#[cfg(test)]
+mod frame_sandbox_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod child_realm_tests;
+#[cfg(test)]
+mod child_realm_hardening_tests;
 #[cfg(test)]
 mod internal_names_tests;
 #[cfg(test)]
 mod engine_event_origin_tests;
 #[cfg(test)]
+mod window_error_event_tests;
+#[cfg(test)]
 mod host_object_tests;
 #[cfg(test)]
 mod bookkeeping_paths_tests;
 mod web_canvas;
+mod web_media;
 mod worker_host;
 #[cfg(test)]
 mod web_canvas_tests;
@@ -161,6 +205,7 @@ pub use dom::{
 };
 pub mod events;
 pub use rustkit_canvas as canvas;
+pub use web_media::MediaCanPlay;
 pub use web_canvas::{CanvasImageLoader, CanvasSnapshot, CanvasSource, CanvasTextExtent, CanvasTextMeasurer};
 
 pub use events::{
@@ -447,7 +492,7 @@ pub type IpcCallback = Box<dyn Fn(IpcMessage) + Send + Sync>;
 /// The Web API members the bindings report as unimplemented when page
 /// script reaches them (`__rk.unsupported` in the bindings' scripts, a
 /// native page script cannot reach). Nothing else is ever reported.
-pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
+pub const UNSUPPORTED_MEMBERS: [(&str, &str); 11] = [
     ("Element", "animate(pseudoElement)"),
     ("CSSAnimation", "currentTime"),
     ("CSSAnimation", "playbackRate"),
@@ -458,7 +503,29 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
     ("ReadableStream", "getReader(byob)"),
     ("DOMParser", "parseFromString(XML)"),
     ("Window", "named access (iframe name)"),
+    ("URL", "createObjectURL (blob store full)"),
 ];
+
+/// The longest message an internal page's `window.ipc.postMessage` queues.
+const INTERNAL_READ_MAX_BYTES: usize = 4096;
+/// How many of them wait at most between two drains.
+const INTERNAL_READ_MAX_QUEUED: usize = 64;
+
+/// An internal page's `window.ipc` ([`DomBindings::new_internal_page`]):
+/// a frozen object whose `postMessage` queues the message (a non-string as
+/// its JSON) on the Rust side.
+const INTERNAL_READS_JS: &str = r#"
+__rk.appRead = globalThis.__rustkit_app_read;
+delete globalThis.__rustkit_app_read;
+(function (read) {
+    var ipc = Object.freeze({
+        postMessage: function (message) {
+            read(typeof message === 'string' ? message : JSON.stringify(message));
+        }
+    });
+    Object.defineProperty(window, 'ipc', { value: ipc, writable: false, configurable: false, enumerable: false });
+})(__rk.appRead);
+"#;
 
 /// Every name the embedder's scripts keep on the host object (`__rk`).
 /// Each is an own property of it before the first script runs
@@ -467,26 +534,46 @@ pub const UNSUPPORTED_MEMBERS: [(&str, &str); 10] = [
 /// never told its focus) reads the host object's own property.
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
-    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "compose", "decodeWait", "dispatchTo",
-    "domDirty", "domHooks", "domReset", "dragStore", "editKey", "finishComposing", "fire", "fireAnimation",
-    "fireDrag", "fireInput", "fireKey", "fireMouse", "fireOn", "fireTextInput", "fireTransition", "fireWheel",
-    "followLink", "fragmentNavigation", "hasCtor", "historyReset", "imageFailed", "imageFailedFor", "imageGaveUp",
-    "imageLoaded", "imageLoadedFor", "imageWritten", "implicitSubmit", "isDispatching", "keepCtor", "keepFinish",
-    "locationHashSync", "locationSync", "make", "markEdited", "matchMediaTagged", "mediaChanges", "net",
-    "newTextEvent", "nextTimer", "now", "observersTick", "pickOption", "runTimers", "runTimersFramed",
-    "scrollToFragment", "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setFocus",
-    "setSelection", "setSheetDisabled", "sheetGeneration", "takeEdited", "takeFocus", "takeSelection", "trust",
-    "userEdit", "userScrolled", "userScrolledElement", "viewFocused", "wheelBlocks",
+    "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationNow", "animationRound", "becomeFrame", "builtins",
+    "canvasCall", "canvasSlot", "compose",
+    "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
+    "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
+    "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
+    "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
+    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
+    "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
+    "now", "observersTick", "pendingFrameRound", "perfNow", "pickOption", "realTop", "registerProperty", "resizeHeld", "runTimers", "runTimersFramed", "scrollToFragment",
+    "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
+    "setSheetDisabled", "sheetGeneration", "styleNative", "takeEdited", "takeFocus", "takeSelection", "testRealMs", "timeOrigin", "timelineNow", "treeTurn", "trust", "turnFrameAt", "userEdit",
+    "userScrolled", "userScrolledElement", "viewFocused", "wakeSoon", "wheelBlocks",
+    // Installed only in an app page loaded for its reads (`new_internal_page`).
+    "appRead",
+    // Installed only with nested browsing contexts on (web_frames.js).
+    "frames",
+    // The frame tree's shared state, which the runtime puts there itself.
+    "shared",
     // Reserved for the workers script (not installed in every realm).
     "workersPump",
+];
+
+/// Every name the embedder's scripts keep on the frame tree's shared state
+/// (the host object's `shared`, one object for every document of the
+/// tree). Each is an own property of it before the first script runs
+/// ([`JsRuntime::reserve_shared_slots`]), and it inherits from nothing: a
+/// read or a first write of one, from whichever document, stays on the
+/// object itself. `host_object_tests` checks the list against the scripts.
+pub(crate) const SHARED_SLOTS: &[&str] = &[
+    "canceled", "cancelables", "dispatching", "evCurrent", "evPhase", "evTarget", "evType", "eventProtos", "handoff",
+    "kind", "legacyType", "made", "origin", "path", "stamped", "stop", "stopNow", "timerQueue", "trustGet", "trusted",
+    "undispatched",
 ];
 
 const PAGE_LIFECYCLE_JS: &str = r#"
 (function () {
     // Described natively (no page code runs) and queued in the runtime.
-    var reportError = __rk.reportError;
+    // Called on the host object: the realm's `error` event comes first.
     function report(e) {
-        try { reportError(e); } catch (_) {}
+        try { __rk.reportError(e); } catch (_) {}
     }
 
     function makeEventTarget(target) {
@@ -520,22 +607,78 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     makeEventTarget(window);
     makeEventTarget(document);
 
-    // The timers. The engine reads this table where script is not
-    // interrupted (`__rk.nextTimer`), so it is the engine's alone: it
-    // inherits from nothing, holds slots 0..count-1 in the order the
-    // timers were set, is written and read by index here and is passed to
-    // no method. A timer is a record that inherits from nothing, with
-    // plain data of its own; its times are numbers made with the `Number`
-    // of install time. The built-ins used around it are taken now.
+    // The timers and their clock. The documents of a frame tree share one
+    // record of them (same-origin frames are one event loop, HTML 8.1.7):
+    // a frame's realm finds its parent's on the host object's `shared`,
+    // which every realm of a runtime holds. Each timer runs in the realm
+    // that set it.
+    //
+    // The engine reads the table where script is not interrupted
+    // (`__rk.nextTimer`), so it is the engine's alone: the record and the
+    // table inherit from nothing, the table holds slots 0..count-1 in the
+    // order the timers were set, is written and read by index here and is
+    // passed to no method. The count is on the record with the table, so
+    // every realm of the tree sees the same one. A timer is a record that
+    // inherits from nothing, with plain data of its own; its times are
+    // numbers made with the `Number` of install time. The built-ins used
+    // around it are taken now, in the realm that uses them.
     var objCreate = Object.create, setProto = Object.setPrototypeOf, toNumber = Number, toText = String,
-        evalNow = eval, applyTo = Reflect.apply, win = window;
-    var now = 0, nextId = 1, timers = objCreate(null), count = 0;
+        evalNow = eval, applyTo = Reflect.apply, win = window, floorOf = Math.floor;
+    // Real time, for the live turn's slice and the page clock. Taken now,
+    // before page script can replace `Date.now`.
+    var realNow = Date.now;
+    var SHARED = __rk.shared;
+    var Q = SHARED.timerQueue;
+    // The tree's first document makes the record; its time origin is the
+    // page clock's zero.
+    var first = !Q;
+    if (first) {
+        Q = SHARED.timerQueue = objCreate(null);
+        Q.now = 0; Q.nextId = 1; Q.timers = objCreate(null); Q.count = 0;
+        Q.pumps = objCreate(null); Q.pumpCount = 0;
+        // The page clock's state (below), one for the tree as the timers'
+        // clock is: every slot is made here, on a record that inherits
+        // from nothing.
+        Q.skew = 0; Q.lastPerf = 0; Q.det = false; Q.reads = 0; Q.seenNow = 0; Q.startedAt = realNow();
+        Q.frameTs = 0; Q.frameTsAt = -1; Q.prevFrameTs = -1; Q.prevFrameAt = 0;
+        // The live turn on the real clock (CLOCK3, below): its time and the real clock when it
+        // began, -1 outside one. On the record, so a timer a frame's document sets in the turn
+        // counts from the same time as one the top document sets.
+        Q.liveAt = -1; Q.liveReal = 0;
+        Q.aheadAt = -1; Q.tlAt = -1; Q.tlTs = 0; Q.tlHigh = 0; Q.gridStamps = false;
+        Q.frameTl = 0; Q.taskFrom = 0; Q.turnAt = 0; Q.turnReal = -1; Q.realTurn = false;
+        // The animation clock's high-water mark (`__rk.animationNow`, TIMELINE2 R1).
+        Q.animHigh = 0;
+        // The last animation frame run, as its number on the tree's frame grid (below), and
+        // whether a frame's callbacks are running now.
+        Q.frameK = 0; Q.inFrame = false;
+        // How many animation frames have run callbacks (`__rk.frameRounds`, counted in `ranFrame`):
+        // a resize observation made while a frame is asked for waits for the next one
+        // (REPORT-CHART-0x0).
+        Q.rounds = 0;
+        // The grid time of the frame whose callbacks run (its timestamp's time, below).
+        Q.frameDue = 0;
+        // A frame tree's turn (`__rk.treeTurn`): while one is open, the grid time of the frame
+        // whose round it has run (-1: none yet); -2 outside one (RAF-ONE-ROUND, below).
+        Q.roundAt = -2;
+        // CLOCK-AT-PRESENT: a late round is the frame of the turn's time (`__rk.setOneRound`).
+        Q.oneRound = false;
+    }
+    var timers = Q.timers;
+    // What each document's workers have sent is delivered at the top of
+    // the tree's timer turn, whichever document's turn it is: a frame's
+    // own turn takes no timers. One entry a document, in a table kept as
+    // the timers are; an entry calls its own document's pump, which the
+    // workers script fills in later.
+    var pumps = Q.pumps;
+    function pump() { return typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0; }
+    pumps[Q.pumpCount++] = pump;
     function removeAt(i) {
-        for (count--; i < count; i++) timers[i] = timers[i + 1];
-        delete timers[count];
+        for (Q.count--; i < Q.count; i++) timers[i] = timers[i + 1];
+        delete timers[Q.count];
     }
     function slotOf(timer) {
-        for (var i = 0; i < count; i++) if (timers[i] === timer) return i;
+        for (var i = 0; i < Q.count; i++) if (timers[i] === timer) return i;
         return -1;
     }
     // A callback's arguments (what followed `skip` of them), kept in an
@@ -545,14 +688,119 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         for (var i = skip; i < args.length; i++) out[i - skip] = args[i];
         return out;
     }
-    // Real time, for the live turn's slice. Taken now, before page script
-    // can replace `Date.now`.
-    var realNow = Date.now;
+    // `Q.now` is the frame tree's one timer clock, and the page clock below
+    // is kept on the same record: one page clock for the tree, read by
+    // each document from its own time origin.
+    // THE page clock: performance.now(), the frame callback's timestamp and Event.timeStamp
+    // (ms from the time origin). Real time flows, but a load that ran the timers ahead (a 300 ms
+    // timeout run at once) skipped time forward: after the virtual clock moves, this clock reads
+    // its time plus the real time since, never less than it has read. So it is never behind the
+    // timers' virtual clock, which a plain real clock was (`performance.now() - frameTime` was
+    // negative in a load), and it flows between virtual moves, which a virtual clock does not (a
+    // busy loop on performance.now() ends). The animation timeline stays on the virtual clock
+    // itself, so a capture that steps it is reproducible. The host clock is the one web_platform.js
+    // put behind performance.now(); this clock replaces it there, and reaches the engine's own
+    // scripts as `__rk.perfNow` (no page-visible name, #1123).
+    //
+    // Capture mode (set_deterministic_clock): no real time at all. The clock is the virtual time
+    // plus a fixed step per read since the virtual clock last moved, so a capture that steps the
+    // timers reproduces every `t`-driven frame, and a busy loop on performance.now() still ends.
+    // Real-flowing mode: real time plus a SKEW that only ever grows, when the timers' virtual clock
+    // gets ahead of real time (a load that ran a 300 ms timeout at once). So the clock flows with real
+    // time always (no wait is lost), is never behind virtual time, and never goes backwards.
+    //
+    // A frame tree has ONE such clock, as it has one timer queue: its state (the skew, the last
+    // reading, the capture switch and its read count, the frame stamp) is on the tree's record, in
+    // ms from the first document's time origin. Each document reads it from its own time origin
+    // (`base`, the clock's reading when the document's realm was made; zero for the first), as a
+    // browser's documents each count from their own `performance.timeOrigin`: at one instant a page
+    // and its frame read numbers that differ by the difference of their origins, the callbacks of
+    // one animation frame get each document's reading of one time, and an event keeps the reading
+    // of the document that made it. Every realm's host clock is the tree's one monotonic clock
+    // (the bindings give a frame's realm the page's), captured here in each realm; nothing of one
+    // realm's is kept on the record.
+    var hostClock = window.performance && typeof window.performance.now === 'function' ? window.performance.now : null;
+    // The real clock's reading: the host clock. A test harness can stand a clock of its own in
+    // (`__rk.testRealMs`, a host function that only a test installs, through the host bookkeeping
+    // path), so a test drives real time as a value instead of waiting on it.
+    function realMs() {
+        var test = __rk.testRealMs;
+        if (typeof test === 'function') return test();
+        return hostClock ? hostClock() : realNow() - Q.startedAt;
+    }
+    var DET_STEP = 0.1;
+    function treeNow() {
+        var t;
+        if (Q.det) {
+            if (Q.now !== Q.seenNow) { Q.seenNow = Q.now; Q.reads = 0; }
+            t = Q.now + Q.reads * DET_STEP;
+            Q.reads++;
+            if (t <= Q.lastPerf) t = Q.lastPerf + DET_STEP;
+        } else {
+            // Without the host clock: elapsed since the tree's first script began, never an epoch
+            // value (the never-backwards rule would pin it there).
+            var real = realMs();
+            t = real + Q.skew;
+            // The timers' clock is ahead of real time at this reading (a load ran them ahead):
+            // marked, so a frame of this time is stamped with its exact grid time.
+            if (t < Q.now) { Q.skew += Q.now - t; t = Q.now; Q.aheadAt = Q.now; }
+            if (t < Q.lastPerf) { Q.skew += Q.lastPerf - t; t = Q.lastPerf; }
+        }
+        Q.lastPerf = t;
+        return t;
+    }
+    // This document's time origin on the tree's clock. The first document takes no reading for
+    // it (with one document the clock reads exactly as it did before frames). A frame's is the
+    // reading now, less the real time since its `performance.timeOrigin` was taken a little
+    // earlier in this realm's install, so origin plus reading is one instant in every document;
+    // capture mode has no real time in it.
+    var base = 0;
+    if (!first) {
+        base = treeNow();
+        var born = window.performance ? window.performance.timeOrigin : 0;
+        var since = typeof born === 'number' ? realNow() - born : 0;
+        if (!Q.det && since > 0 && since < 5000 && since < base) base -= since;
+    }
+    function perfNow() { return treeNow() - base; }
+    // How far a turn has really got (CLOCK-INFLATE): the timers' time at its start plus the real
+    // time since, never less than the timers' clock. A long task in the turn is real time the
+    // timers' clock is given only on the next turn; measured against this, a frame the turn runs
+    // after the task is as late as it really is, and is stamped its grid time, as Chrome's is
+    // ("held": T0 + 16.7 after a 100 ms task). Frames are still scheduled on the timers' clock
+    // alone. The deterministic clock has no real time in it.
+    function turnNow() {
+        if (Q.det || Q.turnReal < 0) return Q.now;
+        var real = realMs();
+        var t = Q.turnAt + (real - Q.turnReal);
+        return t > Q.now ? t : Q.now;
+    }
+    function turnBegins() {
+        Q.turnAt = Q.now;
+        Q.turnReal = realMs();
+    }
+    // The previous frame's stamp and virtual time: each frame is at least the virtual step after it,
+    // whatever the real clock did (a load runs frames back to back in microseconds), and the page
+    // clock is never behind a frame stamp it handed out (`Q.prevFrameTs`, `Q.prevFrameAt`).
+    __rk.perfNow = perfNow;
+    // The capture switch is the tree's: thrown from any document, it is every document's, and a
+    // frame made later finds it set.
+    __rk.setDetClock = function (on) { Q.det = !!on; Q.reads = 0; };
+    // Grid frame stamps (a capture, `EngineConfig::grid_frame_stamps`): the timeline reads every
+    // frame's exact grid time, with no real time in it, so script animations, which compute from
+    // it, read the same times every run however slow the capture's turns are. Frame callbacks'
+    // stamps and the page clock still flow.
+    __rk.setGridStamps = function (on) { Q.gridStamps = !!on; };
+    if (window.performance) window.performance.now = function now() { return perfNow(); };
+    // The timestamp every animation frame callback of one frame time gets, as in a browser's frame:
+    // taken when the first callback at a virtual time runs (the clock has moved to it by then), so
+    // the frames of a load, which one runTimers call runs one after the other, are each their own
+    // time, a frame apart. One stamp for the tree (`Q.frameTs`, taken at `Q.frameTsAt`): each
+    // document's callbacks get it from that document's origin.
     __rk.fire = function (targetName, type) {
         var target = targetName === 'document' ? document : window;
         var event = {
             type: type, bubbles: false, cancelable: false, defaultPrevented: false,
-            target: target, currentTarget: null, timeStamp: now, isTrusted: true,
+            target: target, currentTarget: null, timeStamp: perfNow(), isTrusted: true,
             preventDefault: function () { this.defaultPrevented = true; },
             stopPropagation: function () {}, stopImmediatePropagation: function () {}
         };
@@ -566,19 +814,92 @@ const PAGE_LIFECYCLE_JS: &str = r#"
         target.dispatchEvent(event);
     };
 
+    // The turn's time (`target`) while a live turn on the real clock runs (`advanceTimersFramed`
+    // with `real`), and the real clock when it began; -1 otherwise. Such a turn's delta is real time
+    // that has passed, so a timer due inside it was held back, not stepped over: each still runs at
+    // its own due time, but what it sets counts from when it is set (the turn's time plus the real
+    // time the turn has taken so far), as in a browser. Counted from the
+    // callback's due time, a timeout or an interval run set after a long task came due again in the
+    // same turn, and a 10 ms chain replayed every link it had missed (CLOCK3: 51 links in the 5 ms
+    // after a 500 ms task; Chrome 1). A stepped turn (a capture's settle, a test) moves virtual time
+    // the page has not lived through yet, and keeps every timer on it. An animation frame is on
+    // the 60 Hz grid (below), on the timers' clock: one a timer of the turn asks for is the frame of
+    // that timer's time, in this turn's round.
+    // The turn's time and real start are the tree's (`Q.liveAt`, `Q.liveReal`), and every
+    // realm's host clock is the tree's one clock, so any document reads the same time here.
+    function liveNow() {
+        if (Q.liveAt < 0) return Q.now;
+        var t = Q.liveAt + (realMs() - Q.liveReal);
+        return t > Q.now ? t : Q.now;
+    }
+    // Animation frames are on a 60 Hz grid from the clock's zero: frame `k` is due at 1000/60 ms
+    // times `k`, rounded up to the clock's whole milliseconds (17, 34, 50, 67, ...), as Chrome's
+    // frames are on the display's (CfT 148: timestamps 16.6-16.7 ms apart, 180-181 frames in
+    // 3000 ms, `frame_grid_probe_cft148.json`). A frame asked for is the one after the last that
+    // ran. One a frame's own callbacks ask for when that frame ran late is due already and runs
+    // on the next turn, and the frames after it are on the grid again, as Chrome catches up a
+    // 24 ms frame without dropping one; more than a frame behind (every frame overruns), it is
+    // the next grid point after now, never now itself, so one asked for in a round that ran on a
+    // grid point waits for the next frame. One a task asks for (a timer, an event) is the frame of
+    // the task's time, the latest grid point at or before now, and never before the frame after
+    // the last: when that point has passed it runs at once, stamped with its grid time, as
+    // Chrome's does (`frame_stamp_probe_cft148.json`: a task 16.7-33.3 ms after a frame gets the
+    // frame at 16.7, at once; after an idle 300 ms, the frame stamped 0.6-15.3 ms before the
+    // request). Until this, a frame was due 16 ms after the turn that ran the last one, so a late
+    // turn moved every later frame (173 of Chrome's 180-181 on the app's loop, PACE2).
+    function frameAt(k) { return floorOf((k * 50 + 2) / 3); }
+    // The latest grid point at or before the clock.
+    function gridAtOrBefore(now) {
+        var c = floorOf(now * 3 / 50);
+        while (frameAt(c + 1) <= now) c++;
+        while (c > 0 && frameAt(c) > now) c--;
+        return c;
+    }
+    // One rule from a frame's callbacks and from a task: the frame of the time asked at, never
+    // before the frame after the last. From a frame on time that is the next frame; from a frame a
+    // turn ran late, the frame of the turn's time, run at once (Chrome, `timeline_probe` "held": a
+    // frame ~85 ms late asks for T0 + 100, the grid point at or before it, not the one after).
+    function nextFrame() {
+        var k = Q.frameK + 1, c = gridAtOrBefore(Q.now);
+        return c > k ? c : k;
+    }
+    // A callback of a frame after the last one run starts that frame's round (`Q.rounds`), from a
+    // turn's round or from the load's timers alike (#1361 R1: the load's frames counted none, and
+    // a resize observation held for a frame under an endless loop was never delivered).
+    function ranFrame(timer) {
+        if (timer.k > Q.frameK) { Q.frameK = timer.k; Q.rounds = (Q.rounds | 0) + 1; }
+    }
+    function runFrame(timer) {
+        ranFrame(timer);
+        Q.inFrame = true;
+        try { timer.run(timer); } finally { Q.inFrame = false; }
+    }
     function schedule(cb, ms, args, repeat, frame) {
         var delay = toNumber(ms) || 0;
         if (delay < 0) delay = 0;
-        var id = nextId++;
+        var id = Q.nextId++;
         var timer = objCreate(null);
-        timer.id = id; timer.seq = id; timer.due = now + delay; timer.cb = cb; timer.args = args;
+        // A timer set outside a real turn's timer slice (a frame callback, an event handler, a network
+        // callback after a real turn) counts from the turn's real progress, not from its start
+        // (LINKS-SLOW R1: a 10 ms timeout set after 8 ms of frame work ran 2 ms after it was set).
+        var base = frame ? Q.now : Q.liveAt >= 0 ? liveNow() : Q.realTurn && !Q.det ? turnNow() : Q.now;
+        timer.id = id; timer.seq = id; timer.due = base + delay; timer.cb = cb; timer.args = args;
+        // LINKS-SLOW: in a real turn a timeout also keeps the page clock's reading when it is set
+        // (`performance.now()`'s, on the tree's clock), and does not run until that clock has
+        // moved its delay: the page never sees a timeout early, whatever the turn's real-time base
+        // read (the loop's clock and the page's are each re-anchored per turn, a millisecond or two
+        // apart). Not on the stepped or deterministic clocks, which have no real turns.
+        if ((Q.liveAt >= 0 || Q.realTurn) && !Q.det && !frame) { timer.setPage = treeNow(); timer.delay = delay; }
+        if (frame) { timer.k = nextFrame(); timer.due = frameAt(timer.k); }
         timer.every = repeat ? (delay > 1 ? delay : 1) : 0; timer.frame = !!frame;
-        timers[count++] = timer;
+        // The document that set it, and that document's own way to run it.
+        timer.win = win; timer.run = call;
+        timers[Q.count++] = timer;
         return id;
     }
     function clearTimer(id) {
-        for (var i = 0; i < count; i++) {
-            if (timers[i].id === id) { removeAt(i); return; }
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].id === id && timers[i].win === win) { removeAt(i); return; }
         }
     }
     window.setTimeout = function (cb, ms) {
@@ -590,7 +911,74 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     window.clearTimeout = clearTimer;
     window.clearInterval = clearTimer;
     window.requestAnimationFrame = function (cb) {
-        return schedule(function () { cb(now); }, 16, rest(arguments, 1), false, true);
+        return schedule(function () {
+            // The frame's time, as Chrome's callbacks get their frame's: the clock read now, less
+            // how late the turn ran it past its grid time (`Q.frameDue`), and never closer to
+            // the last frame's stamp than the clock moved between them. A late frame's callbacks
+            // get the time it was due, and the frames after it are again a grid step apart
+            // (Chrome: 16.6-16.8 ms after a 24 ms frame); stamped with the turn's time the gaps
+            // went 41, 0 and 9 ms. However late: a frame a long task held up 30-190 ms is
+            // stamped with its grid time in Chrome (`frame_stamp_probe_cft148.json`,
+            // "longTimer"), so a frame a timer in its callback asks for, on a later grid point,
+            // is stamped after it. Stamped with the turn's time once two frames late, the page
+            // saw 69 then 67. Never below the last frame's stamp.
+            var at = Q.frameDue;
+            if (Q.frameTsAt !== at) {
+                Q.frameTsAt = at;
+                var ts = treeNow() - (turnNow() - at);
+                // TIMELINE1: when the timers' clock ran ahead of real time at this time (a load, a
+                // stepped capture), the stamp is the grid time itself, with no real time in it, so
+                // a capture that steps the clock reads the same stamps and the same animation
+                // times every run. And a frame a task already read the timeline of (its grid
+                // point, `__rk.timelineNow`) is stamped with that reading, as Chrome's timeline in
+                // the task equals the frame's `t`.
+                // ANIM-READ-JUMP: a turn that is not a real one moves the timers' clock, not
+                // real time: a test's or a capture's `pump_live`, and in the app too a load's
+                // timers and a network delivery (`__rk.runTimers`). The engine's CSS animations
+                // run on that clock (`__rk.animationNow`), so the frames' timeline is its grid
+                // time too: stamped from the real clock, a frame (or a timeline read,
+                // `getAnimations()`) put the timeline the load's real time ahead of the CSS
+                // clock, and the CSS clock, which never runs behind the timeline, jumped there
+                // (a 100 ms transition ended at its first frame). The callback's stamp stays on
+                // `performance.now()`'s clock (the clock-parity pins), so in such a turn a
+                // frame's `t` and its timeline time differ by what the real clock is ahead
+                // (`anim_read_jump_tests`), as with grid frame stamps (TIMELINE1). The app's
+                // real-time loop is unchanged; its hand-off from the load is a follow-up row.
+                var grid = !Q.det && (Q.gridStamps || !Q.realTurn);
+                if (!Q.det && Q.aheadAt === Q.now) ts = at;
+                if (!grid && Q.tlAt === at) ts = Q.tlTs;
+                // At least the grid distance from the last frame, but at most one grid step from it
+                // (16 or 17; CLOCK-INFLATE): a larger distance is the timers' clock catching up after a long
+                // task, real time the reading above already has (it is never behind the timers'
+                // clock) and, when the last frame ran in the task's turn, the last stamp had too;
+                // counted again, the page clock ran a task ahead of real time from then on (the
+                // app: 3202 ms after a 3000 ms task; Chrome 0-1 ms, `long_task_clock_cft148.json`).
+                var step = at - Q.prevFrameAt;
+                var one = frameAt(gridAtOrBefore(Q.prevFrameAt) + 1) - Q.prevFrameAt;
+                if (step > one) step = one;
+                if (Q.prevFrameTs >= 0 && ts < Q.prevFrameTs + step) ts = Q.prevFrameTs + step;
+                if (ts < Q.prevFrameTs) ts = Q.prevFrameTs;
+                // Nor below a timeline time a task was handed (`__rk.timelineNow`).
+                if (!grid && ts < Q.tlHigh) ts = Q.tlHigh;
+                Q.frameTs = ts;
+                if (Q.frameTs > Q.lastPerf) Q.lastPerf = Q.frameTs;
+                // The timeline's time for this frame: its stamp; with grid frame stamps (a
+                // load-only capture), the exact grid time instead, so script animations read the
+                // same times every run while the callback's stamp stays on the clock
+                // `performance.now()` reads (a page pairing the two keeps develop's relation).
+                var tl = ts;
+                if (grid) {
+                    tl = Q.tlAt === at ? Q.tlTs : at;
+                    if (tl < Q.frameTl) tl = Q.frameTl;
+                    if (tl < Q.tlHigh) tl = Q.tlHigh;
+                }
+                Q.frameTl = tl;
+                Q.prevFrameTs = Q.frameTs; Q.prevFrameAt = at;
+            }
+            // A frame's document counts from its own origin: never before it.
+            var t = Q.frameTs - base;
+            cb(t < 0 ? 0 : t);
+        }, 0, rest(arguments, 1), false, true);
     };
     window.cancelAnimationFrame = clearTimer;
     window.queueMicrotask = function (cb) {
@@ -601,42 +989,81 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     function call(timer) {
         try {
             if (typeof timer.cb === 'function') applyTo(timer.cb, win, timer.args);
-            else evalNow(toText(timer.cb));
+            else {
+                // A string timer is the document's code: its text first,
+                // then the one step that compiles and runs it.
+                var text = toText(timer.cb);
+                __rk.runDocumentScript(text);
+            }
         } catch (e) { report(e); }
     }
     // Run due timers in (due, scheduling) order until the virtual clock
     // would pass `horizon` ms or `max` callbacks have run. The load's clock
-    // has no frames, so an animation frame there is a 16 ms timer; the live
-    // loop keeps them for its one round a turn (`timersOnly`).
+    // has no frames, so an animation frame there is a timer due at its grid
+    // point; the live loop keeps them for its one round a turn (`timersOnly`).
     //
     // `until` (live loop only) is a time on the real clock: once a callback
     // ends past it, the rest wait for the next turn, as when `max` is hit.
     function runTimers(horizon, max, timersOnly, until) {
-        // What a worker has sent since the last turn is delivered first.
-        var ran = typeof __rk.workersPump === 'function' ? __rk.workersPump() : 0;
+        // A turn begins outside any frame's callbacks, whatever stopped the last part-way.
+        Q.inFrame = false;
+        // What a worker has sent since the last turn is delivered first, as a task of its own
+        // (`Q.taskFrom`, TIMELINE1): a frame asked for before it is one it can be held by.
+        var ran = 0;
+        Q.taskFrom = Q.nextId;
+        for (var p = 0; p < Q.pumpCount; p++) ran += pumps[p]();
         while (ran < max && !(until && realNow() >= until)) {
-            var best = -1;
-            for (var i = 0; i < count; i++) {
+            var best = -1, pageNow = -1;
+            for (var i = 0; i < Q.count; i++) {
                 var t = timers[i];
                 if (timersOnly && t.frame) continue;
+                // A timeout held for the page clock (`setPage`) is skipped, not waited on: the
+                // timers due behind it still run (LINKS-SLOW R1).
+                if (typeof t.setPage === 'number' && !Q.det) {
+                    if (pageNow < 0) pageNow = treeNow();
+                    if (pageNow - t.setPage < t.delay) continue;
+                }
                 if (best < 0 || t.due < timers[best].due ||
                     (t.due === timers[best].due && t.seq < timers[best].seq)) best = i;
             }
-            if (best < 0 || timers[best].due > horizon) break;
+            // On the real clock the turn also reaches what has come due in
+            // real time since it began: a timer set during it (a zero-delay
+            // chain's next link, a chunk of work) runs in it, until the frame
+            // budget ends the turn, as before CLOCK3, and the turn's work is
+            // laid out once. Counted only from the turn's time, each such
+            // link waited for a turn of its own, with a relayout between
+            // (CLOCK3 R1: 41 rows of chunked work a second where Chrome does
+            // 195).
+            var reach = Q.liveAt >= 0 && liveNow() > horizon ? liveNow() : horizon;
+            if (best < 0 || timers[best].due > reach) break;
             var timer = timers[best];
             // A timer a cut-short live turn owed runs after the clock has
-            // moved on; the clock does not go back for it.
-            if (timer.due > now) now = timer.due;
+            // moved on; the clock does not go back for it. One run past the
+            // turn's time (on the real clock) leaves the clock at the turn's
+            // time: the next turn's delta counts the real time it ran in.
+            if (timer.due > Q.now) Q.now = timer.due > horizon ? horizon : timer.due;
             // An interval that fell behind (a live turn held it back) is not
-            // caught up: its next run counts from now, as in a browser.
+            // caught up: its next run counts from now, as in a browser. On
+            // the real clock it keeps its grid, as Chrome's does: the next
+            // run is the first of its periods after the turn's time.
             if (timer.every) {
+                // Only an interval's first run is held for the page clock; the rest keep its grid.
+                timer.setPage = undefined;
                 timer.due += timer.every;
-                if (timer.due <= now) timer.due = now + timer.every;
-                timer.seq = nextId++;
+                var from = liveNow();
+                if (timer.due <= from) {
+                    if (Q.liveAt >= 0) timer.due += timer.every * (floorOf((from - timer.due) / timer.every) + 1);
+                    else timer.due = from + timer.every;
+                }
+                // Whatever the grid step gave (it rests on one captured built-in), the next run is
+                // after the turn's time: one that is not (or is not a number) counts from it.
+                if (!(timer.due > from)) timer.due = from + timer.every;
+                timer.seq = Q.nextId++;
             }
             else removeAt(best);
             ran++;
-            call(timer);
+            if (timer.frame) { Q.frameDue = timer.due; runFrame(timer); }
+            else { Q.taskFrom = Q.nextId; timer.run(timer); }
         }
         return ran;
     }
@@ -644,35 +1071,103 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // the order they were asked for, until `max` callbacks have run in
     // the turn (`ran` so far). The round is a table of the engine's own,
     // as the timers are. Returns the new count.
+    //
+    // A frame tree's turn is one presented frame however many calls run its parts (its timers
+    // one at a time, then the #776 round of a turn that stopped for its time): it has one round,
+    // as HTML's "update the rendering" runs the animation frame callbacks once, from the list as
+    // it stood (Chrome: one rAF batch per frame). Once the turn has run a round, a later call
+    // only runs callbacks of that round's frame that a cap left over; a frame they asked for,
+    // due already when the turn ran late, is the next turn's (RAF-ONE-ROUND: it ran in the same
+    // turn, and MotionMark's heavy cells counted two of its frames per presented frame).
     function frameRound(ran, max) {
-        var round = objCreate(null), due = 0;
-        for (var i = 0; i < count; i++) {
-            if (timers[i].frame && timers[i].due <= now) round[due++] = timers[i];
+        Q.inFrame = false;
+        var round = objCreate(null), due = 0, latest = -1;
+        var upTo = Q.roundAt >= 0 && Q.roundAt < Q.now ? Q.roundAt : Q.now;
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame && timers[i].due <= upTo) {
+                round[due++] = timers[i];
+                if (timers[i].due > latest) latest = timers[i].due;
+            }
         }
+        // CLOCK-AT-PRESENT (with one round a turn): a round a late turn runs is the frame of the
+        // turn's time, the latest grid point at or before it, not the grid point its callbacks were
+        // due at: they are stamped with it, the frame they ask for is the next one after it (not
+        // due already), and between turns the timeline and the CSS animation clock hold at it, as
+        // Chrome's late frame is stamped with its own time (`clock_at_present_probe_cft148.json`:
+        // the stamp is the timeline in the frame and in the task after it, the painted time the
+        // animation's). Without it the callback a late round asked for ran a turn later, stamped
+        // with that older grid point, a turn behind the frame presented with it.
+        if (latest >= 0 && Q.oneRound) {
+            var g = gridAtOrBefore(Q.now), at = frameAt(g);
+            if (at > latest) {
+                latest = at;
+                for (var r = 0; r < due; r++) if (round[r].k < g) round[r].k = g;
+            }
+        }
+        // One frame: its time is the latest grid point among its callbacks.
+        if (latest >= 0) Q.frameDue = latest;
+        if (latest >= 0 && Q.roundAt === -1) Q.roundAt = latest;
         for (var j = 0; j < due && ran < max; j++) {
             // Cancelled by an earlier callback of the round.
             var at = slotOf(round[j]);
             if (at < 0) continue;
             removeAt(at);
             ran++;
-            call(round[j]);
+            runFrame(round[j]);
         }
         return ran;
     }
+    // REPORT-CHART-0x0: HTML's update the rendering runs a frame's animation frame callbacks
+    // before it gathers and broadcasts resize observations, so an observation made while a frame
+    // callback is asked for is delivered after that frame's callbacks (web_observers_live.js).
+    // How many frames have run callbacks, and whether a frame callback is asked for now. The
+    // queue is the frame tree's, so a frame's loop holds the top document's observations too:
+    // Chrome's rendering update runs every document's frame callbacks before any document's
+    // resize observations (`report_chart_resize_cft148.json` `iframe`: "F1 ro=800x300 F2 F3").
+    __rk.frameRounds = function () { return Q.rounds | 0; };
+    // The frame a held resize observation waits for, run now as one round: the callbacks asked
+    // for so far (not those they ask for), in order, at the frame time of the latest of them.
+    // The clock does not move. For a host that takes the page with no turn to come (the end of
+    // a load, a capture after its actions: `Engine::run_held_observation_frame`), so the
+    // observation still comes after the frame's callbacks, as in Chrome (#1361 R1).
+    __rk.pendingFrameRound = function (max) {
+        var round = objCreate(null), due = 0, latest = -1, ran = 0;
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame) {
+                round[due++] = timers[i];
+                if (timers[i].due > latest) latest = timers[i].due;
+            }
+        }
+        if (latest >= 0) Q.frameDue = latest;
+        Q.inFrame = false;
+        for (var j = 0; j < due && ran < max; j++) {
+            var at = slotOf(round[j]);
+            if (at < 0) continue;
+            removeAt(at);
+            ran++;
+            runFrame(round[j]);
+        }
+        return ran;
+    };
+    __rk.framePending = function () {
+        for (var i = 0; i < Q.count; i++) if (timers[i].frame) return true;
+        return false;
+    };
     __rk.runTimers = function (horizon, max) {
+        Q.realTurn = false;
         return runTimers(horizon, max, false);
     };
     // The load's clock, one callback at a time, so the host can publish a
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
     __rk.runTimersFramed = function (horizon, max, frameMs) {
-        var start = Date.now();
+        var start = realNow();
         var ran = 0;
         while (ran < max) {
             var n = runTimers(horizon, 1, false);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) return -ran;
+            if (frameMs > 0 && (realNow() - start) >= frameMs) return -ran;
         }
         return ran;
     };
@@ -695,14 +1190,16 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // (seconds of them, until the watchdog stopped one part-way;
     // 2026-10-22). The turn's frame still comes.
     __rk.advanceTimers = function (delta, max, slice) {
-        var target = now + delta;
+        Q.realTurn = false;
+        turnBegins();
+        var target = Q.now + delta;
         var until = slice > 0 ? realNow() + slice : 0;
         var ran = runTimers(target, max, true, until);
         if (ran >= max) {
-            if (now < target) now = target;
+            if (Q.now < target) Q.now = target;
             return ran;
         }
-        if (now < target) now = target;
+        if (Q.now < target) Q.now = target;
         return frameRound(ran, max);
     };
     // Like `__rk.advanceTimers`, but stop between callbacks once
@@ -721,39 +1218,189 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // A turn that yields still has its frame (#776): its animation-frame
     // round runs before it returns. Returning first, a `setTimeout(0)`
     // chain that outlasted every frame starved `requestAnimationFrame`.
-    __rk.advanceTimersFramed = function (delta, max, frameMs) {
-        var target = now + delta;
-        var start = Date.now();
+    //
+    // `real`: `delta` is real time that has passed (the app's live loops),
+    // so timers set in the turn count from its time (`Q.liveAt`, CLOCK3).
+    __rk.advanceTimersFramed = function (delta, max, frameMs, real, before) {
+        Q.realTurn = !!real;
+        turnBegins();
+        var target = Q.now + delta;
+        var start = realNow();
         var ran = 0;
         var yielded = false;
-        while (ran < max) {
-            var n = runTimers(target, 1, true);
-            if (n === 0) break;
-            ran += n;
-            if (frameMs > 0 && (Date.now() - start) >= frameMs) {
-                yielded = true;
-                break;
-            }
+        // A real turn's time is `target` (its delta is real time already passed): the frames' turn
+        // clock (`turnNow`) starts there too, as the timers' (`liveNow`) does.
+        // The turn's instant (`before` ms of its own work ago): its timers count from there.
+        if (real) {
+            var b4 = toNumber(before);
+            Q.liveAt = target; Q.liveReal = realMs() - (b4 > 0 ? b4 : 0);
+            Q.turnAt = target; Q.turnReal = Q.liveReal;
         }
-        if (now < target) now = target;
+        try {
+            while (ran < max) {
+                var n = runTimers(target, 1, true);
+                if (n === 0) break;
+                ran += n;
+                if (frameMs > 0 && (realNow() - start) >= frameMs) {
+                    yielded = true;
+                    break;
+                }
+            }
+        } finally { Q.liveAt = -1; }
+        if (Q.now < target) Q.now = target;
         if (ran >= max) return yielded ? -ran : ran;
         ran = frameRound(ran, max);
         return yielded ? -ran : ran;
     };
     // Ms until the earliest timer is due (0 when overdue), -1 with none set.
     // The virtual clock as it stands: the engine's animation clock.
-    __rk.now = function () { return now; };
-    __rk.nextTimer = function () {
+    __rk.now = function () { return Q.now; };
+    // `document.timeline.currentTime` (TIMELINE1, as Chrome's, `timeline_probe_cft148.json`): in a
+    // frame its callbacks' stamp; in a task the stamp of the frame of the task's time, the latest
+    // grid point at or before it, carried on the grid from the last frame's stamp (no clock read,
+    // so a task reads one value however long it runs, and a capture reproduces it); never below
+    // the last frame's stamp. The frame of that grid point is then stamped with the same value.
+    // From this document's origin, never before it.
+    // While a frame is overdue or asked for, a task reads the last frame's time: the timeline moves
+    // on at that frame (Chrome `timeline_probe` "overdue": a task run before a frame a long task
+    // held up reads T0 + 0, the frame then T0 + 16.7), so it never goes back.
+    // Only a frame asked for before this task and overdue holds it: one the task itself asks for
+    // (`el.animate()` asks for one) does not (Chrome "idleStart": the timeline is the same before
+    // and after `animate()`). A task is a timer's callback (`Q.taskFrom`, the first timer id it
+    // could ask for); a host turn (an event, a script the engine runs) is part of the last one.
+    function heldFrame() {
+        for (var i = 0; i < Q.count; i++) {
+            var f = timers[i];
+            if (f.frame && f.id < Q.taskFrom && f.due < Q.now) return true;
+        }
+        return false;
+    }
+    __rk.timelineNow = function () {
+        var ts = Q.frameTl;
+        if (!Q.inFrame && !heldFrame()) {
+            var g = frameAt(gridAtOrBefore(Q.now));
+            if (g > Q.prevFrameAt || Q.prevFrameTs < 0) {
+                if (Q.tlAt !== g) {
+                    // The stamp a frame of grid point `g` would get now: the clock less how far
+                    // the timers' clock is past `g` (with grid stamps, `g` itself), never below
+                    // the last frame's. Not the last frame's stamp plus the grid distance since:
+                    // after a long task that stamp already had the task's real time, and the
+                    // timers' clock catching up would count it again (CLOCK-INFLATE). Read once
+                    // per grid point, so a task reads one value.
+                    Q.tlAt = g;
+                    var v = !Q.det && (Q.gridStamps || !Q.realTurn) ? g : treeNow() - (turnNow() - g);
+                    Q.tlTs = Q.prevFrameTs >= 0 && v < Q.frameTl ? Q.frameTl : v;
+                }
+                ts = Q.tlTs;
+            }
+        }
+        // Never less than a time already handed out.
+        if (ts < Q.tlHigh) ts = Q.tlHigh;
+        Q.tlHigh = ts;
+        var t = ts - base;
+        return t < 0 ? 0 : t;
+    };
+    // TIMELINE2: the timeline's time on the tree's clock, the clock the engine's CSS animations and
+    // transitions run on (`Animations::clock_ms`, read after each turn's timers and before a frame
+    // document's first layout), so they paint and report the time script animations read (Chrome
+    // `css_timeline_probe_cft148.json`: `startTime + currentTime` is the timeline in every frame
+    // and task). Once the frame of the turn's grid point has run, that frame's time, so a frame
+    // the turn ran late paints the time its callbacks read; with no frame of it run, the timers'
+    // clock as before (a page with no animation frame still moves every turn, the engine's
+    // frame). Taken without a reading of its own (the deterministic clock counts reads), and never
+    // below a time already handed out, nor below its own last value: a turn that passed a grid
+    // point with no frame ran at the timers' clock, and a frame a later timer asks for is the
+    // frame of that grid point, stamped earlier; the clock holds until time passes it (R1: the
+    // paint stepped back up to a frame, and an end or iteration could be crossed twice).
+    __rk.animationNow = function () {
+        var ts = Q.frameTl;
+        if (!Q.inFrame && !heldFrame()) {
+            var g = frameAt(gridAtOrBefore(Q.now));
+            if (g > Q.prevFrameAt || Q.prevFrameTs < 0) ts = Q.now;
+        }
+        if (ts < Q.frameTl) ts = Q.frameTl;
+        if (ts < Q.tlHigh) ts = Q.tlHigh;
+        if (ts < Q.animHigh) ts = Q.animHigh;
+        Q.animHigh = ts;
+        return ts;
+    };
+    // This document's time origin on the tree's clock: a CSS animation's start time, which the
+    // engine keeps on the tree's clock, is `start - origin` on this document's timeline (TIMELINE2).
+    __rk.timeOrigin = function () { return base; };
+    // The animation-frame round of a frame tree's turn that stopped for
+    // its time with timers still due (`Engine::pump_live`): the frame
+    // callbacks due now run once, as a turn's round does.
+    __rk.animationRound = function (max) {
+        return frameRound(0, max);
+    };
+    // A frame tree's turn opens (`true`: it has run no round yet) and closes (`false`), around
+    // every call that runs a part of it (`Engine::pump_live_on`; RAF-ONE-ROUND, `frameRound`).
+    __rk.treeTurn = function (open) {
+        Q.roundAt = open ? -1 : -2;
+    };
+    // One animation round a turn is on for this tree (`Engine` RAF-ONE-ROUND switch): a late round
+    // is the frame of the turn's time (CLOCK-AT-PRESENT, `frameRound`).
+    __rk.setOneRound = function (on) {
+        Q.oneRound = !!on;
+    };
+    // ANIM-UPDATE-ORDER: the time of the frame a turn `delta` ms on will run (the frame of the
+    // turn's time, as `frameRound` makes it with one round a turn), or -1 when no animation frame
+    // callback is due by then. The engine updates the animations to it before the turn's timers
+    // and round run, so the callbacks read the frame's animated style (HTML update the rendering:
+    // animations are updated before the animation frame callbacks run). No clock is read.
+    __rk.turnFrameAt = function (delta) {
+        var target = Q.now + (toNumber(delta) || 0);
+        for (var i = 0; i < Q.count; i++) {
+            if (timers[i].frame && timers[i].due <= target) return frameAt(gridAtOrBefore(target));
+        }
+        return -1;
+    };
+    // A frame's document is going away: its timers go with it, and its
+    // workers are no longer asked. Loops over the tables, nothing called.
+    __rk.dropTimers = function () {
+        for (var i = Q.count - 1; i >= 0; i--) if (timers[i].win === win) removeAt(i);
+        for (var p = 0; p < Q.pumpCount; p++) {
+            if (pumps[p] !== pump) continue;
+            for (Q.pumpCount--; p < Q.pumpCount; p++) pumps[p] = pumps[p + 1];
+            delete pumps[Q.pumpCount];
+        }
+    };
+    // The runtime asks for another turn at once (rejections it has still
+    // to announce, `JsRuntime::set_rejection_events`): a timer of the
+    // engine's own that is due now and does nothing, so the live loop's
+    // next-timer read says "now" and the turn that runs it ends as any
+    // turn does. One is enough: a second ask while one waits adds none.
+    var wake = null;
+    function woke() { wake = null; }
+    __rk.wakeSoon = function () {
+        if (wake !== null && slotOf(wake) >= 0) return;
+        schedule(woke, 0, rest(arguments, 0), false);
+        wake = timers[Q.count - 1];
+    };
+    __rk.nextTimer = function (timersOnly) {
         // Only a number is a time; compared and subtracted here, with no
-        // call.
-        var due = -1;
-        for (var i = 0; i < count; i++) {
+        // call. `timersOnly`: animation frames left out (the content loop's
+        // exact wait is a timer's, never a frame's: LINKS-SLOW part 2 R1).
+        var due = -1, page = -1;
+        for (var i = 0; i < Q.count; i++) {
             var at = timers[i].due;
             if (typeof at !== 'number') continue;
+            if (timersOnly === true && timers[i].frame) continue;
+            // A timeout held for the page clock (`setPage`) is due when that clock has moved its
+            // delay, if that is later.
+            var t = timers[i];
+            if (typeof t.setPage === 'number' && !Q.det) {
+                if (page < 0) page = treeNow();
+                // What is left is measured now: it counts from the turn's real progress, not from
+                // its start, or the loop's deadline is already past and it turns back to back
+                // until the page clock catches up (LINKS-SLOW R1).
+                var left = t.setPage + t.delay - page;
+                if (left > 0 && turnNow() + left > at) at = turnNow() + left;
+            }
             if (due < 0 || at < due) due = at;
         }
         if (due < 0) return -1;
-        return due > now ? due - now : 0;
+        return due > Q.now ? due - Q.now : 0;
     };
 })();
 "#;
@@ -817,6 +1464,18 @@ pub(crate) struct DirtyMark {
     /// whatever property: an animation frame over the painted boxes can
     /// answer a read when no value a layout places moved.
     other_since_layout: Cell<bool>,
+    /// LPF1: the pending bucket holds a mark with no `MutationLog` record behind it (a sheet
+    /// adopted or disabled, a write or mutation the log does not record, Web Animations' layer, the
+    /// embedder's `mark_dirty`). The engine then trusts no dirty set built from the log alone.
+    unlogged: Cell<bool>,
+}
+
+/// Whether a dirty mark's write pushed a `MutationLog` record (LPF1 R1): every caller of
+/// [`DirtyMark::mark`] says so, since it cannot be told from the write's kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Logged {
+    Yes,
+    No,
 }
 
 /// A layer write of paint properties (`opacity`, `color`,
@@ -826,14 +1485,37 @@ pub(crate) const LAYER_PAINT: u8 = 1;
 /// computed style, the transformed rects, hit testing and the scroll
 /// extents see it; offset and client boxes do not.
 pub(crate) const LAYER_TRANSFORM: u8 = 2;
+/// An inline style write of `opacity` (TREE-REUSE step (2)): below 1 it makes a stacking
+/// context, which can reorder what paints above what, so a hit test sees it; no box moves.
+pub(crate) const LAYER_STACKING: u8 = 4;
 
 impl DirtyMark {
     /// A script write of kind `kind` that invalidated `bucket`.
-    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str) {
+    pub(crate) fn mark(&self, bucket: DomDirty, kind: &'static str, logged: Logged) {
         if bucket != DomDirty::Clean {
             self.beyond_animation_layer.set(true);
             self.other_since_layout.set(true);
-            self.mark_animation_layer(bucket, kind);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bump(bucket, kind);
+        }
+    }
+
+    /// A mark with no `MutationLog` record behind it (see `unlogged`).
+    pub(crate) fn note_unlogged(&self) {
+        self.unlogged.set(true);
+    }
+
+    /// Whether the pending bucket holds a mark with no log record (see `unlogged`).
+    pub(crate) fn unlogged(&self) -> bool {
+        self.unlogged.get()
+    }
+
+    fn bump(&self, bucket: DomDirty, kind: &'static str) {
+        self.bucket.set(self.bucket.get().max(bucket));
+        if !self.since_layout.replace(true) {
+            self.cause.set(Some(kind));
         }
     }
 
@@ -849,10 +1531,8 @@ impl DirtyMark {
     /// the forced-layout log like every other mark.
     pub(crate) fn mark_animation_layer(&self, bucket: DomDirty, kind: &'static str) {
         if bucket != DomDirty::Clean {
-            self.bucket.set(self.bucket.get().max(bucket));
-            if !self.since_layout.replace(true) {
-                self.cause.set(Some(kind));
-            }
+            self.unlogged.set(true);
+            self.bump(bucket, kind);
         }
     }
 
@@ -864,8 +1544,30 @@ impl DirtyMark {
     /// only the reads that see the values lay out (`needs_layout_for`).
     pub(crate) fn mark_animation_paint(&self, bucket: DomDirty, reads: u8) {
         if bucket != DomDirty::Clean {
+            self.unlogged.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
             self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+        }
+    }
+
+    /// TREE-REUSE step (2): a script write of the inline `style` attribute that changed only paint
+    /// properties (`reads`: [`LAYER_PAINT`], with [`LAYER_STACKING`] for `opacity`). Like any
+    /// other script write it is beyond the animated-style layer and the engine lays it out when
+    /// script settles; but no box moved, so the published layout stays current for an offset,
+    /// client or rect read, and only the reads that see the values lay out (`needs_layout_for`).
+    /// It names its cause for the forced-layout log when it is the first write since the layout.
+    pub(crate) fn mark_paint_style(&self, bucket: DomDirty, kind: &'static str, reads: u8, logged: Logged) {
+        if bucket != DomDirty::Clean {
+            self.beyond_animation_layer.set(true);
+            self.other_since_layout.set(true);
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
+            self.bucket.set(self.bucket.get().max(bucket));
+            self.layer_since_layout.set(self.layer_since_layout.get() | reads);
+            if self.cause.get().is_none() {
+                self.cause.set(Some(kind));
+            }
         }
     }
 
@@ -879,8 +1581,10 @@ impl DirtyMark {
         let layer = self.layer_since_layout.get();
         match read {
             "computed_style" => layer != 0,
-            "rect" | "hit_test" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll"
-            | "scroll_to" => layer & LAYER_TRANSFORM != 0,
+            "hit_test" => layer & (LAYER_TRANSFORM | LAYER_STACKING) != 0,
+            "rect" | "scroll_size" | "element_scroll" | "scroll_chain" | "window_scroll" | "scroll_to" => {
+                layer & LAYER_TRANSFORM != 0
+            }
             _ => false,
         }
     }
@@ -892,8 +1596,11 @@ impl DirtyMark {
     /// It is still a write the engine has to lay out, so it is beyond the
     /// animated-style layer: the paint-only animation frame must not skip
     /// it. A no-op write (`Clean`) is not a write and marks nothing.
-    pub(crate) fn mark_unseen(&self, bucket: DomDirty) {
+    pub(crate) fn mark_unseen(&self, bucket: DomDirty, logged: Logged) {
         if bucket != DomDirty::Clean {
+            if logged == Logged::No {
+                self.unlogged.set(true);
+            }
             self.beyond_animation_layer.set(true);
             self.bucket.set(self.bucket.get().max(bucket));
         }
@@ -916,6 +1623,7 @@ impl DirtyMark {
 
     fn take(&self) -> DomDirty {
         self.beyond_animation_layer.set(false);
+        self.unlogged.set(false);
         self.bucket.replace(DomDirty::Clean)
     }
 
@@ -1115,14 +1823,121 @@ impl MutationLog {
 }
 
 /// DOM bindings context.
+/// A page's hold on the JavaScript runtime: the runtime, which the
+/// documents of one frame tree share, and the realm that is this page's.
+/// Every use goes through [`PageRuntime::borrow_mut`], which enters the
+/// page's realm for as long as the borrow lasts, so the rest of the
+/// bindings read as if the runtime were the page's alone.
+pub(crate) struct PageRuntime {
+    shared: Rc<RefCell<JsRuntime>>,
+    realm: rustkit_js::RealmId,
+}
+
+/// The runtime, with one page's realm entered until this is dropped.
+pub(crate) struct InRealm<'a> {
+    runtime: std::cell::RefMut<'a, JsRuntime>,
+    outer: rustkit_js::RealmId,
+}
+
+impl PageRuntime {
+    fn main(runtime: JsRuntime) -> Self {
+        Self { shared: Rc::new(RefCell::new(runtime)), realm: rustkit_js::RealmId::MAIN }
+    }
+
+    pub(crate) fn borrow_mut(&self) -> InRealm<'_> {
+        let mut runtime = self.shared.borrow_mut();
+        let outer = runtime.enter_realm(self.realm);
+        InRealm { runtime, outer }
+    }
+
+    /// For what reads the runtime without evaluating (no realm matters).
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, JsRuntime> {
+        self.shared.borrow()
+    }
+}
+
+impl std::ops::Deref for InRealm<'_> {
+    type Target = JsRuntime;
+    fn deref(&self) -> &JsRuntime {
+        &self.runtime
+    }
+}
+
+impl std::ops::DerefMut for InRealm<'_> {
+    fn deref_mut(&mut self) -> &mut JsRuntime {
+        &mut self.runtime
+    }
+}
+
+impl Drop for InRealm<'_> {
+    fn drop(&mut self) {
+        self.runtime.enter_realm(self.outer);
+    }
+}
+
+/// Whether the errors of a script fetched for the document at `document`
+/// are reported to the page without detail (the HTML standard's muted
+/// errors): `redirects` are the URLs that redirected on the way, `landed`
+/// the URL of the response that was read. In full only when the document
+/// has an origin of its own and every one of those URLs is of it.
+pub fn script_without_detail<'a>(
+    document: Option<&Url>,
+    redirects: impl IntoIterator<Item = &'a Url>,
+    landed: &'a Url,
+) -> bool {
+    let Some(document) = document else {
+        return true;
+    };
+    let origin = document.origin();
+    if !origin.is_tuple() {
+        return true;
+    }
+    redirects.into_iter().chain(std::iter::once(landed)).any(|url| url.origin() != origin)
+}
+
+/// What a page asked of its frames (web_frames.js): show `url` in the
+/// iframe element `node` (`Some`), or that element left the document
+/// (`None`). `sandbox` is the element's `sandbox` attribute for this
+/// navigation: its value when the request was made (`None`: no attribute).
+/// `initial`: the document is the about:blank of the frame's insertion,
+/// whose `load` goes to what could hear it then ([`DomBindings::frame_loaded`]).
+/// `quiet`: nothing could, so no `load` is fired at the element (Chrome
+/// fired it inside the insertion, to nobody).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameRequest {
+    pub node: usize,
+    pub url: Option<String>,
+    pub sandbox: Option<String>,
+    pub initial: bool,
+    pub quiet: bool,
+}
+
 pub struct DomBindings {
-    runtime: RefCell<JsRuntime>,
+    runtime: PageRuntime,
+    /// Where the monotonic clock behind the page clock counts from: the
+    /// frame tree's first document's start. A frame's realm is given its
+    /// page's, so every document of a tree reads one clock.
+    clock_origin: std::time::Instant,
+    /// Frame requests not yet taken (`take_frame_requests`); filled only
+    /// once `enable_frames` ran.
+    frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
+    /// The `sandbox` attribute of each iframe of the document as it was
+    /// bound (the parser's), until that frame is first asked for: a markup
+    /// frame is asked for at the engine's scan, after the page's first
+    /// scripts, and its attribute as parsed counts for that navigation.
+    /// `None` (nothing kept) unless `enable_frames` ran.
+    frame_sandbox_parsed: Rc<RefCell<Option<std::collections::HashMap<usize, String>>>>,
     window: RefCell<WindowState>,
     /// The document `document`/`Node`/`Element` read from (see `dom`).
     dom_host: dom::SharedDomHost,
     /// What the page posted with `window.ipc.postMessage`, held on the
     /// Rust side (`__rk_ipc_post`), so a drain runs no script.
     ipc_queue: Rc<RefCell<Vec<IpcMessage>>>,
+    /// What an internal page ([`Self::new_internal_page`]) posted, for
+    /// [`Self::drain_internal_reads`]. Always empty in any other document.
+    read_queue: Rc<RefCell<Vec<String>>>,
+    /// Built by [`Self::new_internal_page`].
+    internal_reads: bool,
     /// Pending invalidation from script DOM writes (see `DomDirty`).
     /// Shared with the tree-write host functions, which mark it.
     dirty: Rc<DirtyMark>,
@@ -1136,6 +1951,8 @@ pub struct DomBindings {
     edit: Rc<dom::editing::EditContext>,
     /// Canvas 2D contexts and what they drew (see `web_canvas`).
     canvases: web_canvas::SharedCanvases,
+    /// What script asked of media elements (see `web_media`).
+    media: web_media::SharedMedia,
     /// Stops this page's workers when it goes away (see `worker_host`).
     workers: worker_host::Guard,
 }
@@ -1150,7 +1967,7 @@ impl DomBindings {
     /// sees no `window.ipc`, `window.hiwaveChrome` or `__rk_ipc_post`, as
     /// in Chromium (CH3.A7).
     pub fn new(runtime: JsRuntime) -> Result<Self, BindingError> {
-        Self::build(runtime, false)
+        Self::build(runtime, false, false)
     }
 
     /// Create DOM bindings for one of the app's own documents (the chrome,
@@ -1158,10 +1975,212 @@ impl DomBindings {
     /// `window.hiwaveChrome.postMessage`, whose messages
     /// [`Self::drain_ipc_queue`] hands to the app (CH2.E9, CH3.A7).
     pub fn new_app_owned(runtime: JsRuntime) -> Result<Self, BindingError> {
-        Self::build(runtime, true)
+        Self::build(runtime, true, false)
     }
 
-    fn build(mut runtime: JsRuntime, app_bridge: bool) -> Result<Self, BindingError> {
+    /// Create DOM bindings for one of the app's own pages shown in a
+    /// content view (the report page): `window.ipc.postMessage` only
+    /// queues the message for [`Self::drain_internal_reads`]; the embedder
+    /// decides which of them it answers. No `window.hiwaveChrome`, no
+    /// `__rk_ipc_post`, and nothing reaches [`Self::drain_ipc_queue`].
+    pub fn new_internal_page(runtime: JsRuntime) -> Result<Self, BindingError> {
+        Self::build(runtime, false, true)
+    }
+
+    fn build(runtime: JsRuntime, app_bridge: bool, internal_reads: bool) -> Result<Self, BindingError> {
+        Self::build_in(PageRuntime::main(runtime), app_bridge, internal_reads, false, None)
+    }
+
+    /// Bindings for a document nested in this one's frame tree and of its
+    /// origin (a same-origin `<iframe>`): a new realm of the same runtime,
+    /// with everything a page has installed again in it, bound to its own
+    /// document. The two pages' objects can hold and call each other.
+    /// The child outlives neither the runtime nor its realm: drop it with
+    /// [`Self::drop_child`].
+    pub fn new_child(&self) -> Result<Self, BindingError> {
+        let realm = self.runtime.shared.borrow_mut().create_realm()?;
+        Self::build_in(PageRuntime { shared: Rc::clone(&self.runtime.shared), realm }, false, false, true, Some(self.clock_origin))
+    }
+
+    /// Give this page's global a property `name` that is `other`'s global
+    /// object (`contentWindow` on one side, `parent` on the other). Both
+    /// must share a runtime.
+    pub fn expose_window(&self, name: &str, other: &DomBindings) -> Result<(), BindingError> {
+        if !Rc::ptr_eq(&self.runtime.shared, &other.runtime.shared) {
+            return Err(JsError::ExecutionError("the two pages do not share a runtime".into()).into());
+        }
+        self.runtime
+            .shared
+            .borrow_mut()
+            .expose_realm_global(self.runtime.realm, name, other.runtime.realm)
+            .map_err(Into::into)
+    }
+
+    /// Turn on the page half of `<iframe>` (web_frames.js): frame requests
+    /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
+    /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
+    /// Off, nothing of it exists (`EngineConfig::nested_contexts`).
+    pub fn enable_frames(&self) -> Result<(), BindingError> {
+        let queue = self.frame_requests.clone();
+        let host = self.dom_host.clone();
+        let parsed = self.frame_sandbox_parsed.clone();
+        *parsed.borrow_mut() = Some(host.borrow().frames_with_sandbox());
+        let mut runtime = self.runtime.borrow_mut();
+        runtime.register_host_function(
+            "__rustkit_frame_request",
+            3,
+            Box::new(move |args| {
+                if let Some(JsValue::Number(node)) = args.first() {
+                    let node = *node as usize;
+                    let url = match args.get(1) {
+                        Some(JsValue::String(url)) => Some(url.clone()),
+                        _ => None,
+                    };
+                    let mut queue = queue.borrow_mut();
+                    // Bounds what a page can park between two drains. A
+                    // request that is not kept spends nothing.
+                    if queue.len() >= 256 {
+                        return JsValue::Null;
+                    }
+                    // The frame's `sandbox` attribute for this navigation,
+                    // read here from the document (no script is asked): the
+                    // element's now, or, the first time a markup frame is
+                    // asked for, the parser's. Whatever the request is, the
+                    // parser's is spent by it.
+                    let as_parsed = parsed.borrow_mut().as_mut().and_then(|kept| kept.remove(&node));
+                    let sandbox = match url {
+                        Some(_) => host.borrow().frame_sandbox(node).or(as_parsed),
+                        None => None,
+                    };
+                    // 1: the insertion's blank document, heard by nothing;
+                    // 2: heard by what the page half recorded.
+                    let mode = match args.get(2) {
+                        Some(JsValue::Number(mode)) => *mode as u8,
+                        _ => 0,
+                    };
+                    queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1 });
+                }
+                JsValue::Null
+            }),
+        )?;
+        runtime.evaluate_with_host(include_str!("web_frames.js"))?;
+        Ok(())
+    }
+
+    /// Whether the page has asked something of its frames that
+    /// [`Self::take_frame_requests`] has not taken yet.
+    pub fn has_frame_requests(&self) -> bool {
+        !self.frame_requests.borrow().is_empty()
+    }
+
+    /// The frame requests since the last call, in the order made.
+    pub fn take_frame_requests(&self) -> Vec<FrameRequest> {
+        std::mem::take(&mut *self.frame_requests.borrow_mut())
+    }
+
+    /// Ask this document for its parser's iframes (after the document is
+    /// bound): each becomes a frame request.
+    pub fn scan_frames(&self) -> Result<(), BindingError> {
+        // A turn like any other of the engine's that touches the page's
+        // nodes: it can be interrupted.
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_turn("return __rk.frames ? __rk.frames.scan() : null;", &[])?;
+        Ok(())
+    }
+
+    /// The viewport `node`'s frame gets until layout sizes frames:
+    /// (width, height) in CSS px.
+    pub fn frame_size(&self, node: usize) -> (f64, f64) {
+        let answer = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.size({node}) : '';"), &[]);
+        if let Ok(JsValue::String(size)) = answer {
+            if let Some((w, h)) = size.split_once('x') {
+                if let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) {
+                    return (w, h);
+                }
+            }
+        }
+        (300.0, 150.0)
+    }
+
+    /// Make `child` (a page of this runtime, from [`Self::new_child`]) the
+    /// window of this document's iframe `node`: its `contentWindow` and
+    /// `contentDocument`, and in the child `parent`, `top` and
+    /// `frameElement`. `false` when `node` is no longer a frame here.
+    pub fn attach_frame(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
+        let attached = self.hand_over(node, child);
+        // Whatever happened, nothing stays where the windows changed hands,
+        // and a frame that was not attached holds no window.
+        let clear = "__rk.shared.handoff = null;";
+        if self.runtime.borrow_mut().evaluate_host_bookkeeping(clear).is_err() {
+            let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping(clear);
+        }
+        if !matches!(attached, Ok(true)) {
+            let _ = self
+                .runtime
+                .borrow_mut()
+                .evaluate_host_bookkeeping(&format!("if (__rk.frames) __rk.frames.attach({node}, null);"));
+        }
+        attached
+    }
+
+    /// The three steps of [`Self::attach_frame`]. The two windows change
+    /// hands on the frame tree's shared state, which only the embedder's
+    /// scripts hold: nothing is put on either window for it. Each step
+    /// that takes what was handed over empties the place in a `finally`.
+    fn hand_over(&self, node: usize, child: &DomBindings) -> Result<bool, BindingError> {
+        child.runtime.borrow_mut().evaluate_host_bookkeeping("__rk.shared.handoff = globalThis;")?;
+        let attached = self.runtime.borrow_mut().evaluate_host_bookkeeping(&format!(
+            "var S = __rk.shared, w = S.handoff, h = null; \
+             try {{ h = __rk.frames ? __rk.frames.attach({node}, w) : null; }} finally {{ S.handoff = null; }} \
+             if (h) {{ h.top = __rk.realTop; S.handoff = h; }} \
+             return !!h;"
+        ))?;
+        if !matches!(attached, JsValue::Boolean(true)) {
+            return Ok(false);
+        }
+        let framed = child.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "var S = __rk.shared, h = S.handoff; \
+             try { if (h) __rk.becomeFrame(h.up, h.top, h.el); } finally { S.handoff = null; } \
+             return !!h;",
+        )?;
+        Ok(matches!(framed, JsValue::Boolean(true)))
+    }
+
+    /// Fire `load` at this document's iframe `node` (the child's load is
+    /// done, or a cross-origin frame was left blank).
+    pub fn frame_loaded(&self, node: usize, initial: bool) -> Result<bool, BindingError> {
+        let fired = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.frames ? __rk.frames.loaded({node}, {initial}) : false;"), &[])?;
+        Ok(matches!(fired, JsValue::Boolean(true)))
+    }
+
+    /// End a child made with [`Self::new_child`]: its realm can no longer be
+    /// evaluated in. Objects of it the parent still holds stay alive.
+    pub fn drop_child(&self, child: DomBindings) -> bool {
+        // Its timers are in the tree's queue: they go with it.
+        let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping("if (__rk.dropTimers) __rk.dropTimers();");
+        let realm = child.runtime.realm;
+        drop(child);
+        self.runtime.shared.borrow_mut().drop_realm(realm)
+    }
+
+    /// `lazy` (a child realm): Intl, Streams, Web Animations and the canvas
+    /// 2D context are installed on first use (web_lazy.js), not now.
+    fn build_in(
+        page: PageRuntime,
+        app_bridge: bool,
+        internal_reads: bool,
+        lazy: bool,
+        tree_clock: Option<std::time::Instant>,
+    ) -> Result<Self, BindingError> {
+        let mut entered = page.borrow_mut();
+        let runtime: &mut JsRuntime = &mut entered;
         debug!(app_bridge, "Initializing DOM bindings");
 
         // `window.ipc.postMessage` lands here (CH2.E9), in an app-owned
@@ -1169,6 +2188,13 @@ impl DomBindings {
         // global added after them made every page load measurably slower
         // (two app tests 1.4 s -> 3.0 s).
         runtime.reserve_host_slots(HOST_SLOTS)?;
+        runtime.reserve_shared_slots(SHARED_SLOTS)?;
+        // Promise rejections are announced to the page (`__rk.fireRejection`,
+        // dom.rs): `unhandledrejection` and `rejectionhandled` at the Window.
+        runtime.set_rejection_events(true);
+        // An uncaught exception is announced the same way (`__rk.fireError`):
+        // the `error` event at the Window.
+        runtime.set_error_events(true);
         let ipc_queue = Rc::new(RefCell::new(Vec::new()));
         if app_bridge {
             let queue = Rc::clone(&ipc_queue);
@@ -1187,18 +2213,36 @@ impl DomBindings {
         // ECMAScript members Boa lacks and pages call unguarded (substr, Set methods, ...).
         runtime.evaluate_script(include_str!("web_legacy.js"))?;
         // Inject global objects
-        Self::inject_globals(&mut runtime, app_bridge)?;
+        let clock_origin = Self::inject_globals(&mut *runtime, app_bridge, lazy, tree_clock)?;
+        let read_queue = Rc::new(RefCell::new(Vec::new()));
+        if internal_reads {
+            let queue = Rc::clone(&read_queue);
+            runtime.register_host_function(
+                "__rustkit_app_read",
+                1,
+                Box::new(move |args| {
+                    if let Some(JsValue::String(payload)) = args.first() {
+                        let mut queue = queue.borrow_mut();
+                        if payload.len() <= INTERNAL_READ_MAX_BYTES && queue.len() < INTERNAL_READ_MAX_QUEUED {
+                            queue.push(payload.clone());
+                        }
+                    }
+                    JsValue::Undefined
+                }),
+            )?;
+            runtime.evaluate_with_host(INTERNAL_READS_JS)?;
+        }
         let dom_host = dom::SharedDomHost::default();
         let dirty = Rc::new(DirtyMark::default());
         let mutations = Rc::new(RefCell::new(ScriptMutations::default()));
         let mutation_log = Rc::new(RefCell::new(MutationLog::default()));
-        dom::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
+        dom::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log)?;
         // Event subclasses, geometry types and interface objects pages test with
         // instanceof/typeof; needs the wrappers dom::install just made (web_interfaces.js).
         runtime.evaluate_with_host(include_str!("web_interfaces.js"))?;
         // getBBox, getTotalLength, getPointAtLength on SVG shapes (svg_geometry.rs,
         // web_svg_geometry.js); needs the SVG interfaces node_apis.js made.
-        svg_geometry::install(&mut runtime)?;
+        svg_geometry::install(runtime)?;
         // XMLSerializer (web_xml_serializer.js).
         runtime.evaluate_script(include_str!("web_xml_serializer.js"))?;
         // FileReader over web_blob.js's Blob (web_file_reader.js); an EventTarget.
@@ -1213,7 +2257,7 @@ impl DomBindings {
         // window.matchMedia over the engine's @media evaluator, MediaQueryList with
         // change events after a resize (web_match_media.js); needs MediaQueryList and
         // MediaQueryListEvent from web_interfaces.js.
-        web_match_media::install(&mut runtime)?;
+        web_match_media::install(&mut *runtime)?;
         // customElements and a constructible HTMLElement (web_components.js); wraps the
         // tree and attribute mutators the DOM install just defined.
         runtime.evaluate_with_host(include_str!("web_components.js"))?;
@@ -1235,18 +2279,21 @@ impl DomBindings {
         // execCommand, navigator.clipboard and the user's edit commands over
         // rustkit-dom's TextEditState (dom/editing.js); needs InputEvent.
         let edit = Rc::new(dom::editing::EditContext::default());
-        dom::editing::install(&mut runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
+        dom::editing::install(&mut *runtime, &dom_host, &dirty, &mutations, &mutation_log, &edit)?;
         // history (pushState/replaceState/popstate) and the anchor URL parts;
         // needs the interface objects and window's EventTarget (web_history.js).
         runtime.evaluate_with_host(include_str!("web_history.js"))?;
         // window.scrollTo/scrollBy/scrollX/scrollY, Element.scrollTop/scrollIntoView (web_scroll.js).
         let scroll = web_scroll::SharedScroll::default();
         dom_host.borrow_mut().scroll_state = scroll.clone();
-        web_scroll::install(&mut runtime, &scroll, &dom_host, &dirty)?;
+        web_scroll::install(&mut *runtime, &scroll, &dom_host, &dirty)?;
         // canvas.getContext('2d'), CanvasRenderingContext2D and canvas.width/height,
         // recorded by rustkit-canvas for the engine to paint (web_canvas.js).
         let canvases = web_canvas::SharedCanvases::default();
-        web_canvas::install(&mut runtime, &canvases, &dom_host)?;
+        web_canvas::install(&mut *runtime, &canvases, &dom_host, !lazy)?;
+        // HTMLMediaElement's engine side: load() and canPlayType() (web_media.rs, MEDIA-AVF).
+        let media = web_media::SharedMedia::default();
+        web_media::install(&mut *runtime, &media, &dom_host)?;
         // IntersectionObserver and ResizeObserver that report, over the geometry and
         // scroll state (web_observers_live.js); replace the inert stubs.
         runtime.evaluate_with_host(include_str!("web_observers_live.js"))?;
@@ -1256,7 +2303,7 @@ impl DomBindings {
         // postMessage, MessageChannel/MessagePort, MessageEvent, requestIdleCallback (web_messaging.js).
         runtime.evaluate_with_host(include_str!("web_messaging.js"))?;
         // Dedicated workers: a thread and a runtime each (worker_host.rs, web_worker.js).
-        let workers = worker_host::install(&mut runtime)?;
+        let workers = worker_host::install(&mut *runtime)?;
         // The structured clone algorithm postMessage uses (structured_clone.js).
         runtime.evaluate_script(include_str!("structured_clone.js"))?;
         runtime.evaluate_with_host(include_str!("web_worker.js"))?;
@@ -1264,7 +2311,21 @@ impl DomBindings {
         runtime.evaluate_with_host(include_str!("web_scripts.js"))?;
         // Element.animate(), Animation, KeyframeEffect, document.timeline, getAnimations()
         // over the animation-frame clock; the values go into the inline style (web_animations.js).
-        runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        if lazy {
+            // The four lazily installed interfaces' sources, for web_lazy.js.
+            let sources = serde_json::json!({
+                "intl": include_str!("web_intl.js"),
+                "streams": include_str!("web_streams.js"),
+                "animations": include_str!("web_animations.js"),
+                "canvas": web_canvas::SCRIPT,
+            });
+            runtime.evaluate_script(&format!(
+                "Object.defineProperty(globalThis, '__rustkit_lazy_sources', {{ value: {sources}, configurable: true }});"
+            ))?;
+            runtime.evaluate_with_host(include_str!("web_lazy.js"))?;
+        } else {
+            runtime.evaluate_with_host(include_str!("web_animations.js"))?;
+        }
         // CH3.A7: the engine's own globals (`__rustkit_*`, `__rk*`) stay
         // out of `Object.keys(window)` and for-in, which list none of them
         // in Chromium. They stay configurable: setup scripts redefine some.
@@ -1276,17 +2337,24 @@ impl DomBindings {
              });",
         )?;
 
+        drop(entered);
         Ok(Self {
-            runtime: RefCell::new(runtime),
+            runtime: page,
+            clock_origin,
+            frame_requests: Rc::new(RefCell::new(Vec::new())),
+            frame_sandbox_parsed: Rc::new(RefCell::new(None)),
             window: RefCell::new(WindowState::default()),
             dom_host,
             ipc_queue,
+            read_queue,
+            internal_reads,
             dirty,
             mutations,
             mutation_log,
             scroll,
             edit,
             canvases,
+            media,
             workers,
         })
     }
@@ -1307,6 +2375,28 @@ impl DomBindings {
     /// the engine paints again when it did.
     pub fn take_canvas_painted(&self) -> bool {
         self.canvases.borrow_mut().take_painted()
+    }
+
+    /// MEDIA-AVF: the media elements whose `load()` script called since the last call.
+    pub fn take_media_loads(&self) -> Vec<usize> {
+        std::mem::take(&mut self.media.borrow_mut().loads)
+    }
+
+    /// MEDIA-AVF: what answers `canPlayType` (the engine's AVFoundation check).
+    pub fn set_media_can_play(&self, can_play: Option<MediaCanPlay>) {
+        self.media.borrow_mut().can_play = can_play;
+    }
+
+    /// MEDIA-AVF: set media element `node`'s state to `state` (JSON, when given) and
+    /// then fire `event` (when given) at it, trusted. The state is what its getters read
+    /// (dom.rs `__rk.mediaEvent`).
+    pub fn fire_media_event(&self, node: usize, event: Option<&str>, state: Option<&str>) -> Result<(), BindingError> {
+        let event = event.unwrap_or("");
+        let state = state.unwrap_or("");
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.mediaEvent({node}, __a[0] || null, __a[1] || null);"), &[event, state])?;
+        Ok(())
     }
 
     /// The text shaper `measureText` and canvas text use (the engine's).
@@ -1332,8 +2422,17 @@ impl DomBindings {
         // they do not make a geometry read lay the page out.
         if bucket != DomDirty::Clean {
             self.dirty.beyond_animation_layer.set(true);
+            self.dirty.note_unlogged();
         }
         self.dirty.bucket.set(self.dirty.get().max(bucket));
+    }
+
+    /// Whether the invalidation pending (until `take_dirty`) holds a mark with no `MutationLog`
+    /// record behind it: a sheet adopted or disabled, a write the log does not record, Web
+    /// Animations' layer, or a `mark_dirty` from the embedder. Read before `take_dirty`. A dirty
+    /// set computed from the log alone is then not the whole of what changed (LPF1).
+    pub fn dirty_unlogged(&self) -> bool {
+        self.dirty.unlogged()
     }
 
     /// Whether the invalidation pending (until `take_dirty`) holds anything
@@ -1415,7 +2514,7 @@ impl DomBindings {
     pub fn blob_url_text(&self, url: &str) -> Option<String> {
         // The host's store, read in Rust: no script runs, so nothing of
         // the page's can be on this path.
-        let bytes = self.runtime.borrow().blob_bytes(url)?;
+        let bytes = self.runtime.borrow().blob_bytes(self.runtime.realm, url)?;
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -1575,7 +2674,12 @@ impl DomBindings {
     }
 
     /// Inject global JavaScript objects.
-    fn inject_globals(runtime: &mut JsRuntime, app_bridge: bool) -> Result<(), BindingError> {
+    fn inject_globals(
+        runtime: &mut JsRuntime,
+        app_bridge: bool,
+        lazy: bool,
+        tree_clock: Option<std::time::Instant>,
+    ) -> Result<std::time::Instant, BindingError> {
         // Window object stub. `window` IS the global object, as in every
         // browser: page bundles write `window.x = ...` and read bare `x`
         // (webpack's `self.webpackChunk*`), and that only works if the two
@@ -1654,7 +2758,10 @@ impl DomBindings {
         runtime.evaluate_script(&window_js.replace("__NAVIGATOR_PLATFORM__", NAVIGATOR_PLATFORM))?;
 
         // The monotonic clock behind `performance.now()` (STR-9), before web_platform.js reads it.
-        let time_origin = std::time::Instant::now(); // this page's time origin
+        // It counts from here for a page, and for a frame's realm from where its page's does: one
+        // clock for the tree, which the page clock (PAGE_LIFECYCLE_JS) reads from each document's
+        // own origin.
+        let time_origin = tree_clock.unwrap_or_else(std::time::Instant::now);
         runtime.register_host_function(
             "__rustkit_now_ms",
             0,
@@ -1685,13 +2792,16 @@ impl DomBindings {
         // btoa/atob, escape/unescape, TextEncoder/TextDecoder (web_encoding.js).
         runtime.evaluate_with_host(include_str!("web_encoding.js"))?;
 
-        // ReadableStream, WritableStream, TransformStream and strategies (web_streams.js).
-        runtime.evaluate_with_host(include_str!("web_streams.js"))?;
-
-        // Intl (en-US only) and the toLocale*String methods over it (web_intl.js),
-        // with CLDR's likely subtags behind Intl.Locale's maximize()/minimize().
+        // ReadableStream, WritableStream, TransformStream and strategies
+        // (web_streams.js), and Intl (en-US only) with the toLocale*String
+        // methods over it (web_intl.js), with CLDR's likely subtags behind
+        // Intl.Locale's maximize()/minimize(): a child realm installs the
+        // scripts on first use (web_lazy.js); the lookup is there for it.
         web_intl_likely::install(runtime)?;
-        runtime.evaluate_script(include_str!("web_intl.js"))?;
+        if !lazy {
+            runtime.evaluate_with_host(include_str!("web_streams.js"))?;
+            runtime.evaluate_with_host(include_str!("web_intl.js"))?;
+        }
 
         // IPC bridge for communication with Rust: the app's own documents
         // only (CH3.A7). A web page gets none of it, as in Chromium.
@@ -2041,7 +3151,7 @@ impl DomBindings {
         runtime.evaluate_with_host(PAGE_LIFECYCLE_JS)?;
 
         debug!("Global objects injected");
-        Ok(())
+        Ok(time_origin)
     }
 
     /// Install the selector matcher `querySelector`, `querySelectorAll`,
@@ -2131,6 +3241,14 @@ impl DomBindings {
         self.dom_host.borrow_mut().has_rules = probe;
     }
 
+    /// Whether some rule of the page's sheets reads the `style` attribute or uses `:has()`,
+    /// asked when an inline style write changes only paint properties: with one, the write can
+    /// change which rules match, and a geometry read after it lays the page out (TREE-REUSE
+    /// step (2)). Without a probe the answer is yes.
+    pub fn set_style_attr_rules_probe(&self, probe: Option<std::rc::Rc<dyn Fn() -> bool>>) {
+        self.dom_host.borrow_mut().style_attr_rules = probe;
+    }
+
     /// How many times a source from `set_geometry_source` was built.
     pub fn geometry_builds(&self) -> u64 {
         self.dom_host.borrow().geometry_builds
@@ -2163,6 +3281,15 @@ impl DomBindings {
             Ok(JsValue::Number(n)) if n >= 0.0 => n as usize,
             _ => 0,
         }
+    }
+
+    /// Whether a resize observation is held for an animation frame (REPORT-CHART-0x0): it is
+    /// delivered after that frame's callbacks.
+    pub fn resize_held(&self) -> bool {
+        matches!(
+            self.host_turn("return typeof __rk.resizeHeld === 'function' && __rk.resizeHeld();", &[]),
+            Ok(JsValue::Boolean(true))
+        )
     }
 
     /// Tell the page its window was scrolled by the user: fires `scroll`.
@@ -2212,6 +3339,10 @@ impl DomBindings {
         // Rebind the DOM wrappers. Wrappers handed out for a previous
         // document stop resolving (their generation no longer matches).
         let generation = self.dom_host.borrow_mut().bind(document);
+        // With frames on: the new document's iframes' `sandbox` as parsed.
+        if let Some(kept) = self.frame_sandbox_parsed.borrow_mut().as_mut() {
+            *kept = self.dom_host.borrow().frames_with_sandbox();
+        }
         self.canvases.borrow_mut().clear();
         runtime.evaluate_host_turn(&format!("return __rk.domReset({generation});"), &[])?;
 
@@ -2226,9 +3357,14 @@ impl DomBindings {
         // Update state
         self.window.borrow_mut().location = location.clone();
         self.canvases.borrow_mut().origin = Some(url.origin());
+        // The file an `error` event names for code with no script of its own.
+        self.runtime.borrow_mut().set_document_url(url.as_str());
 
         // Sync to JS
         let mut runtime = self.runtime.borrow_mut();
+        // The origin the blob store keeps for this document: the engine's,
+        // not what script can read or write on `location`.
+        runtime.set_realm_origin(self.runtime.realm, &location.origin);
         runtime.evaluate_host_turn(&format!(
             r#"
             if (__rk.locationSync) __rk.locationSync({:?});
@@ -2300,6 +3436,28 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_script(script)
             .map_err(Into::into)
+    }
+
+    /// Evaluate `script` as a script of the page's own (unnamed), not as
+    /// the host's: what it rejects is announced to the page, and an error
+    /// raised for its calls is its own. For tests whose script stands for a
+    /// page's; a host's script goes through [`Self::evaluate`], and a
+    /// page's real scripts through [`Self::evaluate_named`].
+    #[doc(hidden)]
+    pub fn evaluate_as_page_script(&self, script: &str) -> Result<JsValue, BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_document_script(script)
+            .map_err(Into::into)
+    }
+
+    /// Say what the page script evaluated as `name` is (see
+    /// [`JsRuntime::register_script`]): the script at `url`, and whether
+    /// its errors are reported to the page without detail. An `error`
+    /// event for an exception thrown in a script never registered carries
+    /// no detail.
+    pub fn register_script(&self, name: &str, url: &str, muted: bool) {
+        self.runtime.borrow_mut().register_script(name, url, muted);
     }
 
     /// Evaluate a page script as `path` (see
@@ -2476,6 +3634,7 @@ impl DomBindings {
     /// bubble). Listener exceptions are queued, see
     /// [`Self::take_reported_errors`].
     pub fn fire_image_error(&self, node: usize) -> Result<(), BindingError> {
+        self.canvases.borrow_mut().loaded.remove(&node);
         self.runtime.borrow_mut().evaluate_host_turn(&format!(
             "return __rk.imageFailed({node});"
         ), &[])?;
@@ -2490,6 +3649,13 @@ impl DomBindings {
     /// `load` fires at it (it does not bubble). Listener exceptions are
     /// queued, see [`Self::take_reported_errors`].
     pub fn fire_image_load(&self, node: usize, width: u32, height: u32, url: &str) -> Result<(), BindingError> {
+        // The engine's own record of the element's image, which a canvas
+        // draws from (web_canvas.rs): kept before any listener runs.
+        if let Some((src, srcset)) = self.dom_host.borrow().img_sources(node) {
+            // No URL: a `data:` image, which is its own `src`.
+            let url = if url.is_empty() { src.clone().unwrap_or_default() } else { url.to_string() };
+            self.canvases.borrow_mut().loaded.insert(node, web_canvas::LoadedImage { src, srcset, url, width, height });
+        }
         // The URL is an argument, never script source (`fire_key_event`).
         self.runtime
             .borrow_mut()
@@ -2830,9 +3996,25 @@ impl DomBindings {
         self.runtime.borrow_mut().take_dynamic_import_failures()
     }
 
-    /// Supply one requested module's source, or why there is none.
+    /// Supply one requested module's source, or why there is none. The
+    /// module is registered as the script it is ([`Self::register_script`]):
+    /// reported in full only when the URL asked for and the URL it was
+    /// served from are both of this document's origin.
     pub fn supply_module(&self, requested: &str, outcome: Result<rustkit_js::FetchedModule, String>) {
+        if let Ok(fetched) = &outcome {
+            let document = self.document_url();
+            let muted = match (Url::parse(requested), Url::parse(&fetched.final_url)) {
+                (Ok(asked), Ok(landed)) => script_without_detail(document.as_ref(), [&asked], &landed),
+                _ => true,
+            };
+            self.register_script(&fetched.final_url, &fetched.final_url, muted);
+        }
         self.runtime.borrow_mut().supply_module(requested, outcome);
+    }
+
+    /// This document's URL, as [`Self::set_location`] last gave it.
+    pub fn document_url(&self) -> Option<Url> {
+        Url::parse(&self.window.borrow().location.href).ok()
     }
 
     /// Advance a started module and say where it is.
@@ -2889,6 +4071,24 @@ impl DomBindings {
             _ => 0,
         })
     }
+    /// Capture mode: the page clock is the virtual clock plus a fixed small step per read, with
+    /// no real time in it, so a capture that steps the timers reproduces every `t`-driven frame.
+    /// Stamp every animation frame with its exact grid time (a load-only capture): script
+    /// animations then read the same times every run. The page clock still flows.
+    pub fn set_grid_frame_stamps(&self, on: bool) {
+        let _ = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setGridStamps({on});"));
+    }
+
+    pub fn set_deterministic_clock(&self, on: bool) {
+        let _ = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setDetClock({on});"));
+    }
+
 
     /// Run the page's timers on the virtual clock up to `horizon_ms`, at
     /// most `max_callbacks` of them. Returns how many ran.
@@ -2957,9 +4157,48 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, false, 0.0)
+    }
+
+    /// [`Self::advance_timers_for_frame`] for a live turn on the real clock:
+    /// `delta_ms` is real time that has passed, so a timer due inside it was
+    /// held back, and one set during the turn (a chain's next link, an
+    /// interval's next run) counts from the turn's time, not from the due
+    /// time of the callback that set it (CLOCK3).
+    pub fn advance_real_timers_for_frame(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true, 0.0)
+    }
+
+    /// [`Self::advance_real_timers_for_frame`] for a turn that has already run `before_ms` of
+    /// real time before its timers (a resize's layout, a parked `load`): the turn's time is its
+    /// instant, `delta_ms` after the last turn's, not when its timers begin.
+    pub fn advance_real_timers_for_frame_since(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+        before_ms: f64,
+    ) -> Result<(u32, bool), BindingError> {
+        let before = if before_ms.is_finite() && before_ms > 0.0 { before_ms } else { 0.0 };
+        self.advance_timers_framed(delta_ms, max_callbacks, frame_ms, true, before)
+    }
+
+    fn advance_timers_framed(
+        &self,
+        delta_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+        real: bool,
+        before_ms: f64,
+    ) -> Result<(u32, bool), BindingError> {
         let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
-            "return __rk.advanceTimersFramed({}, {}, {})",
-            delta_ms, max_callbacks, frame_ms
+            "return __rk.advanceTimersFramed({}, {}, {}, {}, {})",
+            delta_ms, max_callbacks, frame_ms, real, before_ms
         ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
@@ -2970,6 +4209,63 @@ impl DomBindings {
 
     /// The page's virtual clock, in ms: what its timers and animation
     /// frames have run up to. The engine's CSS transitions run on it.
+    /// Run the animation-frame callbacks that are due (a turn's round),
+    /// at most `max` of them. Returns how many ran.
+    pub fn run_animation_round(&self, max: u32) -> Result<u32, BindingError> {
+        let ran = self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_turn(&format!("return __rk.animationRound({max});"), &[])?;
+        Ok(match ran {
+            JsValue::Number(n) => n as u32,
+            _ => 0,
+        })
+    }
+
+    /// A frame tree's live turn opens (`true`) or closes (`false`): while it is open the
+    /// animation-frame callbacks run in one round, however many calls run the turn's parts
+    /// (RAF-ONE-ROUND).
+    /// One animation round a turn is on for this view's frame tree: a round a late turn runs is
+    /// the frame of the turn's time (CLOCK-AT-PRESENT).
+    pub fn set_one_round(&self, on: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.setOneRound({on}); return 0;"))?;
+        Ok(())
+    }
+
+    /// The time of the frame a turn `delta_ms` on will run, on the tree's clock, when an
+    /// animation frame callback is due by then (ANIM-UPDATE-ORDER; `__rk.turnFrameAt`).
+    pub fn turn_frame_at(&self, delta_ms: u64) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("return __rk.turnFrameAt({delta_ms});"))
+        {
+            Ok(JsValue::Number(n)) if n.is_finite() && n >= 0.0 => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn set_tree_turn(&self, open: bool) -> Result<(), BindingError> {
+        self.runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping(&format!("__rk.treeTurn({open}); return 0;"))?;
+        Ok(())
+    }
+
+    /// The document timeline's time on the tree's clock (`__rk.animationNow`): the clock the
+    /// engine's CSS animations and transitions run on (TIMELINE2). The timers' clock where the
+    /// page clock is not installed.
+    pub fn animation_clock_ms(&self) -> f64 {
+        match self.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "return typeof __rk.animationNow === 'function' ? __rk.animationNow() : __rk.now()",
+        ) {
+            Ok(JsValue::Number(n)) if n.is_finite() => n,
+            _ => 0.0,
+        }
+    }
+
     pub fn clock_now_ms(&self) -> f64 {
         match self
             .runtime
@@ -3031,7 +4327,25 @@ impl DomBindings {
             .borrow_mut()
             .evaluate_host_bookkeeping("return __rk.nextTimer()")
         {
-            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n as u64),
+            // Rounded up: a timer set in a real turn is due at a fraction of a millisecond, and a
+            // loop that waits the delay must find it due (LINKS-SLOW). Truncated, the loop woke
+            // a fraction early and the rest became its 2 ms floor: ~2 ms late every link.
+            Ok(JsValue::Number(n)) if n >= 0.0 => Some(n.ceil() as u64),
+            _ => None,
+        }
+    }
+
+    /// [`Self::next_timer_delay`] with its fraction of a millisecond (LINKS-SLOW): a timer set in a
+    /// real turn is due at a fraction, and the content loop aims its wake at that instant. Timers
+    /// only: an animation frame lands on the 60 Hz grid, and the loop's whole-millisecond wait
+    /// serves it (LINKS-SLOW part 2 R1: an exact wait ends in a blocking tail).
+    pub fn next_timer_delay_exact(&self) -> Option<f64> {
+        match self
+            .runtime
+            .borrow_mut()
+            .evaluate_host_bookkeeping("return __rk.nextTimer(true)")
+        {
+            Ok(JsValue::Number(n)) if n >= 0.0 && n.is_finite() => Some(n),
             _ => None,
         }
     }
@@ -3050,6 +4364,18 @@ impl DomBindings {
     /// Returns a Vec of IpcMessage structs.
     pub fn drain_ipc_queue(&self) -> Vec<IpcMessage> {
         std::mem::take(&mut *self.ipc_queue.borrow_mut())
+    }
+
+    /// What an internal page ([`Self::new_internal_page`]) posted with
+    /// `window.ipc.postMessage` since the last call. Empty for any other
+    /// document.
+    pub fn drain_internal_reads(&self) -> Vec<String> {
+        std::mem::take(&mut *self.read_queue.borrow_mut())
+    }
+
+    /// Whether these bindings were built by [`Self::new_internal_page`].
+    pub fn is_internal_page(&self) -> bool {
+        self.internal_reads
     }
 
     /// Check if there are pending IPC messages.
@@ -3660,6 +4986,7 @@ mod tests {
     fn the_unsupported_list_matches_the_reporting_scripts() {
         let sources = [
             include_str!("web_xhr.js"),
+            include_str!("web_url.js"),
             include_str!("web_components.js"),
             include_str!("web_streams.js"),
             include_str!("web_named_access.js"),
@@ -3868,13 +5195,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bindings.advance_timers(600, 1000).unwrap(), 1);
-        // The callback is told the time of the frame it runs in.
-        assert_eq!(read("stamps.join(',')"), "600");
-        // The loop asked for the frame after this one.
-        assert_eq!(bindings.next_timer_delay(), Some(16));
-        assert_eq!(bindings.advance_timers(10, 1000).unwrap(), 0);
-        assert_eq!(bindings.advance_timers(6, 1000).unwrap(), 1);
-        assert_eq!(read("stamps.join(',')"), "600,616");
+        // The callback is told its frame's grid time however late the long task ran it, on
+        // performance.now()'s clock: the grid point 17 plus the real time since the virtual clock
+        // moved. Chrome (CfT 148.0.7778.216, `frame_stamp_probe_cft148.json`, "longFirst", five
+        // runs): a frame asked for just before a 600 ms task runs 600 ms on, stamped -15.6 to
+        // +0.7 ms from the request. It was stamped 600 here, the turn's time.
+        assert_eq!(read("String(stamps.length)"), "1");
+        assert_eq!(read("String(stamps[0] >= 17 && stamps[0] < 100)"), "true");
+        // The loop asked, from that frame 35 frames late, for the frame of the turn's time: grid
+        // point 600, due already, so it runs on the next turn (TIMELINE1, Chrome
+        // `timeline_probe_cft148.json` "held": a frame run ~85 ms late asks for the grid point at
+        // or before its time, T0 + 100, not the one after). It was the next point after 600, 617.
+        assert_eq!(bindings.next_timer_delay(), Some(0));
+        assert_eq!(bindings.advance_timers(17, 1000).unwrap(), 1);
+        assert_eq!(read("String(stamps.length)"), "2");
+        assert_eq!(read("String(stamps[1] >= 600 && stamps[1] < 700)"), "true");
 
         // The turn's timers all run, and before its frame; a frame one of
         // them asks for is in the turn's round.
@@ -3905,19 +5240,22 @@ mod tests {
             .unwrap();
         bindings.advance_timers(1000, 1000).unwrap();
         assert_eq!(read("log.join(',')"), "a");
-        bindings.advance_timers(16, 1000).unwrap();
+        // The next grid point is at most 17 ms on.
+        bindings.advance_timers(17, 1000).unwrap();
         assert_eq!(read("log.join(',')"), "a,c");
     }
 
     /// The load's clock is virtual and has no frames of its own: a
-    /// `requestAnimationFrame` loop there is a 16 ms timer, as before.
+    /// `requestAnimationFrame` loop there is a timer due at each point of the
+    /// 60 Hz frame grid (17, 34, 50, ... 150: nine in 160 ms; ten when it was
+    /// a 16 ms timer).
     #[test]
-    fn the_load_clock_still_runs_animation_frames_as_16ms_timers() {
+    fn the_load_clock_runs_animation_frames_as_timers_on_the_frame_grid() {
         let bindings = DomBindings::new(JsRuntime::new().unwrap()).unwrap();
         bindings
             .evaluate("var n = 0; function loop() { n++; requestAnimationFrame(loop); } requestAnimationFrame(loop);")
             .unwrap();
-        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 10);
+        assert_eq!(bindings.run_timers(160, 1000).unwrap(), 9);
     }
 
     #[test]
@@ -3987,7 +5325,7 @@ mod tests {
         d.laid_out();
         assert!(!d.needs_layout_for("computed_style"), "a layout publishes the layer");
         // A seen write afterwards forces every read again.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.needs_layout_for("offset"));
         assert_eq!(d.cause(), Some("text"));
     }
@@ -4006,7 +5344,7 @@ mod tests {
         // A write the published layout cannot see (display:none subtree)
         // still changes the DOM the engine lays out next: it is beyond the
         // layer, so the paint-only frame is not taken.
-        d.mark_unseen(DomDirty::Style);
+        d.mark_unseen(DomDirty::Style, Logged::Yes);
         assert!(d.beyond_animation_layer(), "an unseen write is beyond the layer");
         assert_eq!(d.cause(), Some("animation"), "it does not rename the first cause");
         assert_eq!(d.take(), DomDirty::Style);
@@ -4014,7 +5352,7 @@ mod tests {
 
         // Unseen first, on a current layout: no forced layout, but beyond.
         let d = DirtyMark::default();
-        d.mark_unseen(DomDirty::Layout);
+        d.mark_unseen(DomDirty::Layout, Logged::Yes);
         assert!(!d.written_since_layout(), "a read needs no forced layout");
         assert_eq!(d.cause(), None);
         assert!(d.beyond_animation_layer());
@@ -4023,14 +5361,14 @@ mod tests {
         // not a write, seen or unseen.
         let d = DirtyMark::default();
         d.mark_animation_layer(DomDirty::Layout, "animation");
-        d.mark(DomDirty::Clean, "style");
-        d.mark_unseen(DomDirty::Clean);
+        d.mark(DomDirty::Clean, "style", Logged::Yes);
+        d.mark_unseen(DomDirty::Clean, Logged::Yes);
         assert!(!d.beyond_animation_layer(), "a no-op write leaves the paint-only frame alone");
         assert_eq!(d.cause(), Some("animation"));
         assert_eq!(d.get(), DomDirty::Layout);
 
         // A real seen write after the layer: beyond, cause kept as first.
-        d.mark(DomDirty::Layout, "text");
+        d.mark(DomDirty::Layout, "text", Logged::Yes);
         assert!(d.beyond_animation_layer());
         assert_eq!(d.cause(), Some("animation"));
     }

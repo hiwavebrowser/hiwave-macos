@@ -1,0 +1,37 @@
+[
+ {
+  "frames": 181,
+  "timers": 281,
+  "wallMs": 3005,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "frames": 180,
+  "timers": 282,
+  "wallMs": 3001,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "frames": 181,
+  "timers": 281,
+  "wallMs": 3009,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "frames": 180,
+  "timers": 283,
+  "wallMs": 3003,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ },
+ {
+  "frames": 181,
+  "timers": 283,
+  "wallMs": 3008,
+  "done": true,
+  "version": "Chrome/148.0.7778.216"
+ }
+]

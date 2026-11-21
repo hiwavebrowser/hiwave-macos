@@ -32,7 +32,9 @@
     var create = Object.create, keys = Object.keys, stringify = JSON.stringify, parse = JSON.parse,
         setProto = Object.setPrototypeOf, defineOwn = Object.defineProperty, U8 = Uint8Array,
         text = String, number = Number, TypeErr = TypeError,
-        takeBytes = __rk.takeBytes, base64Encode = __rk.base64Encode, reportError = __rk.reportError;
+        takeBytes = __rk.takeBytes, base64Encode = __rk.base64Encode;
+    // Called on the host object: the realm's `error` event comes first.
+    function reportError(e) { __rk.reportError(e); }
     function bare(o) { return setProto(o, null); }
     // The queue is a table of the engine's own: slots 0..queued-1 in the
     // order the requests were made, written and read by index here and

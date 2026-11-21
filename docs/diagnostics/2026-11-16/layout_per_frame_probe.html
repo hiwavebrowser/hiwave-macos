@@ -1,0 +1,28 @@
+<!doctype html><title>layout per frame probe</title><style>body{margin:0}#stage{position:relative;width:1280px;height:720px;overflow:hidden}
+.t{position:absolute;width:12px;height:12px;background:#08f}</style><div id=stage></div><script>
+// LAYOUT-PER-FRAME: MotionMark Multiply's shape. 11,176 absolutely positioned tiles in a positioned
+// stage (built by script, 98 columns), and an animation-frame loop that writes inline styles on 6
+// tiles a frame for 3000 ms. Arms (#arm=...): tb = transform + background-color, lt = left + top,
+// data = a data-* attribute. Records frames in the window and the callback's own time per frame.
+// Pinned on Chrome for Testing 148.0.7778.216, headless (layout_per_frame_probe_chrome.mjs).
+// When done it sets rec.done.
+var arm = (location.hash.slice(1).split('=')[1]) || 'tb';
+var stage = document.getElementById('stage'), N = 11176;
+for (var i = 0; i < N; i++) { var d = document.createElement('div'); d.className = 't'; d.style.left = ((i % 98) * 13) + 'px'; d.style.top = (Math.floor(i / 98) * 6) + 'px'; stage.appendChild(d); }
+var tiles = document.querySelectorAll('.t');
+window.rec = { arm: arm, frames: 0, gaps: [], done: false };
+var n = 0, start = -1, last = -1;
+function write(el) {
+  if (arm === 'tb') { el.style.transform = 'rotate(' + (n % 360) + 'deg)'; el.style.backgroundColor = 'hsl(' + (n % 360) + ',60%,50%)'; }
+  else if (arm === 'lt') { el.style.left = (n % 1200) + 'px'; el.style.top = (n % 700) + 'px'; }
+  else el.setAttribute('data-n', String(n));
+}
+requestAnimationFrame(function f(t) {
+  if (start < 0) start = t;
+  if (last >= 0) rec.gaps.push(Math.round((t - last) * 10) / 10);
+  last = t; n++;
+  for (var k = 0; k < 6; k++) write(tiles[(n * 7 + k * 1871) % tiles.length]);
+  if (t - start < 3000) { rec.frames++; requestAnimationFrame(f); }
+  else rec.done = true;
+});
+</script>

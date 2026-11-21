@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
 chrome_board.py — the chrome board (CH3.A1): HiWave's own UI pages in RustKit
-vs the oracle Chromium, per page x state x size.
+vs the oracle Chrome, per page x state x size.
 
-    python3 scripts/chrome_board.py --parity-capture target/release/parity-capture
+    PARITY_CHROME_PATH=<pinned Chrome for Testing 148.0.7778.216> \
+        python3 scripts/chrome_board.py --parity-capture target/release/parity-capture
+
+The oracle is the campaign pin (PARITY_CHROME_PATH), required: unset or
+missing is a refusal, and BOARD.md/board.json record the full browser
+version and path the run used.
 
 Builds nothing. For every row of tools/parity_oracle/chrome_fixtures/board.json:
 
@@ -99,6 +104,63 @@ def _node_env() -> Dict[str, str]:
 
 NODE_ENV = _node_env()
 
+# The board's oracle is the campaign pin, Chrome for Testing 148.0.7778.216,
+# the same binary every other oracle uses. Until 2026-11 the board ran with
+# PARITY_CHROME_PATH unset and so scored against Playwright's bundled
+# Chromium 143.0.7499.4; that fallback is now a refusal here and in
+# chrome_board.mjs (getDeterministicLaunchOptions({requirePinned: true})).
+PINNED_CHROME_VERSION = "148.0.7778.216"
+
+
+def probe_chrome_version(path: Path, windows: bool = os.name == "nt") -> Optional[str]:
+    """`<binary> --version` ("Google Chrome for Testing 148.0.7778.216") -> "148.0.7778.216".
+
+    On Windows `chrome.exe --version` prints nothing; Chrome for Testing ships
+    `<version>.manifest` beside chrome.exe, and that names the version instead.
+    The fallback is Windows-only, and two versioned manifests are ambiguous, so
+    they give None (the pin check then refuses rather than guesses).
+    chrome_board.mjs checks browser.version() against the pin on every row either way."""
+    try:
+        proc = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=30)
+        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
+        if match:
+            return match.group(1)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if not windows:
+        return None
+    versions = [m.group(1) for m in (re.fullmatch(r"(\d+\.\d+\.\d+\.\d+)\.manifest", f.name)
+                                     for f in Path(path).parent.glob("*.manifest")) if m]
+    return versions[0] if len(versions) == 1 else None
+
+
+def home_relative(path: Path) -> str:
+    """A path for committed output: under $HOME it is written `~/...` (no user names in the repo)."""
+    try:
+        return "~/" + str(Path(path).resolve().relative_to(Path.home().resolve()))
+    except ValueError:
+        return str(path)
+
+
+def pinned_chrome_path(env: Optional[Dict[str, str]] = None,
+                       version_of: Optional[Callable[[Path], Optional[str]]] = None) -> Path:
+    """PARITY_CHROME_PATH, required, existing, and exactly PINNED_CHROME_VERSION
+    by `--version`; raises BoardError otherwise. chrome_board.mjs's
+    browser.version() is checked again per row in main()."""
+    env = os.environ if env is None else env
+    version_of = version_of or probe_chrome_version
+    raw = env.get("PARITY_CHROME_PATH", "")
+    if not raw:
+        raise BoardError("PARITY_CHROME_PATH not set: the chrome board's oracle is the pinned "
+                         f"Chrome for Testing {PINNED_CHROME_VERSION}, never bundled Chromium")
+    path = Path(raw)
+    if not path.exists():
+        raise BoardError(f"PARITY_CHROME_PATH set but not found: {raw}")
+    version = version_of(path)
+    if version != PINNED_CHROME_VERSION:
+        raise BoardError(f"PARITY_CHROME_PATH is Chrome {version or '?'}, not the pin {PINNED_CHROME_VERSION}")
+    return path
+
 
 # The oracle context freezes transitions, animations and the caret for every
 # campaign capture (baselines/common/parity-freeze.js). The board's states are
@@ -132,6 +194,9 @@ class Row:
     actions_path: Path
     out_dir: Path
     actions: List[Dict[str, Any]] = field(default_factory=list)
+    # The page's `live_ms` (board.json): RustKit turns its live loop this long after the load and
+    # again after the actions, as the Chromium arm waits SETTLE_MS at both points. None: no turn.
+    live_ms: Optional[int] = None
 
     @property
     def size(self) -> str:
@@ -180,17 +245,42 @@ def compose_page(board: Dict[str, Any], page: str, repo_root: Path, work: Path) 
     return out
 
 
-def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None) -> List[Row]:
-    """Every row of the board, refused whole if any case cannot run."""
+def current_platform() -> str:
+    """The board's platform name: "macos", "windows" or "linux"."""
+    if sys.platform == "darwin":
+        return "macos"
+    return "windows" if os.name == "nt" else "linux"
+
+
+def pages_not_shipped(board: Dict[str, Any], repo_root: Path, platform: Optional[str] = None) -> List[str]:
+    """Pages this platform's app does not ship: board.json lists the platform in the
+    page's `not_shipped_on` and its html is absent (hiwave-windows has no Inspector
+    page). They are left out of the plan, so not scored and not green, and the board
+    names them. Any other absent html, and any missing fixture, is still a refusal:
+    a renamed or typo'd path must not drop a page silently."""
+    platform = platform or current_platform()
+    return [page for page, spec in board["pages"].items()
+            if platform in (spec.get("not_shipped_on") or []) and not (repo_root / spec["html"]).exists()]
+
+
+def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str] = None,
+         platform: Optional[str] = None) -> List[Row]:
+    """Every row of the board's shipped pages, refused whole if any case cannot run."""
+    platform = platform or current_platform()
     fixtures_dir = Path(board["_dir"])
+    absent = set(pages_not_shipped(board, repo_root, platform))
+    if only and only in absent:
+        raise BoardError(f"--only {only}: the page is not shipped on {platform} ({board['pages'][only]['html']} absent)")
     problems = []
     if not (fixtures_dir / board["prelude"]).exists():
         problems.append(f"prelude {board['prelude']} missing")
     for page, spec in board["pages"].items():
-        if not (repo_root / spec["html"]).exists():
-            problems.append(f"{page}: html {spec['html']} missing")
         if not (fixtures_dir / spec["fixture"]).exists():
             problems.append(f"{page}: fixture {spec['fixture']} missing")
+        if page in absent:
+            continue
+        if not (repo_root / spec["html"]).exists():
+            problems.append(f"{page}: html {spec['html']} missing")
         for source in (spec.get("inject") or {}).values():
             if not (repo_root / source).exists():
                 problems.append(f"{page}: injection {source} missing")
@@ -202,7 +292,7 @@ def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str]
 
     rows: List[Row] = []
     for page, spec in board["pages"].items():
-        if only and page != only:
+        if (only and page != only) or page in absent:
             continue
         html_path = compose_page(board, page, repo_root, work)
         for state in spec["states"]:
@@ -215,6 +305,7 @@ def plan(board: Dict[str, Any], repo_root: Path, work: Path, only: Optional[str]
                     page=page, state=state, width=int(width), height=int(height),
                     html_path=html_path, actions_path=actions_path,
                     out_dir=work / page / state / f"{width}x{height}", actions=actions,
+                    live_ms=int(spec["live_ms"]) if spec.get("live_ms") is not None else None,
                 ))
     return rows
 
@@ -241,7 +332,7 @@ def rustkit_command(row: Row, binary: Path) -> List[str]:
         "--actions-out-dir", str(row.out_dir),
         "--dump-frame", str(row.out_dir / "rustkit.ppm"),
         "--dump-layout", str(row.out_dir / "rustkit-layout.json"),
-    ]
+    ] + ([] if row.live_ms is None else ["--live-ms", str(row.live_ms), "--actions-live-ms", str(row.live_ms)])
 
 
 def _run(cmd: List[str], timeout: int, cwd: Path = REPO_ROOT) -> Dict[str, Any]:
@@ -361,7 +452,8 @@ def page_properties(html: str) -> List[str]:
     return sorted(names)
 
 
-def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path]) -> Dict[str, Any]:
+def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Optional[Path],
+                     platform: Optional[str] = None) -> Dict[str, Any]:
     if not census_path or not census_path.exists():
         return {"source": None, "pages": {}}
     with open(census_path, encoding="utf-8") as handle:
@@ -369,7 +461,10 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
     red = set(census.get("red", []))
     by_name = {p["name"]: p for p in census.get("properties", [])}
     pages = {}
+    absent = set(pages_not_shipped(board, repo_root, platform))
     for page, spec in board["pages"].items():
+        if page in absent:
+            continue
         declared = page_properties((repo_root / spec["html"]).read_text(encoding="utf-8"))
         hits = []
         for name in declared:
@@ -382,7 +477,7 @@ def census_red_lists(board: Dict[str, Any], repo_root: Path, census_path: Option
     report = Path("trench/chrome/census") / census_path.with_suffix(".md").name
     return {
         "source": census_path.name,
-        "report": str(report) if (repo_root / report).exists() else None,
+        "report": report.as_posix() if (repo_root / report).exists() else None,  # committed: '/' on every OS
         "date": census.get("meta", {}).get("date"),
         "oracle": census.get("meta", {}).get("oracle"),
         "red_total": len(red),
@@ -469,6 +564,26 @@ def sort_key(entry: Dict[str, Any]):
     return (0 if entry["status"] != "ok" else 1, -(pct if pct is not None else 0.0))
 
 
+# The owner's note on the oracle move (2026-11-17), carried in every header so
+# a reader comparing against an older board knows the oracle changed under it.
+ORACLE_HISTORY_NOTE = (
+    "Oracle history: metrics start on 148 from 2026-11-17; earlier rows were measured against "
+    "Chromium 143 (Playwright-bundled 143.0.7499.4, PARITY_CHROME_PATH unset), so a row's change "
+    "across that date may be the oracle, not RustKit."
+)
+
+
+def oracle_text(run: Dict[str, Any]) -> str:
+    """The BOARD.md header's oracle: the full browser version, and whether it
+    came from the pin (PARITY_CHROME_PATH) or, in boards from before the pin,
+    Playwright's bundled Chromium."""
+    version = run.get("chromium") or "?"
+    if not run.get("chromium_path"):
+        return f"Chromium {version} (unpinned, Playwright-bundled)"
+    note = "" if version == run.get("chromium_pinned") else f", NOT the pin {run.get('chromium_pinned')}"
+    return f"Chrome for Testing {version} (PARITY_CHROME_PATH{note})"
+
+
 def write_board(out: Path, board_json: Dict[str, Any]) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "board.json").write_text(json.dumps(board_json, indent=2) + "\n", encoding="utf-8")
@@ -480,8 +595,10 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         "# Chrome board — HiWave's own UI pages, RustKit vs Chromium (CH3.A1)",
         "",
         f"Run: {board_json['run']['at']} · head `{board_json['run']['sha']}` on develop "
-        f"`{board_json['run'].get('base') or '?'}` · oracle Chromium "
-        f"{board_json['run'].get('chromium') or '?'} · parity-capture `{board_json['run']['parity_capture']}`",
+        f"`{board_json['run'].get('base') or '?'}` · oracle {oracle_text(board_json['run'])} "
+        f"· parity-capture `{board_json['run']['parity_capture']}`",
+        "",
+        ORACLE_HISTORY_NOTE,
         "",
         f"Gate (PLAN-z CH0, docs/GATES.md): a row is {gate_text()} "
         "(geometry matching Chrome leaves only rasterisation; a row whose geometry compare did not run "
@@ -489,6 +606,16 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         f"**{len(green)}/{len(rows)} rows green**, {len(scored) - len(green)} over the gate, "
         f"{len(failed)} not scored (a capture failed).",
         "",
+    ]
+    not_shipped = board_json.get("not_shipped") or {}
+    if not_shipped:
+        lines += [
+            "**Not shipped here:** " + ", ".join(f"`{p}` (`{h}` absent)" for p, h in sorted(not_shipped.items()))
+            + ": this platform's app does not ship the page, so its rows are not scored, not green and "
+            "not in the count above.",
+            "",
+        ]
+    lines += [
         "Pixel diff % is pixelmatch over the whole viewport (compare_baseline.mjs). Geometry diffs is "
         "the count of (box, axis) pairs more than 0.5 px from Chrome's rect on the join selector "
         "(layout_oracle_gate.compare_case). Top 3 is the attribution of the diff pixels to elements "
@@ -516,10 +643,18 @@ def write_board(out: Path, board_json: Dict[str, Any]) -> None:
         worst = max(ok, key=lambda r: r["pixel_diff_pct"]) if ok else None
         lines.append(f"| {page} | {len(mine)} | {len(g)} | {worst['state'] + ' ' + worst['size'] if worst else '—'} | "
                      f"{_fmt_pct(worst['pixel_diff_pct'] if worst else None)} |")
+    for page in sorted(not_shipped):
+        lines.append(f"| {page} | 0 | 0 | not shipped here | — |")
     census = board_json.get("census") or {}
     lines += ["", "## CSS census red list per page", ""]
     if census.get("source"):
-        lines.append(f"Census {census.get('date')} (`{census.get('report') or census['source']}`, oracle {census.get('oracle')}): "
+        census_oracle = census.get("oracle") or "?"
+        major = census_oracle.split(".")[0]
+        board_oracle = board_json["run"].get("chromium")
+        other = (f"; NOT this board's oracle ({board_oracle}): the census has not been retaken on it"
+                 if board_oracle and census_oracle != board_oracle else "")
+        lines.append(f"Census: the {census.get('date')} Chromium {major} census "
+                     f"(`{census.get('report') or census['source']}`, oracle {census_oracle}{other}): "
                      f"{census.get('red_total')} red properties. Per page, the red properties the page declares "
                      "(in its `<style>` blocks and `style=` attributes).")
         lines.append("")
@@ -587,7 +722,8 @@ def rescore(path: Path) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture) -> int:
+def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]] = capture,
+         chrome_version: Callable[[Path], Optional[str]] = probe_chrome_version) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parity-capture", help="path to a built parity-capture binary (required unless --rescore)")
     ap.add_argument("--board", default=str(DEFAULT_BOARD))
@@ -613,6 +749,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         if args.report_only:
             return report_only(board, out, Path(args.census) if args.census else latest_census())
         rows = plan(board, REPO_ROOT, work, only=args.only)
+        chrome_path = pinned_chrome_path(version_of=chrome_version)
     except (BoardError, OSError, KeyError, json.JSONDecodeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -627,7 +764,15 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
     chromium_version = None
     for i, row in enumerate(rows, 1):
         result = capture(row, binary)
-        chromium_version = chromium_version or result.get("chromium", {}).get("browser")
+        row_version = result.get("chromium", {}).get("browser")
+        if row_version != PINNED_CHROME_VERSION:
+            # No version at all (the arm failed before launch, or did not
+            # report) is a refusal too: an unverified oracle scores nothing.
+            print(f"refused: {row.case_id} ran on Chrome {row_version or '(no version reported)'}, "
+                  f"not the pin {PINNED_CHROME_VERSION}",
+                  file=sys.stderr)
+            return 2
+        chromium_version = chromium_version or row_version
         entry = summarize(row, result)
         entries.append(entry)
         print(f"[{i}/{len(rows)}] {row.case_id}: {entry['status']} "
@@ -640,6 +785,8 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
             "sha": git_sha(REPO_ROOT),
             "base": git_develop_base(REPO_ROOT),
             "chromium": chromium_version,
+            "chromium_path": home_relative(chrome_path),
+            "chromium_pinned": PINNED_CHROME_VERSION,
             "parity_capture": str(binary),
             "gate_pct": PIXEL_GATE_PCT,
             "gate_geometry_pixel_pct": GEOMETRY_PIXEL_GATE_PCT,
@@ -647,6 +794,7 @@ def main(argv: Optional[List[str]] = None, capture: Callable[..., Dict[str, Any]
         "sizes": board["sizes"],
         "states": {s: board["states"][s] for s in sorted({r.state for r in rows})},
         "rows": entries,
+        "not_shipped": {p: board["pages"][p]["html"] for p in pages_not_shipped(board, REPO_ROOT)},
         "census": census_red_lists(board, REPO_ROOT, census_path),
     }
     write_board(out, board_json)

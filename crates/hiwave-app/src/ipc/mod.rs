@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+// Contains code contributed under MPL-2.0 by an outside contributor; see NOTICE.
 //! IPC (Inter-Process Communication) module for HiWave
 //!
 //! This module handles communication between the JavaScript frontend
@@ -5,7 +7,6 @@
 
 pub mod autofill;
 pub mod commands;
-pub mod inspector_payload;
 
 use serde::{Deserialize, Serialize};
 use serde_json;

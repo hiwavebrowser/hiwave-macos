@@ -40,7 +40,7 @@ nul
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle, real_window, element_diff, inspector and latency)
+# Tools (ignore all except parity_oracle, real_window, element_diff, inspector, latency, stress and media_fixtures)
 tools/*
 !tools/parity_oracle/
 !tools/real_window/
@@ -48,6 +48,7 @@ tools/*
 !tools/inspector/
 !tools/latency/
 !tools/stress/
+!tools/media_fixtures/
 tools/element_diff/out/
 tools/inspector/out/
 tools/real_window/out/
@@ -106,3 +107,7 @@ websuite/captures/*.ppm
 /scratch_*/
 # Batch/agent scratch inside a checkout (batch 24 landed 452 of these by accident).
 /scratch/
+
+# test262 working copy at the commit in trench/test262/PIN. Rebuild with scripts/test262_sync.sh;
+# do not vendor the suite into this repo.
+third_party/test262

@@ -12,6 +12,21 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// HIWAVE PATCH (regex-literal-cache): how many times a regular expression pattern was compiled to
+/// a matcher in this process. Always counted (one relaxed increment next to a pattern compile).
+static REGEXP_COMPILES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn count_regexp_compile() {
+    REGEXP_COMPILES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The number of regular expression pattern compiles so far in this process. Diagnostic and tests.
+#[must_use]
+pub fn regexp_compiles() -> u64 {
+    REGEXP_COMPILES.load(Ordering::Relaxed)
+}
 
 /// Whether the counters are on in this process.
 pub(crate) fn enabled() -> bool {
@@ -173,6 +188,17 @@ fn render(s: &Stats) -> String {
         let _ = writeln!(out, "  {:<20} {kind:<9} {name:<32} {n:>10}", site.name());
     }
     out
+}
+
+/// HIWAVE PATCH (vm-stats): how many times the opcode named `name` ran on this thread; `None`
+/// when the counters are off or no opcode has that name, so a misspelt name never reads as 0. The
+/// report lists only the 40 most run; this answers for any opcode (a test's count).
+pub fn opcode_count(name: &str) -> Option<u64> {
+    if !enabled() {
+        return None;
+    }
+    let byte = (0..=255u8).find(|b| crate::vm::opcode::Opcode::decode(*b).as_str() == name)?;
+    Some(STATS.with(|s| s.borrow().ops[byte as usize]))
 }
 
 /// The counters so far, as text; empty when `RUSTKIT_VM_STATS` is not set.

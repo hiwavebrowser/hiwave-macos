@@ -2,6 +2,7 @@
 name = "css-census"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-or-later"
 description = "CSS property census: parse, computed and effect against the campaign oracle (dev-tools T13)"
 publish = false
 

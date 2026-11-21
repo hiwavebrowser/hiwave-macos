@@ -101,15 +101,30 @@ pub(crate) struct Inner {
     unique_id: u32,
     outer: Option<Scope>,
     index: Cell<u32>,
-    bindings: RefCell<Vec<Binding>>,
+    // HIWAVE PATCH (scope-name-index): the bindings with an index by name.
+    bindings: RefCell<Bindings>,
     function: bool,
     // Has the `this` been accessed/escaped outside the function environment boundary.
     this_escaped: Cell<bool>,
     // HIWAVE PATCH (arrow this): set on the function scope of an arrow function, whose `this`
     // is its enclosing function's.
     arrow: Cell<bool>,
+    // HIWAVE PATCH (eval-var-per-call): the number of non-local bindings when this scope's first
+    // activation started, before a direct eval in any call could add a `var` to it.
+    first_activation: FirstActivation,
 
     context: Rc<ScopeContext>,
+}
+
+/// The binding count a scope's activations start with (`Scope::activation_bindings`). A cache, so it
+/// takes no part in comparing scopes.
+#[derive(Debug, Default)]
+struct FirstActivation(Cell<Option<u32>>);
+
+impl PartialEq for FirstActivation {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Scope {
@@ -125,6 +140,7 @@ impl Scope {
                 function: true,
                 this_escaped: Cell::new(false),
                 arrow: Cell::new(false),
+                first_activation: FirstActivation::default(),
                 context: Rc::default(),
             }),
         }
@@ -141,6 +157,7 @@ impl Scope {
                 function,
                 this_escaped: Cell::new(false),
                 arrow: Cell::new(false),
+                first_activation: FirstActivation::default(),
                 context: parent.inner.context.clone(),
                 outer: Some(parent),
             }),
@@ -177,22 +194,21 @@ impl Scope {
         self.inner
             .bindings
             .borrow()
-            .iter()
-            .find(|b| &b.name == name)
+            .find_name(name)
             .is_some_and(Binding::is_lex)
     }
 
     /// Check if the scope has a binding with the given name.
     #[must_use]
     pub fn has_binding(&self, name: &JsString) -> bool {
-        self.inner.bindings.borrow().iter().any(|b| &b.name == name)
+        self.inner.bindings.borrow().find_name(name).is_some()
     }
 
     /// Get the binding locator for a binding with the given name.
     /// Fall back to the global scope if the binding is not found.
     #[must_use]
     pub fn get_identifier_reference(&self, name: JsString) -> IdentifierReference {
-        if let Some(binding) = self.inner.bindings.borrow().iter().find(|b| b.name == name) {
+        if let Some(binding) = self.inner.bindings.borrow().find_name(&name) {
             IdentifierReference::new(
                 BindingLocator::declarative(
                     name,
@@ -227,6 +243,20 @@ impl Scope {
             .iter()
             .filter(|binding| binding.escapes())
             .count() as u32
+    }
+
+    /// HIWAVE PATCH (eval-var-per-call): how many non-local bindings the scope had when its first
+    /// activation started, before a direct eval in any call could add a `var`. A sloppy direct eval
+    /// adds its `var`s to the scope every call shares, but they belong to the call that ran it; the
+    /// bindings from this count on are eval-added in every later call's environment.
+    #[must_use]
+    pub fn activation_bindings(&self) -> u32 {
+        if let Some(n) = self.inner.first_activation.0.get() {
+            return n;
+        }
+        let n = self.num_bindings_non_local();
+        self.inner.first_activation.0.set(Some(n));
+        n
     }
 
     /// Adjust the binding indices to exclude local bindings.
@@ -277,8 +307,7 @@ impl Scope {
             .inner
             .bindings
             .borrow()
-            .iter()
-            .find(|b| &b.name == name)
+            .find_name(name)
         {
             Some(binding.is_mutable())
         } else if let Some(outer) = &self.inner.outer {
@@ -294,8 +323,7 @@ impl Scope {
         self.inner
             .bindings
             .borrow()
-            .iter()
-            .find(|b| &b.name == name)
+            .find_name(name)
             .map(|binding| {
                 BindingLocator::declarative(
                     name.clone(),
@@ -312,8 +340,7 @@ impl Scope {
         self.inner
             .bindings
             .borrow()
-            .iter()
-            .find(|b| &b.name == name)
+            .find_name(name)
             .map(|binding| {
                 IdentifierReference::new(
                     BindingLocator::declarative(
@@ -340,8 +367,7 @@ impl Scope {
                 .inner
                 .bindings
                 .borrow_mut()
-                .iter_mut()
-                .find(|b| &b.name == name)
+                .find_name_mut(name)
             {
                 binding.flags.insert(BindingFlags::ACCESSED);
                 if crossed_function_border || eval_or_with {
@@ -397,7 +423,7 @@ impl Scope {
     pub fn create_mutable_binding(&self, name: JsString, function_scope: bool) -> BindingLocator {
         let mut bindings = self.inner.bindings.borrow_mut();
         let binding_index = bindings.len() as u32;
-        if let Some(binding) = bindings.iter().find(|b| b.name == name) {
+        if let Some(binding) = bindings.find_name(&name) {
             return BindingLocator::declarative(
                 name,
                 self.inner.index.get(),
@@ -425,7 +451,7 @@ impl Scope {
     #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn create_immutable_binding(&self, name: JsString, strict: bool) {
         let mut bindings = self.inner.bindings.borrow_mut();
-        if bindings.iter().any(|b| b.name == name) {
+        if bindings.find_name(&name).is_some() {
             return;
         }
         let binding_index = bindings.len() as u32;
@@ -448,7 +474,7 @@ impl Scope {
         name: JsString,
     ) -> Result<IdentifierReference, BindingLocatorError> {
         Ok(
-            match self.inner.bindings.borrow().iter().find(|b| b.name == name) {
+            match self.inner.bindings.borrow().find_name(&name) {
                 Some(binding) if binding.is_mutable() => IdentifierReference::new(
                     BindingLocator::declarative(
                         name,
@@ -500,7 +526,7 @@ impl Scope {
         }
 
         Ok(
-            match self.inner.bindings.borrow().iter().find(|b| b.name == name) {
+            match self.inner.bindings.borrow().find_name(&name) {
                 Some(binding) if binding.is_mutable() => IdentifierReference::new(
                     BindingLocator::declarative(
                         name,
@@ -856,5 +882,54 @@ impl<'a> arbitrary::Arbitrary<'a> for FunctionScopes {
             mapped_arguments_object: false,
             requires_function_scope: false,
         })
+    }
+}
+
+/// HIWAVE PATCH (scope-name-index): a scope's bindings in declaration order,
+/// with an index from name to position. Bindings are only ever appended, and a
+/// name is added once (`create_*_binding` return the existing binding), so a
+/// position never changes and the index answers what a scan for the first
+/// binding of that name answered, in constant time instead of a scan per
+/// lookup (a function with thousands of variables parsed and compiled in time
+/// growing with their square).
+#[derive(Debug, Default, PartialEq)]
+struct Bindings {
+    list: Vec<Binding>,
+    by_name: rustc_hash::FxHashMap<JsString, usize>,
+}
+
+impl Bindings {
+    /// The binding of `name`, if this scope has one.
+    fn find_name(&self, name: &JsString) -> Option<&Binding> {
+        self.by_name.get(name).map(|&i| &self.list[i])
+    }
+
+    /// The binding of `name`, if this scope has one, to change its flags.
+    fn find_name_mut(&mut self, name: &JsString) -> Option<&mut Binding> {
+        match self.by_name.get(name) {
+            Some(&i) => Some(&mut self.list[i]),
+            None => None,
+        }
+    }
+
+    /// Append `binding`. The first binding of a name keeps the index entry,
+    /// as a scan would find it first.
+    fn push(&mut self, binding: Binding) {
+        self.by_name.entry(binding.name.clone()).or_insert(self.list.len());
+        self.list.push(binding);
+    }
+}
+
+impl std::ops::Deref for Bindings {
+    type Target = [Binding];
+    fn deref(&self) -> &[Binding] {
+        &self.list
+    }
+}
+
+impl std::ops::DerefMut for Bindings {
+    // Changes flags and indices of bindings in place; never their names or order.
+    fn deref_mut(&mut self) -> &mut [Binding] {
+        &mut self.list
     }
 }

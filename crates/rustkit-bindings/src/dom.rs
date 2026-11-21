@@ -341,6 +341,14 @@ pub(crate) struct DomHost {
     /// rule index), so a write deep in a subtree can restyle an ancestor.
     /// `None` until the engine installs it: assumed yes.
     pub(crate) has_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// Whether some rule of the page's sheets reads the `style` attribute (`[style*=..]`) or
+    /// uses `:has()` (the engine's rule index), so an inline style write can change which rules
+    /// match. `None` until the engine installs it: assumed yes (TREE-REUSE step (2)).
+    pub(crate) style_attr_rules: Option<Rc<dyn Fn() -> bool>>,
+    /// NATIVE-SETPROPERTY: each element's inline declarations as last parsed, with the attribute text
+    /// they were parsed from (`style_decls`). A pure function of the text, so an entry is right for any
+    /// element whose attribute holds that text; at most `STYLE_DECLS_KEPT` are kept.
+    style_cache: RefCell<HashMap<usize, (String, Rc<Vec<crate::inline_style::Decl>>)>>,
     /// Whether a read since the count was taken answered from the last
     /// layout instead (budget spent, or the build state busy): logged once.
     forced_declined: bool,
@@ -410,7 +418,38 @@ pub(crate) struct DomHost {
 
 pub(crate) type SharedDomHost = Rc<RefCell<DomHost>>;
 
+/// How many elements' inline declarations `DomHost::style_decls` keeps (then it starts again).
+const STYLE_DECLS_KEPT: usize = 4096;
+
 impl DomHost {
+    /// The inline declarations of element `node` whose `style` attribute is `text`: parsed once per
+    /// text, then kept (NATIVE-SETPROPERTY; `inline_style::parse_decls`).
+    pub(crate) fn style_decls(&self, node: usize, text: &str) -> Rc<Vec<crate::inline_style::Decl>> {
+        let mut cache = self.style_cache.borrow_mut();
+        if let Some((kept, decls)) = cache.get(&node) {
+            if kept == text {
+                return decls.clone();
+            }
+        }
+        let decls = Rc::new(crate::inline_style::parse_decls(text));
+        if cache.len() >= STYLE_DECLS_KEPT {
+            cache.clear();
+        }
+        cache.insert(node, (text.to_string(), decls.clone()));
+        decls
+    }
+
+    /// Keep `decls` as element `node`'s declarations for attribute text `text`, which a native write is
+    /// about to write: only a list that reads back from `text` as itself
+    /// (`inline_style::reads_back_as_itself`).
+    pub(crate) fn keep_style_decls(&self, node: usize, text: &str, decls: Vec<crate::inline_style::Decl>) {
+        let mut cache = self.style_cache.borrow_mut();
+        if cache.len() >= STYLE_DECLS_KEPT {
+            cache.clear();
+        }
+        cache.insert(node, (text.to_string(), Rc::new(decls)));
+    }
+
     /// Build the geometry and computed styles from the pending source, if
     /// the layout changed since script last read them.
     pub(crate) fn ensure_geometry(&mut self) {
@@ -559,10 +598,11 @@ impl DomHost {
         if !dirty.needs_layout_for(read) {
             return;
         }
-        // Only a paint-layer write (LAT7c) is pending: Web Animations'.
+        // Only a paint write is pending: an inline style's (TREE-REUSE step (2)), which names
+        // itself, or Web Animations' layer (LAT7c), which does not.
         let cause = match dirty.written_since_layout() {
             true => dirty.cause().unwrap_or("other"),
-            false => "animation",
+            false => dirty.cause().unwrap_or("animation"),
         };
         let forced = {
             let mut h = host.borrow_mut();
@@ -778,6 +818,37 @@ impl DomHost {
     /// if it is in the bound document.
     pub(crate) fn node_of(host: &SharedDomHost, args: &[JsValue]) -> Option<usize> {
         host.borrow().node(args).map(|n| n.id.raw())
+    }
+
+    /// The `src` and `srcset` attributes of the bound document's node
+    /// `node` as they are now, when it is an `<img>` element.
+    pub(crate) fn img_sources(&self, node: usize) -> Option<(Option<String>, Option<String>)> {
+        let node = self.document.as_ref()?.get_node(NodeId::new(node))?;
+        if !node.tag_name().is_some_and(|tag| tag.eq_ignore_ascii_case("img")) {
+            return None;
+        }
+        Some((node.get_attribute("src").map(str::to_string), node.get_attribute("srcset").map(str::to_string)))
+    }
+
+    /// The `sandbox` attribute of the bound document's node `node`, as it
+    /// is now (`None`: no such attribute, or no such node).
+    pub(crate) fn frame_sandbox(&self, node: usize) -> Option<String> {
+        let node = self.document.as_ref()?.get_node(NodeId::new(node))?;
+        node.get_attribute("sandbox").map(str::to_string)
+    }
+
+    /// The bound document's iframes that have a `sandbox` attribute, with
+    /// its value, by NodeId.
+    pub(crate) fn frames_with_sandbox(&self) -> HashMap<usize, String> {
+        let mut found = HashMap::new();
+        if let Some(document) = &self.document {
+            for frame in document.get_elements_by_tag_name("iframe") {
+                if let Some(value) = frame.get_attribute("sandbox") {
+                    found.insert(frame.id.raw(), value.to_string());
+                }
+            }
+        }
+        found
     }
 
     /// The node named by `args[0]` (generation) and `args[1]` (NodeId).
@@ -1447,15 +1518,81 @@ enum Reach {
     /// script settles (the bucket and the mutation log are kept), so what
     /// it builds next is the same; only the read in between is spared.
     Unseen,
+    /// TREE-REUSE step (2): an inline `style` write that changed only paint properties
+    /// (`paint_style_reads`, the read bits it carries). No box moves: only a read that sees
+    /// the values (`getComputedStyle`, and a hit test after `opacity`) lays the page out.
+    Paint(u8),
 }
 
 impl Reach {
-    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str) {
+    fn mark(self, dirty: &crate::DirtyMark, bucket: DomDirty, cause: &'static str, logged: crate::Logged) {
         match self {
-            Reach::Seen => dirty.mark(bucket, cause),
-            Reach::Unseen => dirty.mark_unseen(bucket),
+            Reach::Seen => dirty.mark(bucket, cause, logged),
+            Reach::Unseen => dirty.mark_unseen(bucket, logged),
+            Reach::Paint(reads) => dirty.mark_paint_style(bucket, cause, reads, logged),
         }
     }
+}
+
+/// Inline style properties a change of which moves no box (TREE-REUSE step (2)), with the reads
+/// that see the change beyond `getComputedStyle`. Longhands and the one colour shorthand only:
+/// `background` and `border` also set what lays out.
+const PAINT_STYLE_PROPERTIES: &[(&str, u8)] = &[
+    ("color", crate::LAYER_PAINT),
+    ("background-color", crate::LAYER_PAINT),
+    ("border-color", crate::LAYER_PAINT),
+    ("border-top-color", crate::LAYER_PAINT),
+    ("border-right-color", crate::LAYER_PAINT),
+    ("border-bottom-color", crate::LAYER_PAINT),
+    ("border-left-color", crate::LAYER_PAINT),
+    ("outline-color", crate::LAYER_PAINT),
+    ("text-decoration-color", crate::LAYER_PAINT),
+    ("caret-color", crate::LAYER_PAINT),
+    ("opacity", crate::LAYER_PAINT | crate::LAYER_STACKING),
+];
+
+/// An inline style's declarations as `name -> value` (names ASCII-lowercased, the last of a name
+/// wins), or `None` when the text holds anything a split on `;` and `:` could misread: a quote, an
+/// escape, a comment, a brace, or brackets left open across a `;`.
+fn plain_declarations(text: &str) -> Option<HashMap<String, String>> {
+    if text.contains(['"', '\'', '\\', '{', '}']) || text.contains("/*") {
+        return None;
+    }
+    let mut declarations = HashMap::new();
+    for declaration in text.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        if declaration.matches('(').count() != declaration.matches(')').count() {
+            return None;
+        }
+        let (name, value) = declaration.split_once(':')?;
+        declarations.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+    Some(declarations)
+}
+
+/// The read bits of a write of `node`'s `style` attribute from `old` to `new` (`None`: removed)
+/// when every declaration it adds, removes or changes is a paint property
+/// (`PAINT_STYLE_PROPERTIES`); `None` when one may move a box, or when the page has a rule that
+/// reads the attribute or a `:has()` (`DomHost::style_attr_rules`), through which the write can
+/// change which rules match.
+fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Option<u8> {
+    if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
+        return None;
+    }
+    let old = plain_declarations(old.unwrap_or(""))?;
+    let new = plain_declarations(new.unwrap_or(""))?;
+    let mut reads = 0;
+    for name in old.keys().chain(new.keys()) {
+        if old.get(name) == new.get(name) {
+            continue;
+        }
+        let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| property == name)?;
+        reads |= bits;
+    }
+    (reads != 0).then_some(reads)
 }
 
 /// Elements a write under or to which may change something outside its
@@ -1553,6 +1690,14 @@ fn write_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (R
     let container = if node.is_element() { Some(node.clone()) } else { node.parent() };
     match container {
         Some(c) if under_hidden(host, &c, dirty) => (Reach::Unseen, cause),
+        _ if cause == "style" && is_html_element(&node) => {
+            let new = (op == "setAttr").then(|| string_arg(args, 4).unwrap_or(""));
+            let old = node.get_attribute("style");
+            match paint_style_reads(host, old.as_deref(), new) {
+                Some(reads) => (Reach::Paint(reads), cause),
+                None => (Reach::Seen, cause),
+            }
+        }
         _ => (Reach::Seen, cause),
     }
 }
@@ -1580,6 +1725,36 @@ fn mutate_reach(host: &DomHost, args: &[JsValue], dirty: &crate::DirtyMark) -> (
         return (Reach::Unseen, cause);
     }
     (Reach::Seen, cause)
+}
+
+/// `__rustkit_dom_write(gen, op, id, a, b)`: the write, its mutation record, its trace and its dirty
+/// mark. A string answer is the DOMException name to throw. The inline style's native write
+/// (`__rustkit_style_write`) takes this same path.
+fn dom_write(
+    h: &SharedDomHost,
+    d: &crate::DirtyMark,
+    m: &RefCell<ScriptMutations>,
+    l: &RefCell<MutationLog>,
+    args: &[JsValue],
+) -> JsValue {
+    let record = write_record(&h.borrow(), args);
+    let (reach, cause) = write_reach(&h.borrow(), args, d);
+    match write(&h.borrow(), args) {
+        Ok((result, bucket)) => {
+            let logged = match record.filter(|_| bucket != DomDirty::Clean) {
+                Some(record) => {
+                    l.borrow_mut().push(record);
+                    crate::Logged::Yes
+                }
+                None => crate::Logged::No,
+            };
+            trace_dirty(&h.borrow(), args, bucket);
+            note_mutation(m, bucket, write_kind(args), || node_label(&h.borrow(), args, 2));
+            reach.mark(d, bucket, cause, logged);
+            result
+        }
+        Err(name) => JsValue::String(name.to_string()),
+    }
 }
 
 /// Record a write that dirtied the page (`bucket` not `Clean`).
@@ -2203,9 +2378,10 @@ pub(crate) fn install(
 
     let h = host.clone();
     let d = dirty.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_info",
         3,
+        2,
         Box::new(move |args| {
             // innerText reads computed display/visibility (CH2.E13).
             // `geom:<read>` names the geometry read for the forced-layout log.
@@ -2473,7 +2649,7 @@ pub(crate) fn install(
                 kind: kind.clone(),
                 op: op.clone(),
             });
-            d.mark(crate::DomDirty::Layout, "animation");
+            d.mark(crate::DomDirty::Layout, "animation", crate::Logged::No);
             JsValue::Undefined
         }),
     )?;
@@ -2628,6 +2804,7 @@ pub(crate) fn install(
             let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
             match mutate(&h.borrow(), args) {
             Ok(()) => {
+                let logged = if records.is_empty() { crate::Logged::No } else { crate::Logged::Yes };
                 let mut log = l.borrow_mut();
                 for record in records {
                     log.push(record);
@@ -2638,7 +2815,7 @@ pub(crate) fn install(
                     node_label(&h.borrow(), args, 2)
                 });
                 // Pin §3.3: a structure insert/remove/move restyles.
-                reach.mark(&d, DomDirty::Style, cause);
+                reach.mark(&d, DomDirty::Style, cause, logged);
                 JsValue::Null
             }
             Err(name) => JsValue::String(name.to_string()),
@@ -2652,26 +2829,101 @@ pub(crate) fn install(
     let d = dirty.clone();
     let m = mutations.clone();
     let l = log.clone();
-    runtime.register_host_function(
+    runtime.register_host_function_by_op(
         "__rustkit_dom_write",
         5,
+        1,
+        Box::new(move |args| dom_write(&h, &d, &m, &l, args)),
+    )?;
+
+    // NATIVE-SETPROPERTY: an element's inline style (`el.style`) read and written in Rust
+    // (`inline_style`). style_read(gen, id, op, arg): `value` / `priority` of the property named `arg`,
+    // `item` (`arg` an index), `length`, `text` (cssText). style_write(gen, id, op, name, value,
+    // priority): `set` answers whether the attribute was written, `remove` the value the property had
+    // (written exactly when it had one); either answers -1 when the element is not found. A write
+    // takes `__rustkit_dom_write`'s own path (`dom_write`), as `setAttribute('style', text)` does.
+    let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_style_read",
+        4,
         Box::new(move |args| {
-            let record = write_record(&h.borrow(), args);
-            let (reach, cause) = write_reach(&h.borrow(), args, &d);
-            match write(&h.borrow(), args) {
-            Ok((result, bucket)) => {
-                if let Some(record) = record.filter(|_| bucket != DomDirty::Clean) {
-                    l.borrow_mut().push(record);
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Number(-1.0);
+            };
+            let raw = node.get_attribute("style");
+            let decls = host.style_decls(node.id.raw(), raw.as_deref().unwrap_or(""));
+            match string_arg(args, 2).unwrap_or("") {
+                "value" | "priority" => {
+                    let name = crate::inline_style::js_trim(string_arg(args, 3).unwrap_or("")).to_lowercase();
+                    let found = decls.iter().find(|d| d.name == name);
+                    JsValue::String(match (string_arg(args, 2), found) {
+                        (Some("value"), Some(d)) => d.value.clone(),
+                        (_, Some(d)) if d.important => "important".to_string(),
+                        _ => String::new(),
+                    })
                 }
-                trace_dirty(&h.borrow(), args, bucket);
-                note_mutation(&m, bucket, write_kind(args), || {
-                    node_label(&h.borrow(), args, 2)
-                });
-                reach.mark(&d, bucket, cause);
-                result
+                "item" => {
+                    let i = number_arg(args, 3).unwrap_or(0.0);
+                    JsValue::String(
+                        decls.get(i as usize).filter(|_| i >= 0.0).map(|d| d.name.clone()).unwrap_or_default(),
+                    )
+                }
+                "length" => JsValue::Number(decls.len() as f64),
+                // An empty or absent attribute reads as no text at all.
+                "text" if raw.as_deref().is_some_and(|t| !t.is_empty()) => {
+                    JsValue::String(crate::inline_style::serialize_decls(&decls))
+                }
+                _ => JsValue::String(String::new()),
             }
-            Err(name) => JsValue::String(name.to_string()),
+        }),
+    )?;
+    let h = host.clone();
+    let d = dirty.clone();
+    let m = mutations.clone();
+    let l = log.clone();
+    runtime.register_host_function(
+        "__rustkit_style_write",
+        6,
+        Box::new(move |args| {
+            let found = h.borrow().node(args).map(|node| {
+                let raw = node.get_attribute("style");
+                (node.id.raw(), h.borrow().style_decls(node.id.raw(), raw.as_deref().unwrap_or("")))
+            });
+            let Some((id, decls)) = found else {
+                return JsValue::Number(-1.0);
+            };
+            let name = string_arg(args, 3).unwrap_or("");
+            let (answer, written) = match string_arg(args, 2).unwrap_or("") {
+                "remove" => {
+                    let (old, written) = crate::inline_style::remove_property(&decls, name);
+                    (JsValue::String(old), written)
+                }
+                _ => {
+                    let written = crate::inline_style::set_property(
+                        &decls,
+                        name,
+                        string_arg(args, 4).unwrap_or(""),
+                        string_arg(args, 5).unwrap_or(""),
+                    );
+                    (JsValue::Boolean(written.is_some()), written)
+                }
+            };
+            if let Some(decls) = written {
+                let text = crate::inline_style::serialize_decls(&decls);
+                // The next read or write of this text needs no parse, when the list reads back as itself
+                // (the JS copy's `exactOf`). Kept before the write: a write the page's own code changes
+                // again (a custom element's callback) leaves other text, which is parsed.
+                if crate::inline_style::reads_back_as_itself(&decls) {
+                    h.borrow().keep_style_decls(id, &text, decls);
+                }
+                let write_args =
+                    [args[0].clone(), JsValue::String("setAttr".into()), JsValue::Number(id as f64), JsValue::String("style".into()), JsValue::String(text)];
+                if let JsValue::String(_) = dom_write(&h, &d, &m, &l, &write_args) {
+                    return JsValue::Number(-1.0);
+                }
             }
+            answer
         }),
     )?;
 
@@ -2693,13 +2945,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let (result, bucket) = control_value(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), None));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             result
         }),
     )?;
@@ -2713,13 +2967,15 @@ pub(crate) fn install(
         3,
         Box::new(move |args| {
             let bucket = control_checked(&mut h.borrow_mut(), args);
+            let mut logged = crate::Logged::No;
             if let Some(node) = h.borrow().node(args).filter(|_| bucket != DomDirty::Clean) {
                 l.borrow_mut().push(control_record(node.id.raw(), Some("checked")));
+                logged = crate::Logged::Yes;
             }
             note_mutation(&m, bucket, MutationKind::FormValue, || {
                 node_label(&h.borrow(), args, 1)
             });
-            d.mark(bucket, "form");
+            d.mark(bucket, "form", logged);
             JsValue::Null
         }),
     )?;
@@ -2798,8 +3054,45 @@ pub(crate) fn install(
                 return JsValue::Null;
             };
             node.set_adopted_styles(texts);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
+        }),
+    )?;
+
+    // `register_property(name, syntax, inherits, initialValue)`:
+    // `CSS.registerProperty()` (css-properties-values-api-1 §3.1). The
+    // descriptor is validated here and kept on the document as `@property`
+    // text, which the next layout reads after the document's sheets.
+    // Answers `''`, or the DOMException name to throw.
+    let h = host.clone();
+    let d = dirty.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_register_property",
+        4,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(document) = host.document.clone() else {
+                return JsValue::String(String::new());
+            };
+            let name = string_arg(args, 0).unwrap_or("");
+            let syntax = string_arg(args, 1).unwrap_or("*");
+            let inherits = matches!(args.get(2), Some(JsValue::Boolean(true)));
+            let initial = string_arg(args, 3);
+            let registration = match rustkit_css::Registration::new(name, syntax, Some(inherits), initial) {
+                Ok(r) => r,
+                Err(e) => return JsValue::String(e.to_string()),
+            };
+            let rule = rustkit_css::registered_property::registration_rule(
+                &registration.name,
+                syntax,
+                inherits,
+                initial,
+            );
+            if !document.register_property(name, rule) {
+                return JsValue::String("InvalidModificationError".into());
+            }
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
+            JsValue::String(String::new())
         }),
     )?;
 
@@ -2821,7 +3114,7 @@ pub(crate) fn install(
             };
             let on = matches!(args.get(2), Some(JsValue::Boolean(true)));
             document.set_style_sheet_disabled(&node, on);
-            d.mark(DomDirty::Style, "sheet");
+            d.mark(DomDirty::Style, "sheet", crate::Logged::No);
             JsValue::Null
         }),
     )?;
@@ -2851,17 +3144,24 @@ const WRAPPERS_JS: &str = r#"
         wheelAttribute: __rustkit_dom_wheel_attribute,
         rangeTextRects: __rustkit_dom_range_text_rects, setAdopted: __rustkit_dom_set_adopted,
         setSheetDisabled: __rustkit_dom_set_sheet_disabled,
+        registerProperty: __rustkit_dom_register_property,
         scrollElement: __rustkit_dom_scroll_element,
         animate: __rustkit_dom_animate, cssAnimations: __rustkit_dom_css_animations,
-        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated
+        cssControl: __rustkit_dom_css_control, animated: __rustkit_dom_animated,
+        styleRead: __rustkit_style_read, styleWrite: __rustkit_style_write
     };
+    delete g.__rustkit_style_read;
+    delete g.__rustkit_style_write;
     ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
-        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
+        'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'register_property', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
     // The DOM's dirty flag (a native registered as a global), for
     // web_observers_live.js.
     __rk.domDirty = g.__rustkit_dom_dirty;
+    // The frame tree's top window as the engine knows it: this window,
+    // until it is attached as a frame (`DomBindings::attach_frame`).
+    __rk.realTop = g;
     delete g.__rustkit_dom_dirty;
 
     // Which events the engine made (DOM §2.2 `isTrusted`). The sets are
@@ -2869,18 +3169,43 @@ const WRAPPERS_JS: &str = r#"
     // script: a page cannot add to them, and replacing `WeakSet.prototype.has`
     // or `Object.defineProperty` afterwards changes nothing here.
     var uncurry = Function.prototype.bind.bind(Function.prototype.call);
+    // The constructor of install time too, for a set made later.
+    var WeakSetNow = WeakSet;
     var setAdd = uncurry(WeakSet.prototype.add), setHas = uncurry(WeakSet.prototype.has),
         setDrop = uncurry(WeakSet.prototype['delete']);
     var defineOwn = Object.defineProperty;
-    var TRUSTED = new WeakSet(), UNDISPATCHED = new WeakSet(), STAMPED = new WeakSet();
+    // The documents of a frame tree share these (`__rk.shared` is
+    // one object for every realm of the runtime): an event made in one
+    // window and dispatched in another is stamped once, and reads the same.
+    var SHARED = __rk.shared;
+    var TRUSTED = SHARED.trusted || (SHARED.trusted = new WeakSet()),
+        UNDISPATCHED = SHARED.undispatched || (SHARED.undispatched = new WeakSet()),
+        STAMPED = SHARED.stamped || (SHARED.stamped = new WeakSet());
+    var TRUST_GET = SHARED.trustGet || (SHARED.trustGet =
+        Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get);
     // Which events are cancelled (DOM §2.2 "canceled flag"). Held here, so
     // `defaultPrevented` is read-only and only `preventDefault()` (or
     // `returnValue = false`, or an on<type> handler returning false) by a
-    // listener that may cancel sets it: a passive listener cannot.
-    var CANCELED = new WeakSet(), CANCELABLE = new WeakSet();
+    // listener that may cancel sets it: a passive listener cannot. Shared
+    // by the frame tree, as the trust sets are: an event cancelled in one
+    // window reads cancelled in the window that made it.
+    var CANCELED = SHARED.canceled || (SHARED.canceled = new WeakSet());
+    // Whether an event may be cancelled (WHL3): shared the same way, so
+    // `cancelable` reads the same in every window of the frame tree. (The
+    // slot's name is not an event member's name.)
+    var CANCELABLE = SHARED.cancelables || (SHARED.cancelables = new WeakSet());
     function setCancelable(ev, on) { if (on) setAdd(CANCELABLE, ev); else setDrop(CANCELABLE, ev); }
+    // A real event is one whose prototype chain holds the `Event.prototype`
+    // of some window of the frame tree, not only this one's: an event made
+    // in a frame and dispatched here keeps the canceled flag, not a
+    // `defaultPrevented` property. Each realm adds its own prototype when
+    // its `Event` is defined (below).
     var isProto = uncurry(Object.prototype.isPrototypeOf);
-    var TRUST_GET = Object.getOwnPropertyDescriptor({ get isTrusted() { return setHas(TRUSTED, this); } }, 'isTrusted').get;
+    var EVENT_PROTOS = SHARED.eventProtos || (SHARED.eventProtos = []);
+    function isRealEvent(ev) {
+        for (var k = 0; k < EVENT_PROTOS.length; k++) if (isProto(EVENT_PROTOS[k], ev)) return true;
+        return false;
+    }
     // Give an event object its `isTrusted`: an own accessor with no setter
     // that cannot be redefined ([LegacyUnforgeable]). Throws a TypeError
     // for an object that will not take it.
@@ -2896,7 +3221,14 @@ const WRAPPERS_JS: &str = r#"
     // Only an event this code just made with a constructor kept at install
     // (`make`) can be trusted, and once: whatever a page has put on the
     // window since never builds an event the engine marks.
-    var CTORS = Object.create(null), MADE = new WeakSet();
+    //
+    // The constructors and prototypes are each window's own (an event is
+    // built on the prototype of the window that makes it). What is kept
+    // about an event is the frame tree's, as the trust sets are: one
+    // window makes an event, another may dispatch it, and a listener may
+    // reach it through either window's prototypes; all of them read and
+    // write the one record.
+    var CTORS = Object.create(null), MADE = SHARED.made || (SHARED.made = new WeakSet());
     // The engine builds its events with nothing a page can reach: these
     // built-ins are taken now, and every descriptor has no prototype.
     var objCreate = Object.create, hasOwn = uncurry(Object.prototype.hasOwnProperty), isArray = Array.isArray, dateNow = Date.now;
@@ -2905,9 +3237,14 @@ const WRAPPERS_JS: &str = r#"
     // from nothing before the engine reads or writes a field of it.
     function bare(o) { return setProto(o, null); }
     // An event's dispatch state under the engine's own keys: own
-    // properties of an engine event from the start (`make`).
-    var STOP = Symbol('rustkit.stop'), STOP_NOW = Symbol('rustkit.stopNow');
-    var ORIGIN = Symbol('rustkit.origin'), PATH = Symbol('rustkit.path');
+    // properties of an engine event from the start (`make`). The keys are
+    // the frame tree's, like the event state above: an event stopped
+    // through one window's prototype is stopped in another's dispatch,
+    // and its path reads the same through either.
+    var STOP = SHARED.stop || (SHARED.stop = Symbol('rustkit.stop')),
+        STOP_NOW = SHARED.stopNow || (SHARED.stopNow = Symbol('rustkit.stopNow'));
+    var ORIGIN = SHARED.origin || (SHARED.origin = Symbol('rustkit.origin')),
+        PATH = SHARED.path || (SHARED.path = Symbol('rustkit.path'));
     function getterDesc(get) {
         var d = objCreate(null);
         d.get = get; d.set = undefined; d.enumerable = true; d.configurable = false;
@@ -2929,17 +3266,37 @@ const WRAPPERS_JS: &str = r#"
             defineOwn(ev, k, d);
         }
     }
+    // This window becomes a frame's (`DomBindings::attach_frame`): its
+    // `parent`, the frame tree's `top` and its `frameElement`, defined with
+    // the built-ins of install whatever the frame's page has done since.
+    __rk.becomeFrame = function (up, top, el) {
+        function own(name, value, writable) {
+            var d = objCreate(null);
+            d.value = value; d.writable = writable; d.enumerable = true; d.configurable = true;
+            defineOwn(g, name, d);
+        }
+        own('parent', up, true);
+        own('top', top, false);
+        own('frameElement', el, false);
+        __rk.realTop = top;
+    };
     // An interface's own fields (`[name, default]` pairs), its parent and
     // a finishing step (a direct call; WheelEvent's legacy deltas).
     var FIELDS = Object.create(null), PARENT = Object.create(null), FINISH = Object.create(null);
     // The install scripts give the engine its constructors here (host
     // object only; the last one an install script gives wins).
-    var PROTOS = Object.create(null), EVTYPE = new WeakMap(), KIND = new WeakMap();
+    var PROTOS = Object.create(null), EVTYPE = SHARED.evType || (SHARED.evType = new WeakMap()),
+        KIND = SHARED.kind || (SHARED.kind = new WeakMap());
     // An event's dispatch state, private: `target`, `currentTarget` and
     // `eventPhase` are read-only getters over these (as in Chrome), and an
     // event being dispatched is in DISPATCHING, which the initializers
-    // check.
-    var EV_TARGET = new WeakMap(), EV_CURRENT = new WeakMap(), EV_PHASE = new WeakMap(), DISPATCHING = new WeakSet();
+    // check. Shared by the frame tree: an event in flight in one window
+    // is in flight for every window's `initEvent` and `dispatchEvent`, and
+    // its target reads the same through every window's `Event.prototype`.
+    var EV_TARGET = SHARED.evTarget || (SHARED.evTarget = new WeakMap()),
+        EV_CURRENT = SHARED.evCurrent || (SHARED.evCurrent = new WeakMap()),
+        EV_PHASE = SHARED.evPhase || (SHARED.evPhase = new WeakMap()),
+        DISPATCHING = SHARED.dispatching || (SHARED.dispatching = new WeakSet());
     __rk.isDispatching = function (e) { return setHas(DISPATCHING, e); };
     var mapGet = uncurry(WeakMap.prototype.get), mapSet = uncurry(WeakMap.prototype.set), mapHas = uncurry(WeakMap.prototype.has);
     __rk.keepCtor = function (name, C, parent, fields) {
@@ -2979,7 +3336,8 @@ const WRAPPERS_JS: &str = r#"
         setCancelable(ev, !!arg('cancelable'));
         fixed(ev, 'composed', !!arg('composed'));
         stamp(ev);
-        fixed(ev, 'timeStamp', dateNow());
+        // On performance.now()'s clock, the page clock (`__rk.perfNow`, out of page script's reach).
+        fixed(ev, 'timeStamp', typeof __rk.perfNow === 'function' ? __rk.perfNow() : dateNow());
         fixed(ev, ORIGIN, null); fixed(ev, PATH, null);
         fixed(ev, STOP, false); fixed(ev, STOP_NOW, false);
         // The fields, the root interface's first.
@@ -3035,6 +3393,9 @@ const WRAPPERS_JS: &str = r#"
     var DOMException = g.DOMException;
 
     var SLOT = Symbol('rustkit.node');
+    // The record behind a wrapper: engine-owned, so it inherits nothing (a page's Object.prototype
+    // cannot answer for a field it does not have). Fields: id, gen, and the children caches.
+    function slotRecord(id) { var r = objCreate(null); r.id = id; r.gen = gen; return r; }
     // Hooks web_shadow.js fills in so that events and tree queries can cross
     // a shadow boundary: `shadowParent(root, event)` is the host a composed
     // event goes on to from a shadow root, `retarget(target, against)` the
@@ -3049,10 +3410,16 @@ const WRAPPERS_JS: &str = r#"
     // hook nobody installed reads as its own `undefined`.
     var HOOKS = objCreate(null);
     HOOKS.shadowParent = HOOKS.retarget = HOOKS.hostOf = HOOKS.mutation = HOOKS.scripts = undefined;
-    HOOKS.windowNamed = HOOKS.hasListener = undefined;
+    HOOKS.windowNamed = HOOKS.hasListener = HOOKS.loadSnapshot = HOOKS.loadReplay = HOOKS.nodeId = HOOKS.byTag = HOOKS.frames = HOOKS.attrs = HOOKS.watched = undefined;
     // On the host object, for the embedder's other scripts.
     __rk.domHooks = HOOKS;
     var gen = 0;
+    // For web_frames.js (installed only with nested browsing contexts on):
+    // the node id of a wrapper of this document, or -1.
+    HOOKS.nodeId = function (el) {
+        var s = el != null ? el[SLOT] : undefined;
+        return s && s.gen === gen ? s.id : -1;
+    };
     var cache = new Map();
 
     function illegal() { throw new TypeError('Illegal constructor'); }
@@ -3123,28 +3490,85 @@ const WRAPPERS_JS: &str = r#"
             }
             elementProtos[tag] = made[name].prototype;
         });
-        // There is no media playback here, and a page must be able to find
-        // that out the way it asks: a media element is one with nothing to
-        // play. Without the methods the question itself threw (github.com's
-        // `video.load()` in an effect). Canvas contexts are web_canvas.js's,
-        // which takes this way to a canvas's node and deletes it.
-        Object.defineProperty(g, '__rustkit_canvas_slot', {
-            value: function (el) { var s = slotOf(el); return [s.gen, s.id]; },
-            configurable: true, writable: true, enumerable: false
-        });
+        // Canvas contexts are web_canvas.js's, which takes this way to a canvas's node
+        // from the host object.
+        __rk.canvasSlot = function (el) { var s = slotOf(el); return [s.gen, s.id]; };
+        // MEDIA-AVF M1.2: the media element's state is the engine's, pushed with each
+        // event (`__rk.mediaEvent` below) and read here; `load()` and `canPlayType()`
+        // ask the engine (`__rk.mediaCall`, web_media.rs). Playing, pausing and seeking
+        // come in later steps: `play()` still rejects and `pause()` does nothing.
         var media = HTMLMediaElement.prototype;
         ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'].forEach(function (k, i) {
             HTMLMediaElement[k] = media[k] = i;
         });
-        media.load = function load() {};
+        ['NETWORK_EMPTY', 'NETWORK_IDLE', 'NETWORK_LOADING', 'NETWORK_NO_SOURCE'].forEach(function (k, i) {
+            HTMLMediaElement[k] = media[k] = i;
+        });
+        function mstate(el) { slotOf(el); return mediaStates.get(el) || MEDIA_INITIAL; }
+        function getter(proto, name, read, write) {
+            Object.defineProperty(proto, name, { get: read, set: write, enumerable: true, configurable: true });
+        }
+        media.load = function load() { var s = slotOf(this); __rk.mediaCall(s.gen, s.id, 'load'); };
         media.pause = function pause() {};
-        media.canPlayType = function canPlayType() { return ''; };
+        media.canPlayType = function canPlayType(type) {
+            if (arguments.length < 1) throw new TypeError("Failed to execute 'canPlayType' on 'HTMLMediaElement': 1 argument required, but only 0 present.");
+            return __rk.mediaCall(0, 0, 'canPlayType', String(type));
+        };
         media.play = function play() {
             return Promise.reject(new g.DOMException('The element has no supported sources.', 'NotSupportedError'));
         };
-        [['paused', true], ['ended', false], ['readyState', 0], ['currentTime', 0], ['duration', NaN], ['error', null]].forEach(function (p) {
-            Object.defineProperty(media, p[0], { value: p[1], writable: true, enumerable: true, configurable: true });
+        getter(media, 'src', function () {
+            var v = this.getAttribute('src');
+            if (v === null) return '';
+            try { return new g.URL(v, document.baseURI).href; } catch (_) { return v; }
+        }, function (v) { this.setAttribute('src', String(v)); });
+        getter(media, 'preload', function () {
+            var v = this.getAttribute('preload');
+            if (v === null) return 'metadata';
+            v = v.toLowerCase();
+            return v === '' ? 'auto' : (v === 'none' || v === 'metadata' || v === 'auto') ? v : 'metadata';
+        }, function (v) { this.setAttribute('preload', String(v)); });
+        getter(media, 'readyState', function () { return mstate(this).rs; });
+        getter(media, 'networkState', function () { return mstate(this).ns; });
+        getter(media, 'duration', function () { var d = mstate(this).duration; return d === null ? NaN : d; });
+        getter(media, 'currentSrc', function () { return mstate(this).src; });
+        getter(media, 'paused', function () { return true; });
+        getter(media, 'ended', function () { return false; });
+        getter(media, 'seeking', function () { return false; });
+        getter(media, 'currentTime', function () { return 0; }, function () {});
+        getter(media, 'error', function () {
+            var st = mstate(this);
+            if (st.error === null) return null;
+            if (!st.errorObject) {
+                st.errorObject = Object.create(MediaError.prototype);
+                Object.defineProperty(st.errorObject, 'code', { value: st.error, enumerable: true });
+                Object.defineProperty(st.errorObject, 'message', { value: '', enumerable: true });
+            }
+            return st.errorObject;
         });
+        // HTML §4.8.11.7: TimeRanges, read-only and not constructible.
+        var TimeRanges = iface('TimeRanges');
+        var rangesOf = new WeakMap();
+        function ranges(list) {
+            var r = Object.create(TimeRanges.prototype);
+            rangesOf.set(r, list.slice());
+            return r;
+        }
+        function rangeAt(r, i, end) {
+            var list = rangesOf.get(r);
+            if (!list) throw new TypeError('Illegal invocation');
+            i = Number(i) >>> 0;
+            if (i >= list.length) throw new g.DOMException("The index provided (" + i + ") is greater than or equal to the maximum bound (" + list.length + ").", 'IndexSizeError');
+            return list[i][end ? 1 : 0];
+        }
+        getter(TimeRanges.prototype, 'length', function () { var l = rangesOf.get(this); if (!l) throw new TypeError('Illegal invocation'); return l.length; });
+        TimeRanges.prototype.start = function start(i) { return rangeAt(this, i, false); };
+        TimeRanges.prototype.end = function end(i) { return rangeAt(this, i, true); };
+        getter(media, 'buffered', function () { return ranges(mstate(this).buffered); });
+        getter(media, 'seekable', function () { return ranges(mstate(this).seekable); });
+        var video = made.HTMLVideoElement.prototype;
+        getter(video, 'videoWidth', function () { return mstate(this).w; });
+        getter(video, 'videoHeight', function () { return mstate(this).h; });
         // HTML §4.8.11. `MediaError` is the interface `video.error` would be,
         // and pages compare against the code constants. There is no playback
         // here, so the constructor stays illegal and `error` stays null.
@@ -3189,8 +3613,8 @@ const WRAPPERS_JS: &str = r#"
                   : t === 3 ? Text.prototype : t === 9 ? Document.prototype
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
-        w = Object.create(proto);
-        Object.defineProperty(w, SLOT, { value: { id: id, gen: gen } });
+        w = objCreate(proto);
+        defineOwn(w, SLOT, { value: slotRecord(id) });
         cache.set(id, w);
         return w;
     }
@@ -3209,6 +3633,57 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(out, 'length', { value: n });
         return out;
     }
+    // A node's children as the collection `children` (elements) or `childNodes` (nodes): the same
+    // object while the child ids the engine reports are the same, as Chrome's live collections are (a
+    // new one when they change; a held one stays the snapshot it was). The record keeps two things:
+    // `list`, the collection the page gets, and `items`/`n`, the engine's own copy that its readers
+    // (firstElementChild and the rest) use, so nothing a page does to its collection reaches them.
+    // Built with plain loops and install-time built-ins. Each index of `list` is non-writable and
+    // non-configurable, so a page's redefinition throws as Chrome's does.
+    var lsSplit = uncurry(String.prototype.split), lsDef = Object.defineProperty;
+    function cachedKids(o, onlyElements) {
+        var s = slotOf(o);
+        var ids = s.gen === gen ? N.info(s.gen, s.id, 'children') : '';
+        var key = onlyElements ? 'kidsE' : 'kidsN';
+        var c = s[key];
+        if (c !== undefined && c.ids === ids) return c;
+        var out = objCreate(onlyElements ? HTMLCollection.prototype : NodeList.prototype), n = 0, items = objCreate(null);
+        if (typeof ids === 'string' && ids !== '') {
+            var parts = lsSplit(ids, ' ');
+            for (var i = 0; i < parts.length; i++) {
+                var id = +parts[i], w = wrap(id);
+                if (w && (!onlyElements || N.info(gen, id, 'type') === 1)) {
+                    lsDef(out, n, { value: w, enumerable: true });
+                    items[n] = w;
+                    n++;
+                }
+            }
+        }
+        lsDef(out, 'length', { value: n });
+        c = objCreate(null);
+        c.ids = ids; c.list = out; c.items = items; c.n = n;
+        s[key] = c;
+        return c;
+    }
+    // The document's elements of one tag, for the embedder's scripts
+    // (web_frames.js's scan): the native's answer read with plain loops,
+    // no string or array method.
+    HOOKS.byTag = function (tag) {
+        var s = doc ? doc[SLOT] : undefined, out = objCreate(null), n = 0;
+        out.length = 0;
+        if (!s || s.gen !== gen) return out;
+        var ids = N.collect(s.gen, s.id, 'tag', tag);
+        if (typeof ids !== 'string') return out;
+        var id = -1;
+        for (var i = 0; i <= ids.length; i++) {
+            var c = i < ids.length ? ids[i] : ' ';
+            if (c >= '0' && c <= '9') { id = (id < 0 ? 0 : id * 10) + (+c); continue; }
+            if (id >= 0) { var w = wrap(id); if (w) out[n++] = w; }
+            id = -1;
+        }
+        out.length = n;
+        return out;
+    };
     function collect(o, kind, arg) {
         var s = slotOf(o);
         return s.gen === gen ? N.collect(s.gen, s.id, kind, String(arg)) : '';
@@ -3236,18 +3711,30 @@ const WRAPPERS_JS: &str = r#"
     function setData(o, op, a, b, method) {
         var s = slotOf(o);
         var m = HOOKS.mutation && HOOKS.mutation.data(o, op, a);
+        // Custom-element reaction: `HOOKS.attrs` answers a closure for a watched attribute (`HOOKS.watched`: the names some definition observes).
+        var ar = HOOKS.attrs && (op === 'setAttr' || op === 'removeAttr') && HOOKS.attrs(o, op, a);
+        // The steps that follow an attribute write act on three kinds of name only: `on<type>` (handlers),
+        // `async` and `src` (scripts), `src` (frames), `src` and `srcset` (images). Whether the name begins with
+        // o, s or a (either case) is one index read, with no call; every other name skips them.
+        var c0 = a[0];
+        var acts = !(op === 'setAttr' || op === 'removeAttr') ||
+            c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A';
         // Removing an absent attribute runs no attribute-change steps (DOM
         // "remove an attribute by name"), so it must not drop an assigned
         // on<type> handler. N.attr matches the name as the write does.
-        var changed = op === 'setAttr' ||
-            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null);
+        var changed = acts && (op === 'setAttr' ||
+            (op === 'removeAttr' && s.gen === gen && N.attr(s.gen, s.id, a) !== null));
         var r = N.write(gen, op, s.gen === gen ? s.id : -1, a, b);
         if (typeof r === 'string') {
             throw new DOMException("Failed to execute '" + method + "'.", r);
         }
         if (m) m();
-        if (changed) attributeChanged(o, a);
-        if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+        if (acts) {
+            if (changed) attributeChanged(o, a);
+            if (HOOKS.scripts) HOOKS.scripts.changed(o, op, a);
+            if (HOOKS.frames) HOOKS.frames.changed(o, op, a);
+        }
+        if (ar) ar();
         return r;
     }
     function create(kind, data, method) {
@@ -3269,10 +3756,7 @@ const WRAPPERS_JS: &str = r#"
     getter(Node.prototype, 'lastChild', function () { return related(this, 'last'); });
     getter(Node.prototype, 'nextSibling', function () { return related(this, 'next'); });
     getter(Node.prototype, 'previousSibling', function () { return related(this, 'prev'); });
-    getter(Node.prototype, 'childNodes', function () {
-        var s = slotOf(this);
-        return list(NodeList.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', false);
-    });
+    getter(Node.prototype, 'childNodes', function () { return cachedKids(this, false).list; });
     // A node in a DOMParser document is owned by it; every other node by
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
@@ -3313,6 +3797,7 @@ const WRAPPERS_JS: &str = r#"
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
+        if (HOOKS.frames) HOOKS.frames.tree(op, node, parent);
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -3555,37 +4040,58 @@ const WRAPPERS_JS: &str = r#"
     getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
+    // `id` and `className` read the attribute with the engine native and write it with the same
+    // write `setAttribute` makes (the mutation record included), without the steps that only act
+    // on another name (`on<type>` handlers, `async`, `src`): neither name is one.
+    var accStr = String;
+    // `name` is a literal that is already lower case, so the custom-element reaction is only asked for
+    // when some definition watches it.
+    function putPlain(el, name, text) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', name);
+        var ar = HOOKS.attrs && HOOKS.watched[name] === true && HOOKS.attrs(el, 'setAttr', name, true);
+        var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, name, text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
+        if (m) m();
+        if (ar) ar();
+    }
+    // setAttribute and removeAttribute for a name that none of the steps after a write act on (below): the
+    // same write and the same mutation record as `setData`, any case of name.
+    function putAttr(el, op, name, text, method) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, op, name);
+        var ar = HOOKS.attrs && HOOKS.attrs(el, op, name);
+        var r = N.write(gen, op, s.gen === gen ? s.id : -1, name, text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute '" + method + "'.", r);
+        if (m) m();
+        if (ar) ar();
+    }
     [['id', 'id'], ['className', 'class']].forEach(function (p) {
-        accessor(Element.prototype, p[0], function () { return this.getAttribute(p[1]) || ''; },
-            function (v) { this.setAttribute(p[1], v); });
+        var attr = p[1];
+        accessor(Element.prototype, p[0], function () {
+            var s = slotOf(this), v = N.attr(s.gen, s.id, attr);
+            return v === null ? '' : v;
+        }, function (v) { putPlain(this, attr, accStr(v)); });
     });
-    getter(Element.prototype, 'children', function () {
-        var s = slotOf(this);
-        return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
-    });
+    getter(Element.prototype, 'children', function () { return cachedKids(this, true).list; });
 
     // ParentNode / NonDocumentTypeChildNode element traversal (DOM §4.2.6,
     // §4.2.7), over the same tree reads as childNodes and the siblings.
-    function elementChildren(o) {
-        return Array.prototype.filter.call(o.childNodes, function (n) { return n.nodeType === 1; });
-    }
+    function elementChildren(o) { return cachedKids(o, true); }
     function elementSibling(o, field) {
         var n = o[field];
         while (n && n.nodeType !== 1) n = n[field];
         return n;
     }
     [Element, Document, DocumentFragment].forEach(function (C) {
-        getter(C.prototype, 'firstElementChild', function () { return elementChildren(this)[0] || null; });
+        getter(C.prototype, 'firstElementChild', function () { var c = elementChildren(this); return c.n ? c.items[0] : null; });
         getter(C.prototype, 'lastElementChild', function () {
-            var c = elementChildren(this); return c[c.length - 1] || null;
+            var c = elementChildren(this); return c.n ? c.items[c.n - 1] : null;
         });
-        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).length; });
+        getter(C.prototype, 'childElementCount', function () { return elementChildren(this).n; });
     });
     [Document, DocumentFragment].forEach(function (C) {
-        getter(C.prototype, 'children', function () {
-            var s = slotOf(this);
-            return list(HTMLCollection.prototype, s.gen === gen ? N.info(s.gen, s.id, 'children') : '', true);
-        });
+        getter(C.prototype, 'children', function () { return cachedKids(this, true).list; });
     });
     [Element, CharacterData].forEach(function (C) {
         getter(C.prototype, 'nextElementSibling', function () { return elementSibling(this, 'nextSibling'); });
@@ -3885,7 +4391,9 @@ const WRAPPERS_JS: &str = r#"
     // (E54): the marks script reads `complete` and `decode()` from are
     // updated at once, not on the next event.
     function imageWritten(el, name) {
-        var n = String(name).toLowerCase();
+        var n = String(name);
+        if (n.length !== 3 && n.length !== 6) return;
+        n = n.toLowerCase();
         if ((n === 'src' || n === 'srcset') && el.tagName === 'IMG' && __rk.imageWritten) {
             __rk.imageWritten(el);
         }
@@ -3894,12 +4402,24 @@ const WRAPPERS_JS: &str = r#"
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
-        setData(this, 'setAttr', String(name), String(value), 'setAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        // A name that begins with o, s or a (either case) may be one the steps after a write act on
+        // (`on<type>`, `async`, `src`, `srcset`): those take the full write. Any other name is a plain write.
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'setAttr', n, String(value), 'setAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'setAttr', n, String(value), 'setAttribute');
+        }
     };
     Element.prototype.removeAttribute = function (name) {
-        setData(this, 'removeAttr', String(name), null, 'removeAttribute');
-        imageWritten(this, name);
+        var n = String(name), c0 = n[0];
+        if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
+            setData(this, 'removeAttr', n, null, 'removeAttribute');
+            imageWritten(this, n);
+        } else {
+            putAttr(this, 'removeAttr', n, null, 'removeAttribute');
+        }
     };
     Element.prototype.toggleAttribute = function (name, force) {
         var has = this.hasAttribute(name);
@@ -3962,72 +4482,184 @@ const WRAPPERS_JS: &str = r#"
     };
 
     // classList: a DOMTokenList over the class attribute, one per element.
+    //
+    // Every built-in used here is taken at install time (a page's own
+    // `String.prototype.split`, `Array.prototype.indexOf`, `Element.prototype.
+    // setAttribute` or `Reflect.get` cannot change what the list does), and the
+    // class attribute is read and written through the engine's natives, not
+    // through the element's JS methods. The token set is kept with the attribute
+    // text it was made from: the same text is not parsed twice, and a token array
+    // is never changed after it is stored (a change makes a new one), so one a
+    // forEach or iterator holds stays a snapshot.
     var DOMTokenList = iface('DOMTokenList');
-    var TOKENS = Symbol('rustkit.tokens');
-    function tokens(list) {
-        var v = list[TOKENS].getAttribute('class') || '';
+    var tlState = new WeakMap();
+    var tlStr = String, tlSlice = uncurry(String.prototype.slice), tlCode = uncurry(String.prototype.charCodeAt);
+    var tlTest = uncurry(RegExp.prototype.test), tlJoin = uncurry(Array.prototype.join), tlGet = Reflect.get;
+    var tlCall = uncurry(Function.prototype.call), tlValues = uncurry(Array.prototype.values);
+    var TL_SPACE = /[\t\n\f\r ]/, TL_INDEX = /^(0|[1-9][0-9]*)$/;
+    function tlOf(list) {
+        var st = mapGet(tlState, list);
+        if (!st) throw new TypeError('Illegal invocation');
+        return st;
+    }
+    function tlSpace(c) { return c === 32 || c === 9 || c === 10 || c === 12 || c === 13; }
+    function tlIndexOf(ts, t) {
+        for (var i = 0; i < ts.length; i++) if (ts[i] === t) return i;
+        return -1;
+    }
+    function tlWithout(ts, at) {
         var out = [];
-        v.split(/[\t\n\f\r ]+/).forEach(function (t) { if (t && out.indexOf(t) < 0) out.push(t); });
+        for (var i = 0; i < ts.length; i++) if (i !== at) out[out.length] = ts[i];
         return out;
     }
+    function tlWith(ts, t) {
+        var out = [];
+        for (var i = 0; i < ts.length; i++) out[i] = ts[i];
+        out[out.length] = t;
+        return out;
+    }
+    // The ordered set of tokens in `v`, and whether `v` already is the serialized
+    // set (one space between tokens, none at the ends, no repeats).
+    function tlParse(st, v) {
+        var out = [], n = v.length, i = 0, clean = true;
+        while (i < n) {
+            if (tlSpace(tlCode(v, i))) {
+                if (i === 0 || i === n - 1 || tlCode(v, i) !== 32 || tlSpace(tlCode(v, i + 1))) clean = false;
+                i++;
+                continue;
+            }
+            var j = i + 1;
+            while (j < n && !tlSpace(tlCode(v, j))) j++;
+            var t = tlSlice(v, i, j);
+            if (tlIndexOf(out, t) < 0) out[out.length] = t; else clean = false;
+            i = j;
+        }
+        st.ts = out;
+        st.clean = clean;
+        return out;
+    }
+    // The tokens now; `st.raw` is the class attribute's text (null: no attribute).
+    function tokens(st) {
+        var s = slotOf(st.el), v = N.attr(s.gen, s.id, 'class');
+        if (st.ts !== null && v === st.raw) return st.ts;
+        st.raw = v;
+        return tlParse(st, v === null ? '' : v);
+    }
     function checkToken(t, method) {
-        t = String(t);
+        t = tlStr(t);
         if (t === '') throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided must not be empty.", 'SyntaxError');
-        if (/[\t\n\f\r ]/.test(t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
+        if (tlTest(TL_SPACE, t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
         return t;
     }
-    function store(list, ts) { list[TOKENS].setAttribute('class', ts.join(' ')); }
-    getter(DOMTokenList.prototype, 'length', function () { return tokens(this).length; });
-    accessor(DOMTokenList.prototype, 'value', function () { return this[TOKENS].getAttribute('class') || ''; },
-        function (v) { this[TOKENS].setAttribute('class', String(v)); });
+    // The update steps: the class attribute becomes the serialized set. `text`
+    // is that serialization when the caller has it already.
+    // setData for the one attribute name `class`, without the steps that only act on another
+    // name: `attributeChanged` (on<type> attributes), `HOOKS.scripts.changed` (`async`, `src`)
+    // and `HOOKS.frames.changed` (`src`). It keeps the custom-element reaction (`HOOKS.attrs`). Same write, same mutation record, same errors.
+    function putClass(el, text) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
+        var ar = HOOKS.attrs && HOOKS.watched.class === true && HOOKS.attrs(el, 'setAttr', 'class', true);
+        var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
+        if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
+        if (m) m();
+        if (ar) ar();
+    }
+    function store(st, ts, text) {
+        if (text === undefined) text = tlJoin(ts, ' ');
+        putClass(st.el, text);
+        st.raw = text; st.ts = ts; st.clean = true;
+    }
+    getter(DOMTokenList.prototype, 'length', function () { return tokens(tlOf(this)).length; });
+    accessor(DOMTokenList.prototype, 'value', function () {
+            var st = tlOf(this), s = slotOf(st.el), v = N.attr(s.gen, s.id, 'class');
+            return v === null ? '' : v;
+        },
+        function (v) { putClass(tlOf(this).el, tlStr(v)); });
     DOMTokenList.prototype.toString = function () { return this.value; };
-    DOMTokenList.prototype.item = function (i) { var ts = tokens(this); i = i >>> 0; return i < ts.length ? ts[i] : null; };
-    DOMTokenList.prototype.contains = function (t) { return tokens(this).indexOf(String(t)) >= 0; };
+    DOMTokenList.prototype.item = function (i) { var ts = tokens(tlOf(this)); i = i >>> 0; return i < ts.length ? ts[i] : null; };
+    DOMTokenList.prototype.contains = function (t) { return tlIndexOf(tokens(tlOf(this)), tlStr(t)) >= 0; };
     DOMTokenList.prototype.add = function () {
-        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'add'); });
-        var ts = tokens(this);
-        args.forEach(function (t) { if (ts.indexOf(t) < 0) ts.push(t); });
-        store(this, ts);
+        var st = tlOf(this), n = arguments.length, args = [];
+        for (var k = 0; k < n; k++) args[k] = checkToken(arguments[k], 'add');
+        var ts = tokens(st), raw = st.raw, clean = st.clean, grown = false;
+        for (var m = 0; m < n; m++) {
+            if (tlIndexOf(ts, args[m]) < 0) { ts = tlWith(ts, args[m]); grown = true; }
+        }
+        // A token already there still rewrites the attribute (DOM's update steps
+        // run, so the text is normalized and an observer gets a record).
+        if (n === 1 && grown && clean) store(st, ts, raw === null || raw === '' ? args[0] : raw + ' ' + args[0]);
+        else if (!grown && clean && raw !== null) store(st, ts, raw);
+        else store(st, ts);
     };
     DOMTokenList.prototype.remove = function () {
-        var args = Array.prototype.map.call(arguments, function (t) { return checkToken(t, 'remove'); });
-        var ts = tokens(this).filter(function (t) { return args.indexOf(t) < 0; });
+        var st = tlOf(this), n = arguments.length, args = [];
+        for (var k = 0; k < n; k++) args[k] = checkToken(arguments[k], 'remove');
+        var ts = tokens(st), kept = ts;
+        for (var m = 0; m < n; m++) {
+            var at = tlIndexOf(kept, args[m]);
+            if (at >= 0) kept = tlWithout(kept, at);
+        }
         // DOM's update steps skip writing a class attribute that isn't there.
-        if (this[TOKENS].hasAttribute('class')) store(this, ts);
+        if (st.raw === null) return;
+        if (kept === ts && st.clean) store(st, ts, st.raw);
+        else store(st, kept);
     };
     DOMTokenList.prototype.toggle = function (t, force) {
         t = checkToken(t, 'toggle');
-        var ts = tokens(this), i = ts.indexOf(t);
-        if (i >= 0 && force !== true) { ts.splice(i, 1); store(this, ts); return false; }
-        if (i < 0 && force !== false) { ts.push(t); store(this, ts); return true; }
+        var st = tlOf(this), ts = tokens(st), i = tlIndexOf(ts, t);
+        if (i >= 0 && force !== true) { store(st, tlWithout(ts, i)); return false; }
+        if (i < 0 && force !== false) {
+            store(st, tlWith(ts, t), st.clean && (st.raw === null || st.raw === '') ? t : st.clean ? st.raw + ' ' + t : undefined);
+            return true;
+        }
         return i >= 0;
     };
     DOMTokenList.prototype.replace = function (a, b) {
         a = checkToken(a, 'replace'); b = checkToken(b, 'replace');
-        var ts = tokens(this), i = ts.indexOf(a);
+        var st = tlOf(this), ts = tokens(st), i = tlIndexOf(ts, a);
         if (i < 0) return false;
-        var j = ts.indexOf(b);
-        if (j >= 0 && j !== i) ts.splice(i, 1); else ts[i] = b;
-        store(this, ts);
+        // The new token takes the place of whichever of the two came first; the other goes (DOM replace).
+        var j = tlIndexOf(ts, b), out = [], first = j >= 0 && j < i ? j : i;
+        for (var k = 0; k < ts.length; k++) {
+            if (k === first) out[out.length] = b; else if (k !== i && k !== j) out[out.length] = ts[k];
+        }
+        store(st, out);
         return true;
     };
-    DOMTokenList.prototype.forEach = function (cb, self) { tokens(this).forEach(cb, self); };
-    DOMTokenList.prototype[Symbol.iterator] = function () { return tokens(this)[Symbol.iterator](); };
+    // The callback gets (token, index, the list), as Chrome's does, never the kept array,
+    // and the set is read again at each step (a callback that removes a class changes what
+    // follows, Chrome 148).
+    DOMTokenList.prototype.forEach = function (cb, self) {
+        var st = tlOf(this), ts = tokens(st);
+        if (typeof cb !== 'function') throw new TypeError("Failed to execute 'forEach' on 'DOMTokenList': parameter 1 is not of type 'Function'.");
+        for (var i = 0; i < ts.length; i++) {
+            tlCall(cb, self, ts[i], i, this);
+            ts = tokens(st);
+        }
+    };
+    // The iterator walks the cached token array itself. Safe only while that array is never
+    // mutated after it is stored: every update builds a new array (tlWith/tlWithout/tlParse).
+    DOMTokenList.prototype[Symbol.iterator] = function () { return tlValues(tokens(tlOf(this))); };
     var classLists = new WeakMap();
     getter(Element.prototype, 'classList', function () {
         slotOf(this);
-        var l = classLists.get(this);
+        var l = mapGet(classLists, this);
         if (!l) {
-            l = Object.create(DOMTokenList.prototype);
-            Object.defineProperty(l, TOKENS, { value: this });
-            // The indexed getter (`classList[0]`) answers like item().
-            l = new Proxy(l, {
+            var st = { el: this, raw: null, ts: null, clean: true };
+            // The indexed getter (`classList[0]`) answers like item(). A property
+            // name that does not start with a digit cannot be an index.
+            l = new Proxy(Object.create(DOMTokenList.prototype), {
                 get: function (t, p, r) {
-                    return typeof p === 'string' && /^(0|[1-9][0-9]*)$/.test(p)
-                        ? tokens(t)[Number(p)] : Reflect.get(t, p, r);
+                    if (typeof p === 'string') {
+                        var c = tlCode(p, 0);
+                        if (c >= 48 && c <= 57 && tlTest(TL_INDEX, p)) return tokens(st)[+p];
+                    }
+                    return tlGet(t, p, r);
                 }
             });
-            classLists.set(this, l);
+            mapSet(tlState, l, st);
+            mapSet(classLists, this, l);
         }
         return l;
     });
@@ -4066,11 +4698,11 @@ const WRAPPERS_JS: &str = r#"
         byId: function (id) { return wrap(id); }
     };
     // What web_animations.js drives the engine's animated-style layer
-    // with; it takes this and deletes it. write: the element's entries,
+    // with, kept on the host object. write: the element's entries,
     // `[[property, value, composite], ...]`, or null for none. css: the
     // engine's CSS animations and transitions as of the last layout.
     // control: pause/play/cancel/finish one of them.
-    g.__rustkit_animated_style = {
+    __rk.animatedStyle = {
         write: function (el, entries) {
             var s = slotOf(el);
             N.animate(s.gen, s.id, entries ? JSON.stringify(entries) : null);
@@ -4221,7 +4853,7 @@ const WRAPPERS_JS: &str = r#"
         'transition-timing-function': 'ease', 'translate': 'none', 'vertical-align': 'baseline',
         'word-break': 'normal', 'word-spacing': '0px', 'word-wrap': 'normal'
     };
-    var hasOwn = function (o, n) { return Object.prototype.hasOwnProperty.call(o, n); };
+    // `hasOwn` here is the install-time helper declared above, with the event records.
     // Names a read answers but an enumeration leaves out, as Chromium does:
     // shorthands (still readable by name).
     var COMPUTED_SHORTHANDS = {};
@@ -4507,7 +5139,7 @@ const WRAPPERS_JS: &str = r#"
             get: function (t, p, r) {
                 if (typeof p !== 'string') return Reflect.get(t, p, r);
                 var c0 = p.charCodeAt(0);
-                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[Number(p)];
+                if (c0 >= 48 && c0 <= 57 && /^(0|[1-9][0-9]*)$/.test(p)) return names()[+p];
                 if (p in t) return Reflect.get(t, p, r);
                 var n = p.indexOf('--') === 0 ? p : kebab(p).replace(/^webkit-/, '-webkit-');
                 return p === 'cssFloat' ? (m['float'] || '') : read(n);
@@ -4568,7 +5200,8 @@ const WRAPPERS_JS: &str = r#"
     // the Rust copy of this rule; both run declaration_list_cases.json.
     function splitDecls(text) {
         var out = [], cur = '', closers = [], quote = null, openUrl = false, i = 0, c, j;
-        var pairs = { '(': ')', '[': ']', '{': '}' };
+        var pairs = objCreate(null);
+        pairs['('] = ')'; pairs['['] = ']'; pairs['{'] = '}';
         while (i < text.length) {
             c = text.charAt(i++);
             if (c === '\\') { cur += c + text.charAt(i++); continue; }
@@ -4607,45 +5240,258 @@ const WRAPPERS_JS: &str = r#"
         return out;
     }
     // A value holding a bad url (CSS Syntax 3 §4.3.6: an unquoted url with a
-    // quote, `(`, inner whitespace or a control character in it) is invalid
-    // for every property, so the declaration is not in the block (CH2.E29:
-    // Chromium's `el.style.length` leaves it out and the earlier value
-    // stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    // quote, `(`, inner whitespace, a control character or a broken escape in
+    // it) is invalid for every property, so the declaration is not in the
+    // block (CH2.E29: Chromium's `el.style.length` leaves it out and the
+    // earlier value stands). The same rule as `rustkit_css::mask::parse_css_url`.
+    //
+    // The value is read as the CSS tokenizer reads it (SEC-STYLE-URL): a
+    // function name is an identifier with its escapes decoded (`\75rl(` is
+    // `url(`), strings and comments are skipped, an identifier after `#` or
+    // `@`, or one that starts with a digit, is not a function name, and
+    // whitespace is CSS whitespace. Pinned against Chrome 148 in
+    // style_value_url_tests.rs. Every built-in it uses is taken now, so page
+    // script cannot change the answer.
+    //
+    // Only a `url(` or an escape can make a value bad, so a value with
+    // neither (almost every value a page writes) is answered by one search.
+    var urlLower = uncurry(String.prototype.toLowerCase), urlIndexOf = uncurry(String.prototype.indexOf);
+    var urlCode = uncurry(String.prototype.charCodeAt);
+    // A property name or priority as the declaration methods compare it, with the same taken built-ins.
+    var cssTrim = uncurry(String.prototype.trim), toDOMString = String;
+    function propertyName(name) { return urlLower(cssTrim(toDOMString(name))); }
+    function cssNewline(c) { return c === 10 || c === 13 || c === 12; }
+    function cssSpace(c) { return c === 32 || c === 9 || cssNewline(c); }
+    // A value without its leading and trailing CSS whitespace (space, tab, newlines; not NBSP or the other
+    // characters JavaScript's trim takes, which CSS reads as name characters).
+    var cssSlice = uncurry(String.prototype.slice);
+    function cssTrimValue(v) {
+        var a = 0, b = v.length;
+        while (a < b && cssSpace(urlCode(v, a))) a++;
+        while (b > a && cssSpace(urlCode(v, b - 1))) b--;
+        return a === 0 && b === v.length ? v : cssSlice(v, a, b);
+    }
+    function hexValue(c) {
+        if (c >= 48 && c <= 57) return c - 48;
+        if (c >= 65 && c <= 70) return c - 55;
+        if (c >= 97 && c <= 102) return c - 87;
+        return -1;
+    }
+    function identCode(c) {
+        return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 45 || c >= 128;
+    }
+    // A backslash at `i` starts an escape unless a newline follows it.
+    function validEscape(value, i) {
+        return urlCode(value, i) === 92 && !(i + 1 < value.length && cssNewline(urlCode(value, i + 1)));
+    }
+    // The index just past the escape whose backslash is at `i` (§4.3.7: up to six hex digits and one
+    // whitespace, or one other character).
+    function escapeEnd(value, i) {
+        var n = value.length, j = i + 1, k;
+        if (j >= n) return j;
+        if (hexValue(urlCode(value, j)) < 0) return j + 1;
+        for (k = 0; k < 6 && j < n && hexValue(urlCode(value, j)) >= 0; k++) j++;
+        if (j + 1 < n && urlCode(value, j) === 13 && urlCode(value, j + 1) === 10) return j + 2;
+        if (j < n && cssSpace(urlCode(value, j))) return j + 1;
+        return j;
+    }
+    // Characters the engine's url reader (`rustkit_css::mask::parse_css_url`: Rust's `char::is_whitespace` and
+    // `is_control`) refuses in an unquoted url although CSS does not (NUL reads as U+FFFD, NBSP is a url
+    // character): refused here too while the engine does, so a value kept here is one the engine reads alike.
+    function engineRefusesInUrl(c) {
+        return c === 0 || (c >= 0x7f && c <= 0x9f) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+            c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+    }
     function hasBadUrl(value) {
-        var quote = null, i, j, k, c;
-        for (i = 0; i < value.length; i++) {
-            c = value.charAt(i);
-            if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
-            if (c === '"' || c === "'") { quote = c; continue; }
-            if (c === '\\') { i++; continue; }
-            // `url(` as its own function name, not the tail of `foourl(`.
-            if (value.substr(i, 4).toLowerCase() !== 'url(' ||
-                (i > 0 && /[\w\-\\\u0080-￿]/.test(value.charAt(i - 1)))) continue;
-            for (j = i + 4; j < value.length && /\s/.test(value.charAt(j)); j++) {}
-            // A quoted url is a function with a string: the strings rule above reads it.
-            if (value.charAt(j) === '"' || value.charAt(j) === "'") { i = j - 1; continue; }
-            for (; j < value.length; j++) {
-                c = value.charAt(j);
-                if (c === '\\') { j++; continue; }
-                if (c === ')') break;
-                if (c === '"' || c === "'" || c === '(' || /[\x00-\x08\x0b\x0e-\x1f\x7f]/.test(c)) return true;
-                if (/\s/.test(c)) {
-                    for (k = j; k < value.length && /\s/.test(value.charAt(k)); k++) {}
-                    // Whitespace is allowed only before the closing `)`.
-                    if (k < value.length && value.charAt(k) !== ')') return true;
-                    j = k - 1;
+        if (urlIndexOf(urlLower(value), 'url(') < 0 && urlIndexOf(value, '\\') < 0) return false;
+        var n = value.length, i = 0, c, q, h, k, cp, prev = -1;
+        while (i < n) {
+            c = urlCode(value, i);
+            if (c === 34 || c === 39) {
+                // A string: to its closing quote; a backslash takes the next character.
+                for (i++; i < n; i++) {
+                    q = urlCode(value, i);
+                    if (q === 92) { i++; continue; }
+                    if (q === c || cssNewline(q)) break;
+                }
+                prev = c; i++;
+                continue;
+            }
+            if (c === 47 && i + 1 < n && urlCode(value, i + 1) === 42) {
+                k = urlIndexOf(value, '*/', i + 2);
+                i = k < 0 ? n : k + 2;
+                prev = 32;
+                continue;
+            }
+            if (!identCode(c) && !validEscape(value, i)) { prev = c; i++; continue; }
+            // An identifier run, decoded: its length and its first three code points (plain variables, not an
+            // array page script could reach through Array.prototype).
+            var count = 0, c0 = -1, c1 = -1, c2 = -1;
+            while (i < n) {
+                c = urlCode(value, i);
+                if (identCode(c)) { cp = c; i++; }
+                else if (validEscape(value, i)) {
+                    i++;
+                    if (i >= n) { cp = 0xfffd; }
+                    else if (hexValue(urlCode(value, i)) >= 0) {
+                        cp = 0;
+                        for (k = 0; k < 6 && i < n && (h = hexValue(urlCode(value, i))) >= 0; k++, i++) cp = cp * 16 + h;
+                        if (i < n && urlCode(value, i) === 13 && i + 1 < n && urlCode(value, i + 1) === 10) i += 2;
+                        else if (i < n && cssSpace(urlCode(value, i))) i++;
+                        if (cp === 0 || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) cp = 0xfffd;
+                    } else { cp = urlCode(value, i); i++; }
+                } else break;
+                if (count === 0) c0 = cp; else if (count === 1) c1 = cp; else if (count === 2) c2 = cp;
+                count++;
+            }
+            var isUrl = count === 3 && prev !== 35 && prev !== 64 &&
+                (c0 === 117 || c0 === 85) && (c1 === 114 || c1 === 82) && (c2 === 108 || c2 === 76) &&
+                i < n && urlCode(value, i) === 40;
+            prev = 97;
+            if (!isUrl) continue;
+            // The url's contents (§4.3.6), after `(` and any whitespace.
+            for (i++; i < n && cssSpace(urlCode(value, i)); i++) {}
+            // A quoted url is a function with a string: the string rule above reads it.
+            if (i < n && (urlCode(value, i) === 34 || urlCode(value, i) === 39)) continue;
+            for (; i < n; i++) {
+                c = urlCode(value, i);
+                if (c === 41) break;
+                if (cssSpace(c)) {
+                    for (k = i; k < n && cssSpace(urlCode(value, k)); k++) {}
+                    // Whitespace is allowed only before the closing `)` (or the end).
+                    if (k < n && urlCode(value, k) !== 41) return true;
+                    i = k - 1;
+                    continue;
+                }
+                if (c === 34 || c === 39 || c === 40 || c <= 8 || c === 11 || (c >= 14 && c <= 31) || c === 127) return true;
+                if (engineRefusesInUrl(c)) return true;
+                if (c === 92) {
+                    if (!validEscape(value, i)) return true;
+                    i = escapeEnd(value, i) - 1;
                 }
             }
-            i = j;
+            i++;
+            prev = 41;
         }
         return false;
     }
+    // How many times an inline style attribute's text has been parsed (`__rk.inlineStyleParses`): the
+    // measure behind MotionMark's Multiply, which reads and writes thousands of inline properties a frame.
+    var inlineStyleParses = 0;
+    __rk.inlineStyleParses = function () { return inlineStyleParses; };
+    // Each element's declarations as last parsed, with the attribute text they were parsed from: a read
+    // of unchanged text needs no parse. Keyed by the text itself, so a script's setAttribute (or anything
+    // else that changes the attribute) is read afresh. Readers see the kept declarations' fields; writers
+    // work on copies, and a write keeps its own copy.
+    //
+    // This state outlives a call, so it is made only of what page script cannot reach or change: lists and
+    // declarations inherit from nothing, are filled by assignment with an explicit count, and hold only
+    // strings and booleans; the built-ins on these paths are taken now. A parse (the older code below, which
+    // reads built-ins as it goes) is kept only while those built-ins are still the ones this script
+    // started with, and only when it produced plain strings: each field of its output is read once, and
+    // the value checked is the value kept. A parse that page script disturbed in a way that check does not
+    // see (an index accessor on Array.prototype, say) still yields plain strings, kept until the text
+    // changes.
+    var parsedStyles = new WeakMap(), mapDelete = uncurry(WeakMap.prototype.delete);
+    var ownKey = uncurry(Object.prototype.hasOwnProperty), strCode = uncurry(String.prototype.charCodeAt);
+    var strLower = uncurry(String.prototype.toLowerCase), fromCode = String.fromCharCode;
+    var ownDescriptor = Object.getOwnPropertyDescriptor;
+    var PARSER_BUILTINS = [
+        [Array.prototype, 'filter'], [Array.prototype, 'forEach'], [Array.prototype, 'push'], [Array.prototype, 'pop'],
+        [String.prototype, 'charAt'], [String.prototype, 'substr'], [String.prototype, 'slice'],
+        [String.prototype, 'indexOf'], [String.prototype, 'trim'], [String.prototype, 'toLowerCase'],
+        [String.prototype, 'replace'], [RegExp.prototype, 'test'], [RegExp.prototype, 'exec']
+    ];
+    var PARSER_ORIGINALS = [];
+    for (var pb = 0; pb < PARSER_BUILTINS.length; pb++) {
+        PARSER_ORIGINALS[pb] = ownDescriptor(PARSER_BUILTINS[pb][0], PARSER_BUILTINS[pb][1]).value;
+    }
+    // Whether the parser's built-ins are as they were: an own data property holding the original. A
+    // descriptor read runs no page code.
+    function parserPristine() {
+        for (var i = 0; i < PARSER_BUILTINS.length; i++) {
+            var d = ownDescriptor(PARSER_BUILTINS[i][0], PARSER_BUILTINS[i][1]);
+            if (!d || !ownKey(d, 'value') || d.value !== PARSER_ORIGINALS[i]) return false;
+        }
+        return true;
+    }
+    function newList() {
+        var l = objCreate(null);
+        l.n = 0;
+        return l;
+    }
+    function newDecl(name, value, important) {
+        var d = objCreate(null);
+        d.name = name; d.value = value; d.important = important;
+        return d;
+    }
+    function listAdd(l, d) {
+        l[l.n] = d;
+        l.n = l.n + 1;
+    }
+    // The parser's output as a private list. `clean` is false when an entry was not plain strings and a
+    // boolean (the parse is then not kept).
+    function fromParse(out) {
+        var l = newList(), n = out.length, clean = typeof n === 'number';
+        for (var i = 0; clean && i < n; i++) {
+            // Each field is read once: what is checked is what is kept.
+            var x = out[i], name, value, important;
+            if (x !== null && typeof x === 'object') { name = x.name; value = x.value; important = x.important; }
+            if (typeof name === 'string' && typeof value === 'string' && typeof important === 'boolean') {
+                listAdd(l, newDecl(name, value, important));
+            } else {
+                clean = false;
+            }
+        }
+        l.clean = clean;
+        return l;
+    }
+    function copyList(src) {
+        var l = newList();
+        for (var i = 0; i < src.n; i++) listAdd(l, newDecl(src[i].name, src[i].value, src[i].important));
+        return l;
+    }
+    function exactOf(l) {
+        for (var i = 0; i < l.n; i++) {
+            if (!nameRoundTrips(l[i].name) || !roundTrips(l[i].value)) return false;
+        }
+        return true;
+    }
+    function keep(el, text, list, exact) {
+        var e = objCreate(null);
+        e.text = text; e.list = list; e.exact = exact;
+        mapSet(parsedStyles, el, e);
+    }
+    // The kept declarations, for reading only.
+    function keptDecls(st) {
+        var el = st[OWNER], raw = el.getAttribute('style'), text = raw == null ? '' : raw;
+        // An attribute read that answers something other than a string (page script's own getAttribute) is
+        // parsed as its text and nothing is kept.
+        var keepable = typeof text === 'string';
+        if (!keepable) text = '' + text;
+        var kept = mapGet(parsedStyles, el);
+        if (keepable && kept && kept.text === text) return kept.list;
+        var list = fromParse(parseDecls(text));
+        if (keepable && list.clean && parserPristine()) keep(el, text, list, exactOf(list));
+        else mapDelete(parsedStyles, el);
+        return list;
+    }
+    // A copy, for a caller that changes it.
     function decls(st) {
+        return copyList(keptDecls(st));
+    }
+    function declNamed(st, name) {
+        var list = keptDecls(st);
+        for (var i = 0; i < list.n; i++) if (list[i].name === name) return list[i];
+        return null;
+    }
+    function parseDecls(text) {
         var out = [];
-        splitDecls(st[OWNER].getAttribute('style') || '').forEach(function (d) {
+        inlineStyleParses++;
+        splitDecls(text).forEach(function (d) {
             var i = d.indexOf(':');
             if (i < 0) return;
-            var name = d.slice(0, i).trim().toLowerCase(), value = d.slice(i + 1).trim();
+            var name = d.slice(0, i).trim().toLowerCase(), value = cssTrimValue(d.slice(i + 1));
             var important = /!\s*important$/i.test(value);
             if (important) value = value.replace(/\s*!\s*important$/i, '');
             if (!name || !value) return;
@@ -4655,59 +5501,173 @@ const WRAPPERS_JS: &str = r#"
         });
         return out;
     }
-    function storeDecls(st, ds) {
-        st[OWNER].setAttribute('style', ds.map(function (d) {
-            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
-        }).join(' '));
+    // A declaration whose serialization reads back as itself: a plain property name (an identifier or a
+    // custom property), and a value with no quote, escape, `;`, `!`, brace, comment or control character
+    // whose parentheses and brackets nest and close in order (`rotate(9deg)`, `hsla(…)`). Anything else
+    // is parsed again on the next read, which is always right. Character codes, not patterns.
+    function isLowerAlpha(c) { return c >= 97 && c <= 122; }
+    function isDigit(c) { return c >= 48 && c <= 57; }
+    function nameRoundTrips(name) {
+        var n = name.length, i = 0;
+        if (n === 0) return false;
+        if (n >= 2 && strCode(name, 0) === 45 && strCode(name, 1) === 45) {
+            if (n === 2) return false;
+            for (i = 2; i < n; i++) {
+                var k = strCode(name, i);
+                if (!isLowerAlpha(k) && !isDigit(k) && k !== 45 && k !== 95) return false;
+            }
+            return true;
+        }
+        if (strCode(name, 0) === 45) i = 1;
+        if (i >= n || !isLowerAlpha(strCode(name, i))) return false;
+        for (i = i + 1; i < n; i++) {
+            var c = strCode(name, i);
+            if (!isLowerAlpha(c) && !isDigit(c) && c !== 45) return false;
+        }
+        return true;
     }
+    function roundTrips(value) {
+        // The open brackets, entries 0..depth-1.
+        var open = objCreate(null), depth = 0, prev = -1;
+        for (var i = 0; i < value.length; i++) {
+            var c = strCode(value, i);
+            // " ' \ ; ! { } and control characters
+            if (c === 34 || c === 39 || c === 92 || c === 59 || c === 33 || c === 123 || c === 125 || c < 32 || c === 127) return false;
+            // `/*` and `*/`
+            if ((prev === 47 && c === 42) || (prev === 42 && c === 47)) return false;
+            if (c === 40) open[depth++] = 41;
+            else if (c === 91) open[depth++] = 93;
+            else if (c === 41 || c === 93) { if (depth === 0 || open[--depth] !== c) return false; }
+            prev = c;
+        }
+        return depth === 0;
+    }
+    function serializeDecls(ds) {
+        var text = '';
+        for (var i = 0; i < ds.n; i++) {
+            var d = ds[i];
+            text += (i ? ' ' : '') + d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
+        }
+        return text;
+    }
+    // `ds` is a private list the caller made and drops: it is written, and kept under the text written when
+    // every declaration in it reads back as itself, so the next read of that text needs no parse. If the
+    // write itself changes the attribute again (a custom element's attributeChangedCallback), the text no
+    // longer matches and the next read parses.
+    function storeDecls(st, ds) {
+        var el = st[OWNER], text = serializeDecls(ds), exact = exactOf(ds);
+        el.setAttribute('style', text);
+        if (exact) keep(el, text, ds, true);
+        else mapDelete(parsedStyles, el);
+    }
+    // `backgroundColor` -> `background-color`, each name converted once (a null-prototype table: no
+    // inherited key answers, and page script cannot reach it). The conversion reads character codes.
+    var cssNames = objCreate(null), cssNameCount = 0;
     function cssName(prop) {
+        if (ownKey(cssNames, prop)) return cssNames[prop];
+        var name = cssNameOf(prop);
+        if (cssNameCount < 4096) { cssNames[prop] = name; cssNameCount++; }
+        return name;
+    }
+    function cssNameOf(prop) {
         if (prop === 'cssFloat') return 'float';
-        if (prop.indexOf('-') >= 0) return prop.toLowerCase();
-        return prop.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); })
-                   .replace(/^(webkit|moz|ms)-/, '-$1-');
+        var out = '', dash = false, i;
+        for (i = 0; i < prop.length; i++) if (strCode(prop, i) === 45) { dash = true; break; }
+        if (dash) return strLower(prop);
+        for (i = 0; i < prop.length; i++) {
+            var c = strCode(prop, i);
+            out += c >= 65 && c <= 90 ? '-' + fromCode(c + 32) : fromCode(c);
+        }
+        // `webkitX` -> `-webkit-x` (and moz, ms).
+        var prefixes = ['webkit-', 'moz-', 'ms-'];
+        for (i = 0; i < prefixes.length; i++) {
+            var pre = prefixes[i], match = out.length > pre.length;
+            for (var j = 0; match && j < pre.length; j++) if (strCode(out, j) !== strCode(pre, j)) match = false;
+            if (match) return '-' + out;
+        }
+        return out;
+    }
+    // NATIVE-SETPROPERTY: inline style reads and writes are one host call each (`inline_style.rs`, the
+    // same results as the JavaScript copy here, which interprets ~6,800 opcodes per write). Only what
+    // runs page code stays here: the arguments' string conversions, and a MutationObserver's or a
+    // custom element's hook around a write that changed the attribute, made as `putPlain` makes them.
+    // `__rk.styleNative(false)` puts the JavaScript copy back, for the cross-check tests.
+    var styleNative = true, styleString = String;
+    __rk.styleNative = function (on) { styleNative = on === true; };
+    function styleRead(st, op, arg) {
+        var s = slotOf(st[OWNER]), r = N.styleRead(s.gen, s.id, op, arg);
+        return r === -1 ? (op === 'length' ? 0 : '') : r;
+    }
+    function styleWrite(el, op, name, value, priority) {
+        var s = slotOf(el);
+        var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'style');
+        var ar = HOOKS.attrs && HOOKS.watched.style === true && HOOKS.attrs(el, 'setAttr', 'style', true);
+        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, op, name, value, priority);
+        if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+        // `set` answers whether it wrote; `remove` the value the property had, written when it had one.
+        if (r === true || (op === 'remove' && r !== '')) {
+            if (m) m();
+            if (ar) ar();
+        }
+        return r;
     }
     var styleMethods = {
         getPropertyValue: function (name) {
-            name = String(name).trim().toLowerCase();
-            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            if (styleNative) return styleRead(this, 'value', styleString(name));
+            var d = declNamed(this, propertyName(name));
             return d ? d.value : '';
         },
         getPropertyPriority: function (name) {
-            name = String(name).trim().toLowerCase();
-            var d = decls(this).filter(function (x) { return x.name === name; })[0];
+            if (styleNative) return styleRead(this, 'priority', styleString(name));
+            var d = declNamed(this, propertyName(name));
             return d && d.important ? 'important' : '';
         },
         setProperty: function (name, value, priority) {
-            name = String(name).trim().toLowerCase();
-            value = value == null ? '' : String(value).trim();
+            if (styleNative) {
+                styleWrite(this[OWNER], 'set', styleString(name), value == null ? '' : styleString(value), styleString(priority || ''));
+                return;
+            }
+            name = propertyName(name);
+            value = value == null ? '' : cssTrimValue(toDOMString(value));
+            // Plain strings from here on: what is serialised is what is kept and checked.
+            if (typeof name !== 'string') name = '' + name;
+            if (typeof value !== 'string') value = '' + value;
             if (value === '') { this.removeProperty(name); return; }
             // An invalid value changes nothing (the attribute is not rewritten).
             if (hasBadUrl(value)) return;
-            var ds = decls(this), d = ds.filter(function (x) { return x.name === name; })[0];
-            var important = String(priority || '').toLowerCase() === 'important';
+            var important = urlLower(toDOMString(priority || '')) === 'important';
             // The same declaration again changes nothing: the attribute is
             // not rewritten (Blink's set-property returns "did not change"),
             // so a geometry read after it lays nothing out (LAT7).
-            if (d && d.value === value && d.important === important) return;
+            var same = declNamed(this, name);
+            if (same && same.value === value && same.important === important) return;
+            var ds = decls(this), d = null;
+            for (var i = 0; i < ds.n; i++) if (ds[i].name === name) { d = ds[i]; break; }
             if (d) { d.value = value; d.important = important; }
-            else ds.push({ name: name, value: value, important: important });
+            else listAdd(ds, newDecl(name, value, important));
             storeDecls(this, ds);
         },
         removeProperty: function (name) {
-            name = String(name).trim().toLowerCase();
-            var ds = decls(this), old = this.getPropertyValue(name);
-            var kept = ds.filter(function (x) { return x.name !== name; });
-            if (kept.length !== ds.length) storeDecls(this, kept);
+            if (styleNative) return styleWrite(this[OWNER], 'remove', styleString(name), '', '');
+            name = propertyName(name);
+            if (typeof name !== 'string') name = '' + name;
+            var ds = decls(this), old = this.getPropertyValue(name), kept = newList();
+            for (var i = 0; i < ds.n; i++) if (ds[i].name !== name) listAdd(kept, ds[i]);
+            if (kept.n !== ds.n) storeDecls(this, kept);
             return old;
         },
-        item: function (i) { var ds = decls(this); i = i >>> 0; return i < ds.length ? ds[i].name : ''; }
+        item: function (i) {
+            if (styleNative) return styleRead(this, 'item', i >>> 0);
+            var ds = keptDecls(this); i = i >>> 0; return i < ds.n ? ds[i].name : '';
+        }
     };
     Object.keys(styleMethods).forEach(function (k) { CSSStyleDeclaration.prototype[k] = styleMethods[k]; });
-    getter(CSSStyleDeclaration.prototype, 'length', function () { return decls(this).length; });
+    getter(CSSStyleDeclaration.prototype, 'length', function () {
+        return styleNative ? styleRead(this, 'length', 0) : keptDecls(this).n;
+    });
     accessor(CSSStyleDeclaration.prototype, 'cssText', function () {
-        return this[OWNER].getAttribute('style') ? decls(this).map(function (d) {
-            return d.name + ': ' + d.value + (d.important ? ' !important' : '') + ';';
-        }).join(' ') : '';
+        if (styleNative) return styleRead(this, 'text', '');
+        return this[OWNER].getAttribute('style') ? serializeDecls(keptDecls(this)) : '';
     }, function (v) { this[OWNER].setAttribute('style', v == null ? '' : String(v)); });
     // Property names (el.style.backgroundColor) go through a Proxy, so any
     // CSS property reads and writes without a per-property table.
@@ -4725,7 +5685,9 @@ const WRAPPERS_JS: &str = r#"
             },
             set: function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
-                t.setProperty(cssName(p), v);
+                // `setProperty(name, v)` with no priority, without the method call (NATIVE-SETPROPERTY).
+                if (styleNative) styleWrite(t[OWNER], 'set', cssName(p), v == null ? '' : styleString(v), '');
+                else t.setProperty(cssName(p), v);
                 return true;
             }
         });
@@ -5787,6 +6749,21 @@ const WRAPPERS_JS: &str = r#"
     // are one step, so a handler never runs for an image that reads as
     // still loading.
     var loadedImages = new WeakMap();
+    // MEDIA-AVF M1.2: each media element's state as the engine last pushed it, read
+    // by the HTMLMediaElement getters. `__rk.mediaEvent(id, type, state)` sets it (when
+    // `state` is given, as JSON) and then fires `type` (when given): trusted, at the
+    // element only, so a handler reads the state as of its own event.
+    var MEDIA_INITIAL = { rs: 0, ns: 0, duration: null, src: '', error: null, w: 0, h: 0, buffered: [], seekable: [] };
+    var mediaStates = new WeakMap();
+    __rk.mediaEvent = function (id, type, state) {
+        var target = typeof id === 'number' ? wrap(id) : null;
+        if (!target) return;
+        if (state) mediaStates.set(target, JSON.parse(state));
+        if (!type) return;
+        var ev = make('Event', type);
+        trust(ev);
+        dispatchTo(target, ev);
+    };
     __rk.imageLoaded = function (id, width, height, url) {
         var target = typeof id === 'number' ? wrap(id) : null;
         if (!target) return;
@@ -6143,7 +7120,9 @@ const WRAPPERS_JS: &str = r#"
         N.noteWheel(wheelListeners > 0 || wheelHandler, wheelBlocking > 0 || wheelHandler);
     }
     function wheelType(type) { return type === 'wheel' || type === 'mousewheel'; }
-    var LEGACY_TYPE = new WeakMap();
+    // The frame tree's, as the type map is: the window that dispatches an
+    // event may not be the one that made it.
+    var LEGACY_TYPE = SHARED.legacyType || (SHARED.legacyType = new WeakMap());
     EventTarget.prototype.addEventListener = function (type, cb, opts) {
         if (typeof cb !== 'function' && !(cb && typeof cb.handleEvent === 'function')) return;
         var t = thisTarget(this), all = LISTENERS.get(t);
@@ -6201,6 +7180,13 @@ const WRAPPERS_JS: &str = r#"
             try { __rk.reportError(e); } catch (_) {}
         }
     }
+    function callOnError(t, h, event) {
+        try {
+            return callNow(h, t, event.message, event.filename, event.lineno, event.colno, event.error);
+        } catch (e) {
+            try { __rk.reportError(e); } catch (_) {}
+        }
+    }
     // An element's on<type> handler (HTML §8.1.8): the value assigned through
     // its `on<type>` IDL attribute (`null` included, which turns the handler
     // off), else its `on<type>` content attribute. The attribute's text is
@@ -6225,9 +7211,10 @@ const WRAPPERS_JS: &str = r#"
     // depends on the throw, and one compile path is one place to get right.
     function compileHandler(src, el) {
         try {
-            return new Function('__rk_doc', '__rk_el',
-                'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };'
-            )(el.ownerDocument || {}, el);
+            // A handler attribute is the document's code, whoever set it:
+            // its text first, then the one step that compiles it.
+            var body = 'return function (event) { with (__rk_doc) { with (__rk_el) {\n' + src + '\n} } };';
+            return __rk.compileDocumentFunction('__rk_doc,__rk_el', body)(el.ownerDocument || {}, el);
         } catch (e) {
             try { __rk.reportError(e); } catch (_) {}
             return null;
@@ -6235,7 +7222,10 @@ const WRAPPERS_JS: &str = r#"
     }
     function inlineHandler(t, type) {
         var src = t.getAttribute('on' + type);
-        if (src === null) return null;
+        return src === null ? null : inlineFrom(t, type, src);
+    }
+    // The handler `src` is as `t`'s `on<type>` attribute, compiled once.
+    function inlineFrom(t, type, src) {
         var all = INLINE.get(t);
         if (!all) { all = {}; INLINE.set(t, all); }
         var c = all[type];
@@ -6281,8 +7271,11 @@ const WRAPPERS_JS: &str = r#"
         // name here too. Lowercasing unconditionally is fine: SVG's on<type>
         // attributes are lowercase already, so a case-sensitive SVG name
         // either is lowercase or names no handler attribute at all.
-        name = String(name).toLowerCase();
-        if (name.length > 2 && name.charCodeAt(0) === 111 && name.charCodeAt(1) === 110) {
+        name = String(name);
+        // `on` in either case, asked before lowering the name (most names are not handlers).
+        var n0 = name[0], n1 = name[1];
+        if (name.length > 2 && (n0 === 'o' || n0 === 'O') && (n1 === 'n' || n1 === 'N')) {
+            name = name.toLowerCase();
             var type = name.slice(2), a = ASSIGNED.get(t);
             if (a) delete a[type];
             // The body's attribute for a Window type is the Window's
@@ -6403,6 +7396,8 @@ const WRAPPERS_JS: &str = r#"
         if (HOOKS.retarget && event[ORIGIN]) mapSet(EV_TARGET, event, HOOKS.retarget(event[ORIGIN], t));
         var type = evType(event);
         var all = LISTENERS.get(t), list = all && all[type];
+        // A replayed `load` (below) reaches only what its record holds.
+        var only = ONLY !== null && ONLY.event === event ? ONLY : null;
         // The legacy type, at a target with no listener or handler for the
         // event's own (the user's wheel as `mousewheel`). The engine's
         // event changes type in the type map only, never by assignment.
@@ -6418,6 +7413,7 @@ const WRAPPERS_JS: &str = r#"
             for (var i = 0; i < list.length && !event[STOP_NOW]; i++) {
                 var l = list[i];
                 if (l.removed || l.capture !== capture) continue;
+                if (only && !setHas(only.entries, l)) continue;
                 if (l.once) t.removeEventListener(type, l.cb, { capture: l.capture });
                 var passiveBefore = passiveNow;
                 passiveNow = l.passive === true ? event : null;
@@ -6425,9 +7421,16 @@ const WRAPPERS_JS: &str = r#"
             }
         }
         // The on<type> handler runs with the non-capture listeners.
-        var h = capture || event[STOP_NOW] ? null : handlerOf(t, type);
-        if (typeof h === 'function' && callListener(t, h, event) === false && setHas(CANCELABLE, event)) {
-            if (isProto(Event.prototype, event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
+        var h = capture || event[STOP_NOW] ? null
+            : only ? (t === only.target ? only.handler : null) : handlerOf(t, type);
+        if (typeof h !== 'function') return;
+        // `window.onerror` (HTML §8.1.8.2, the OnErrorEventHandler): for an
+        // ErrorEvent at the Window it is called with the event's message,
+        // filename, lineno, colno and error, and `true` back cancels.
+        var special = t === g && type === 'error' && PROTOS.ErrorEvent !== undefined && isProto(PROTOS.ErrorEvent, event);
+        var back = special ? callOnError(t, h, event) : callListener(t, h, event);
+        if (back === (special ? true : false) && setHas(CANCELABLE, event)) {
+            if (isRealEvent(event)) setAdd(CANCELED, event); else event.defaultPrevented = true;
         }
     }
     // A node's parent, then document's is window (except for `load`, which
@@ -6440,6 +7443,46 @@ const WRAPPERS_JS: &str = r#"
         // A composed event goes on from a shadow root to its host.
         return p || (HOOKS.shadowParent ? HOOKS.shadowParent(n, event) : null);
     }
+    // What a `load` dispatched at `target` right now would call: its own
+    // listeners and handler, and the capturing listeners above it (`load`
+    // does not bubble and stops at the document). `null` when nothing would
+    // hear it. For web_frames.js: Chrome fires a blank frame's `load` inside
+    // the frame's insertion; the engine's comes later and is replayed to
+    // this record, so what was added, or put in a handler's place, after
+    // the insertion does not hear it. `parsed`: the frame was the parser's,
+    // and at its insertion only its `onload` attribute could be on it.
+    //
+    // Read from the engine's own records: the handler as assigned or as the
+    // `onload` attribute in the node store, the listener registry, and the
+    // node store's parent, in a walk with an end.
+    var ONLY = null, LOAD_WALK_MAX = 65536;
+    HOOKS.loadSnapshot = function (target, parsed) {
+        var t = thisTarget(target), s = t[SLOT], a = parsed ? undefined : ASSIGNED.get(t);
+        var snap = objCreate(null), any = false;
+        snap.target = t; snap.event = null; snap.handler = null; snap.src = null; snap.entries = new WeakSetNow();
+        if (a && 'load' in a) { if (typeof a.load === 'function') snap.handler = a.load; }
+        else if (s && s.gen === gen) {
+            var src = N.attr(s.gen, s.id, 'onload');
+            // Compiled when the `load` is replayed, as a dispatch does.
+            if (src !== null) snap.src = src;
+        }
+        for (var n = t, steps = 0; !parsed && n && n !== g && steps < LOAD_WALK_MAX; steps++) {
+            var all = LISTENERS.get(n), list = all && all.load;
+            for (var i = 0; list && i < list.length; i++) {
+                if (n === t || list[i].capture) { setAdd(snap.entries, list[i]); any = true; }
+            }
+            n = n === doc || !n[SLOT] ? null : related(n, 'parent');
+        }
+        return any || snap.src !== null || typeof snap.handler === 'function' ? snap : null;
+    };
+    // Dispatch `event` at the record's target to what the record holds (a
+    // listener removed since is not called).
+    HOOKS.loadReplay = function (snap, event) {
+        var was = ONLY;
+        if (snap.src !== null) { snap.handler = inlineFrom(snap.target, 'load', snap.src); snap.src = null; }
+        snap.event = event; ONLY = snap;
+        try { return dispatchTo(snap.target, event); } finally { ONLY = was; snap.event = null; }
+    };
     // Activation behaviour (DOM §2.9 "dispatch", steps 5 and 11): a click
     // (the user's, `el.click()`, or a MouseEvent script dispatches) checks a
     // checkbox before its listeners run and clicks a label's control after.
@@ -6493,7 +7536,7 @@ const WRAPPERS_JS: &str = r#"
         }
         // The canceled flag, not a property a listener can redefine; an
         // object that is not an Event keeps its own.
-        var canceled = isProto(Event.prototype, event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
+        var canceled = isRealEvent(event) ? setHas(CANCELED, event) : event.defaultPrevented === true;
         if (activated) activated(!canceled);
         return !canceled;
     };
@@ -6501,6 +7544,61 @@ const WRAPPERS_JS: &str = r#"
     // in place of `dispatchEvent` since.
     var dispatchTo = uncurry(EventTarget.prototype.dispatchEvent);
     __rk.dispatchTo = dispatchTo;
+    // Promise rejection events (HTML §8.1.7.4 "unhandled promise
+    // rejections"). The runtime calls this when a turn's microtasks have
+    // run (`JsRuntime::set_rejection_events`): once for each promise
+    // rejected with no handler (`unhandledrejection`, cancelable), and once
+    // more for one that got its handler after that (`rejectionhandled`).
+    // The event is the engine's own: trusted, at the Window, built and
+    // dispatched with nothing a page can replace. `false` back means a
+    // listener canceled it, which keeps the rejection out of the console.
+    __rk.fireRejection = function (type, promise, reason) {
+        var init = objCreate(null);
+        init.cancelable = type === 'unhandledrejection';
+        init.promise = promise;
+        init.reason = reason;
+        var e = make('PromiseRejectionEvent', type, init);
+        trust(e);
+        return dispatchTo(g, e);
+    };
+
+    // The `error` event for an uncaught exception (HTML §8.1.4.6 "report
+    // an exception"). The runtime calls this with the exception before it
+    // is reported any further (`JsRuntime::set_error_events`), and with
+    // what the event is to say, which the runtime decides from the scripts
+    // the engine registered (`JsRuntime::register_script`): the thrown
+    // value, the message, the file, line and column. Script errors from
+    // another origin are reported without detail, as the HTML standard's
+    // muted errors: the value is null, the message "Script error.", no
+    // file, no position. Nothing here reads a URL or decides that.
+    // The event is the engine's own: trusted, cancelable, at the Window,
+    // built and dispatched with nothing a page can replace. `false` back
+    // means a listener canceled it, which keeps the exception out of the
+    // console.
+    __rk.fireError = function (value, message, file, line, column) {
+        var init = objCreate(null);
+        init.cancelable = true;
+        init.message = message;
+        init.filename = file;
+        init.lineno = line;
+        init.colno = column;
+        init.error = value;
+        var e = make('ErrorEvent', 'error', init);
+        trust(e);
+        return dispatchTo(g, e);
+    };
+    // `reportError(e)` (HTML §8.1.4.6): `e` is reported as an uncaught
+    // exception is, the `error` event first.
+    defineOwn(g, 'reportError', {
+        value: function reportError(e) {
+            if (arguments.length < 1) {
+                throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
+            }
+            // `true`: reported for the page, by the code that called this.
+            __rk.reportError(e, true);
+        },
+        writable: true, enumerable: true, configurable: true
+    });
 
     function Event(type, init) {
         if (!(this instanceof Event)) {
@@ -6519,7 +7617,8 @@ const WRAPPERS_JS: &str = r#"
         setCancelable(this, !!init.cancelable);
         own(this, 'composed', !!init.composed);
         stamp(this);
-        own(this, 'timeStamp', Date.now());
+        // On performance.now()'s clock (ms from the time origin), as Chrome's DOMHighResTimeStamp.
+        own(this, 'timeStamp', typeof __rk.perfNow === 'function' ? __rk.perfNow() : Date.now());
     }
     var TYPE_GET = Object.getOwnPropertyDescriptor({ get type() { return mapGet(EVTYPE, this); } }, 'type').get;
     function own(o, k, v) { defineOwn(o, k, { value: v, writable: true, enumerable: true, configurable: true }); }
@@ -6587,6 +7686,8 @@ const WRAPPERS_JS: &str = r#"
         this.detail = detail === undefined ? null : detail;
     };
     g.Event = Event;
+    // Defined by index: no array method of another window's realm runs.
+    fixed(EVENT_PROTOS, EVENT_PROTOS.length, Event.prototype);
     g.CustomEvent = CustomEvent;
     __rk.keepCtor('Event', Event);
     __rk.keepCtor('CustomEvent', CustomEvent);
@@ -6687,6 +7788,10 @@ const WRAPPERS_JS: &str = r#"
         if (!s || s.gen !== gen) return;
         N.setAdopted(s.gen, s.id, String(json));
     };
+    // web_cssom.js: CSS.registerProperty(); '' or the DOMException name.
+    __rk.registerProperty = function (name, syntax, inherits, initial) {
+        return N.registerProperty(name, syntax, inherits, initial);
+    };
     // web_cssom.js: a <style>'s sheet.disabled, for the sheet it owns now.
     __rk.setSheetDisabled = function (node, on) {
         var s = node != null ? node[SLOT] : undefined;
@@ -6728,7 +7833,7 @@ const WRAPPERS_JS: &str = r#"
         gen = newGen;
         cache = new Map();
         var root = N.root(gen, 'document');
-        Object.defineProperty(doc, SLOT, { value: { id: root, gen: gen }, configurable: true });
+        Object.defineProperty(doc, SLOT, { value: slotRecord(root), configurable: true });
         if (typeof root === 'number') cache.set(root, doc);
     };
     __rk.domReset(0);

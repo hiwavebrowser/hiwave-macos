@@ -243,6 +243,9 @@ pub struct RelayoutStats {
     /// Time spent in them: the restyle, the patch and the display list
     /// (the commit to the presenter is not counted).
     pub animation_paint_ms: f64,
+    /// MEDIA-AVF §3.3: frames presented for a new video frame alone, with no build and
+    /// no layout.
+    pub video_frames_presented: u32,
     /// Forced layouts: script read geometry after a DOM write in the same
     /// task, so the page was laid out (not painted) for the read.
     pub forced_layouts: u64,
@@ -265,6 +268,11 @@ pub struct RelayoutStats {
     /// The most recent relayout's layout stage, in milliseconds (INC5's
     /// timing; under `RUSTKIT_INCREMENTAL_LAYOUT=verify` both passes).
     pub last_layout_ms: f64,
+    /// LPF1: relayouts asked for by script style writes that built only the written elements and
+    /// patched their paint onto the laid-out boxes (no full build, no layout).
+    pub script_restyles: u32,
+    /// The child nodes the last such restyle's build went into (its cost, in elements).
+    pub last_restyle_walked: usize,
 }
 
 impl RelayoutStats {
@@ -310,10 +318,22 @@ thread_local! {
     /// kept box tree instead of walking the DOM. The engine is single
     /// threaded; `relayout` reads it right after its own build.
     static LAST_BUILD_REUSED_TREE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the last `build_layout_from_document` on this thread ran under a restyle build
+    /// (`RESTYLE_BUILD`): it visited only the written elements and the path down to them. A
+    /// kept-tree splice starts its restyle build inside `with_building`, after the wrapper looked.
+    static LAST_BUILD_PARTIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn set_last_build_reused_tree(reused: bool) {
     LAST_BUILD_REUSED_TREE.with(|c| c.set(reused));
+}
+
+pub(crate) fn set_last_build_partial(partial: bool) {
+    LAST_BUILD_PARTIAL.with(|c| c.set(partial));
+}
+
+pub(crate) fn last_build_partial() -> bool {
+    LAST_BUILD_PARTIAL.with(|c| c.get())
 }
 
 pub(crate) fn last_build_reused_tree() -> bool {
@@ -427,7 +447,10 @@ impl Drop for StageTimer {
             Stage::DisplayList => crate::wgate::HoldStage::DisplayList,
             Stage::Snapshot => crate::wgate::HoldStage::Snapshot,
             Stage::Render => crate::wgate::HoldStage::Render,
-            Stage::Svg => return,
+            Stage::Svg => {
+                crate::wgate::add_svg_total(ms);
+                return;
+            }
         };
         crate::wgate::add(hold, ms);
     }
@@ -442,6 +465,12 @@ thread_local! {
 /// The snapshot stage's time on this thread so far, in ms.
 pub(crate) fn snapshot_total_ms() -> f64 {
     SNAPSHOT_TOTAL_MS.with(|t| t.get())
+}
+
+/// The stage times since the last take, left as they are (a forced read reads them before and
+/// after its build: the difference is that build's).
+pub(crate) fn stage_ms_so_far() -> StageMs {
+    STAGE_MS.with(|c| c.get())
 }
 
 /// The stage times since the last take, and a fresh start.

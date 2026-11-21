@@ -1,0 +1,90 @@
+vm stats: 24451130 opcodes executed
+opcodes (top 40):
+  PushFromRegister                  5312380  21.73%
+  GetPropertyByName                 2435846   9.96%
+  Move                              2052117   8.39%
+  PopIntoRegister                   1963967   8.03%
+  This                              1668187   6.82%
+  Call                              1355474   5.54%
+  CheckReturn                       1285269   5.26%
+  Return                            1285269   5.26%
+  GetArgument                       1217948   4.98%
+  SetAccumulator                    1210527   4.95%
+  JumpIfFalse                        892415   3.65%
+  GetPropertyByValue                 435713   1.78%
+  StoreRegexp                        403387   1.65%
+  GetName                            350956   1.44%
+  StoreLiteral                       279949   1.14%
+  StoreUndefined                     254914   1.04%
+  InstanceOf                         233139   0.95%
+  SetPropertyByName                  213799   0.87%
+  StrictEq                           210710   0.86%
+  IncrementLoopIteration             149922   0.61%
+  GetNameGlobal                      144763   0.59%
+  Jump                               127339   0.52%
+  Pop                                123178   0.50%
+  LogicalOr                          120627   0.49%
+  GetLengthProperty                  119003   0.49%
+  StoreZero                           89871   0.37%
+  New                                 81190   0.33%
+  Add                                 77333   0.32%
+  LogicalAnd                          56340   0.23%
+  LogicalNot                          53117   0.22%
+  Inc                                 42694   0.17%
+  StoreFalse                          38944   0.16%
+  StoreTrue                           31360   0.13%
+  PushValueToArray                    13576   0.06%
+  GetPrototype                        13023   0.05%
+  GetFunctionObject                   13023   0.05%
+  SuperCall                           13023   0.05%
+  BindThisValue                       13023   0.05%
+  Eq                                  12802   0.05%
+  DefineOwnPropertyByName             10440   0.04%
+ic misses (an access that missed its inline cache; hits = executions - misses):
+  GetPropertyByName          2790 (not cacheable: misses every time)
+  GetPropertyByName           860 (cacheable: cold, or the shape changed)
+  SetPropertyByName        173805 (not cacheable: misses every time)
+  SetPropertyByName            83 (cacheable: cold, or the shape changed)
+  GetNameGlobal                74 (cacheable: cold, or the shape changed)
+ic misses by site, receiver kind and property name (top 40):
+  SetPropertyByName    object    _codeOrigin                           45559
+  SetPropertyByName    object    _lineNumber                           35611
+  SetPropertyByName    object    _sourceFile                           35611
+  SetPropertyByName    object    _string                               35611
+  SetPropertyByName    object    _annotation                            3873
+  SetPropertyByName    object    _operands                              3873
+  GetPropertyByName    array     size                                   2786
+  SetPropertyByName    object    _name                                  2784
+  SetPropertyByName    object    _opcode                                2165
+  SetPropertyByName    object    _value                                 1610
+  SetPropertyByName    object    _base                                  1060
+  SetPropertyByName    object    _offset                                1060
+  SetPropertyByName    object    _label                                  958
+  SetPropertyByName    object    _list                                   496
+  SetPropertyByName    object    _left                                   369
+  SetPropertyByName    object    _right                                  369
+  SetPropertyByName    object    _extern                                 326
+  SetPropertyByName    object    _global                                 326
+  SetPropertyByName    object    _index                                  310
+  SetPropertyByName    object    _scale                                  310
+  SetPropertyByName    object    _body                                   273
+  SetPropertyByName    object    _variables                              273
+  GetPropertyByName    object    idx                                     229
+  SetPropertyByName    object    _variable                               172
+  SetPropertyByName    object    _elseCase                               165
+  SetPropertyByName    object    _predicate                              164
+  SetPropertyByName    object    _thenCase                               164
+  GetPropertyByName    object    tokens                                  161
+  SetPropertyByName    object    _struct                                 105
+  SetPropertyByName    object    _field                                   96
+  GetPropertyByName    object    codeOrigin                               82
+  SetPropertyByName    object    idx                                      72
+  SetPropertyByName    object    _child                                   63
+  GetPropertyByName    object    isEqualTo                                58
+  GetPropertyByName    object    names                                    43
+  GetPropertyByName    object    string                                   29
+  GetPropertyByName    array     push                                     26
+  GetPropertyByName    object    skipNewLine                              23
+  GetPropertyByName    function  mapping                                  15
+  GetPropertyByName    object    dump                                     14
+

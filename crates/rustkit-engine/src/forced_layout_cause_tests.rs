@@ -411,3 +411,60 @@ fn a_thousand_reads_between_writes_that_change_nothing_lay_out_nothing() {
     assert_eq!(read(&mut engine, view, "window.__s"), "100100");
     assert_eq!(forced(&engine, view), 0);
 }
+
+/// The number after ` key=` on a log line.
+fn number(line: &str, key: &str) -> Option<f64> {
+    let at = line.find(&format!(" {key}="))? + key.len() + 2;
+    let rest = &line[at..];
+    rest[..rest.find(' ').unwrap_or(rest.len())].trim_matches('"').parse().ok()
+}
+
+/// FORCED-READ: the line for a read that builds the tree says which read it was, how many elements
+/// the build styled, and what it cost, split into the build and the layout. The view's summary
+/// carries the two sums. The figures are checked for being there and for how they relate, never
+/// against a time.
+#[test]
+fn a_forced_reads_line_carries_the_builds_cost_and_its_element_count() {
+    let more: String = (0..10).map(|i| format!("<div class=x>{i}</div>")).collect();
+    let bigger = PAGE.replace("</body>", &format!("{more}</body>"));
+    let mut elements = Vec::new();
+    for page in [PAGE, bigger.as_str()] {
+        let (mut engine, view) = engine_with(page);
+        let lines = capture_lines("Forced read builds the tree", || {
+            engine
+                .execute_script(
+                    view,
+                    "var a = document.getElementById('a'); a.style.width = '70px'; a.offsetWidth;\
+                     a.className = 'k2'; a.getBoundingClientRect();",
+                )
+                .unwrap();
+        });
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        for (line, read) in lines.iter().zip(["offset", "rect"]) {
+            assert!(line.contains(&format!("read=\"{read}\"")), "{line}");
+            let took = number(line, "took_ms").unwrap_or_else(|| panic!("no took_ms: {line}"));
+            let build = number(line, "build_ms").unwrap_or_else(|| panic!("no build_ms: {line}"));
+            let layout = number(line, "layout_ms").unwrap_or_else(|| panic!("no layout_ms: {line}"));
+            let prepare = number(line, "prepare_ms").unwrap_or_else(|| panic!("no prepare_ms: {line}"));
+            assert!(build > 0.0 && layout >= 0.0 && prepare >= 0.0, "{line}");
+            // The parts are inside the whole (0.05 ms for the rounding of four printed figures).
+            assert!(took + 0.05 >= build + layout + prepare, "{line}");
+            assert_eq!(number(line, "passes"), Some(1.0), "{line}");
+        }
+        elements.push(number(&lines[0], "elements").unwrap_or_else(|| panic!("no elements: {}", lines[0])));
+        assert_eq!(number(&lines[1], "elements"), Some(elements[elements.len() - 1]), "{lines:#?}");
+        let summary = capture_lines("relayout summary url=", || {
+            engine.load_html(view, "<p>next</p>").expect("navigate away");
+        });
+        assert_eq!(summary.len(), 1, "{summary:#?}");
+        assert!(summary[0].contains(" forced_layouts=2 "), "{}", summary[0]);
+        let forced = number(&summary[0], "forced_ms").unwrap();
+        let build = number(&summary[0], "forced_build_ms").unwrap_or_else(|| panic!("no forced_build_ms: {}", summary[0]));
+        let layout = number(&summary[0], "forced_layout_ms").unwrap_or_else(|| panic!("no forced_layout_ms: {}", summary[0]));
+        assert!(build > 0.0 && forced + 0.1 >= build + layout, "{}", summary[0]);
+    }
+    // Ten more elements in the page are ten more in the count.
+    assert!(elements[0] >= 2.0, "{elements:?}");
+    assert_eq!(elements[1] - elements[0], 10.0, "{elements:?}");
+}
+

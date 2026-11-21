@@ -77,6 +77,112 @@ pub enum FaceKey {
     Recorded(rustkit_text::GlyphFace),
 }
 
+/// How a character is painted on Windows, from the face layout recorded.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsPaint {
+    /// Colour artwork from Segoe UI Emoji (`rasterize_glyph_directwrite_color`).
+    Colour,
+    /// A coverage mask from the run's own face.
+    Mask,
+    /// A coverage mask from the text fallback face layout measured the
+    /// character in (Segoe UI Symbol): a symbol without Emoji_Presentation,
+    /// which Chrome draws as text, not colour.
+    TextFallback,
+}
+
+/// The text face layout measures a text-presentation symbol in on Windows
+/// (`TextShaper::shape_uncached`), and paint draws it from.
+#[cfg(windows)]
+pub(crate) const WINDOWS_TEXT_SYMBOL_FAMILY: &str = "Segoe UI Symbol";
+
+/// The family a `TextFallback` glyph is drawn from: the face layout measured it in
+/// (`rustkit_text::text_fallback_face`, Blink's per-block table and then DirectWrite's
+/// fallback), so ink and advance come from one face. Chrome for Testing 148 win64 draws
+/// U+25BE from Cambria Math and U+2699 from Segoe UI Symbol. Segoe UI Symbol when nothing maps.
+#[cfg(windows)]
+pub(crate) fn windows_text_fallback_family(ch: char, run_family: &str) -> String {
+    rustkit_text::text_fallback_face(ch, run_family)
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| WINDOWS_TEXT_SYMBOL_FAMILY.to_string())
+}
+
+/// Windows' paint path for `ch`. A recorded fallback face decides (layout's
+/// one decision); without one, an `is_emoji` character keeps the colour path,
+/// as before.
+#[cfg(windows)]
+pub(crate) fn windows_paint(ch: char, face: FaceKey) -> WindowsPaint {
+    match face {
+        FaceKey::Recorded(rustkit_text::GlyphFace::Fallback { emoji: false }) => WindowsPaint::TextFallback,
+        FaceKey::Recorded(rustkit_text::GlyphFace::Fallback { emoji: true }) => WindowsPaint::Colour,
+        _ if rustkit_text::is_emoji(ch) => WindowsPaint::Colour,
+        _ => WindowsPaint::Mask,
+    }
+}
+
+/// Whether `key` must be drawn from the system collection alone: a text fallback layout
+/// measured in the system's Segoe UI Symbol, which a document's `@font-face` of the same name
+/// must not replace (layout measured the system face, and the glyph cache keys it as one).
+#[cfg(windows)]
+pub(crate) fn system_face_only(key: &GlyphKey) -> bool {
+    matches!(key.face, FaceKey::Recorded(rustkit_text::GlyphFace::Fallback { emoji: false }))
+}
+
+#[cfg(all(test, windows))]
+mod windows_paint_tests {
+    use super::*;
+    use rustkit_text::{GlyphFace, Variation};
+
+    /// A symbol layout measured in the text fallback face is a mask from that
+    /// face, never Segoe UI Emoji's colour artwork (U+2699 GEAR: Chrome for
+    /// Testing 148 win64 draws it from Segoe UI Symbol).
+    #[test]
+    fn a_recorded_text_fallback_is_a_mask_from_the_symbol_face() {
+        let gear = '\u{2699}';
+        assert_eq!(windows_paint(gear, FaceKey::Recorded(GlyphFace::Fallback { emoji: false })), WindowsPaint::TextFallback);
+        assert_eq!(windows_paint(gear, FaceKey::Recorded(GlyphFace::Fallback { emoji: true })), WindowsPaint::Colour);
+        // No record (a legacy command): the old rule.
+        assert_eq!(windows_paint(gear, FaceKey::Auto(Variation::None)), WindowsPaint::Colour);
+        assert_eq!(windows_paint('a', FaceKey::Recorded(GlyphFace::Primary)), WindowsPaint::Mask);
+        // The face exists and has ink for the symbol at 14px.
+        let drawn = rasterize_char_for_test(gear, WINDOWS_TEXT_SYMBOL_FAMILY, 14.0, 400).expect("Segoe UI Symbol has U+2699");
+        assert!(drawn.0.iter().any(|&a| a > 0), "no ink");
+        assert!((drawn.3 - 11.8125).abs() < 0.02, "advance {}", drawn.3);
+    }
+
+    /// A text fallback glyph is drawn from the face layout measured it in: Cambria
+    /// Math for U+25BE (Chrome draws it there), Segoe UI Symbol for U+2699.
+    #[test]
+    fn a_text_fallback_glyph_is_drawn_from_the_face_layout_measured() {
+        assert_eq!(windows_text_fallback_family('\u{25BE}', "Segoe UI"), "Cambria Math");
+        assert_eq!(windows_text_fallback_family('\u{2699}', "Segoe UI"), WINDOWS_TEXT_SYMBOL_FAMILY);
+        let drawn = rasterize_char_for_test('\u{25BE}', "Cambria Math", 12.0, 400).expect("Cambria Math has U+25BE");
+        assert!(drawn.0.iter().any(|&a| a > 0), "no ink");
+    }
+
+    /// The text fallback's glyph comes from the system face only; any other key may take a
+    /// document's web face first, as before.
+    #[test]
+    fn a_text_fallback_glyph_is_the_system_face_only() {
+        let key = |face| GlyphKey {
+            cluster: None,
+            codepoint: '\u{2699}',
+            font_family: WINDOWS_TEXT_SYMBOL_FAMILY.to_string(),
+            font_size: 140,
+            font_weight: 400,
+            font_style: 0,
+            subpixel_phase: 0,
+            web_face: 0,
+            coverage: 0,
+            face,
+        };
+        assert!(system_face_only(&key(FaceKey::Recorded(GlyphFace::Fallback { emoji: false }))));
+        assert!(!system_face_only(&key(FaceKey::Recorded(GlyphFace::Fallback { emoji: true }))));
+        assert!(!system_face_only(&key(FaceKey::Recorded(GlyphFace::Primary))));
+        assert!(!system_face_only(&key(FaceKey::Auto(Variation::None))));
+    }
+}
+
 impl Default for FaceKey {
     fn default() -> Self {
         FaceKey::Auto(rustkit_text::Variation::None)
@@ -1184,6 +1290,88 @@ fn estimate_glyph_size(ch: char, font_size: f32) -> (u32, u32) {
     (width.max(1), height.max(1))
 }
 
+/// The DirectWrite face a per-character glyph draws with: a document web face for its family
+/// list first, then the system collection.
+#[cfg(windows)]
+unsafe fn directwrite_face_for(factory: &IDWriteFactory, key: &GlyphKey) -> Option<IDWriteFontFace> {
+    use windows::core::PCWSTR;
+    unsafe {
+        // The face layout measured this family list with (`resolve_windows_face`: web face,
+        // then the system collection with Windows' substitutes, family by family); the old
+        // ladder below only when no family in the list resolves.
+        let chain = rustkit_layout::FontFamilyChain::from_css_value(&key.font_family);
+        let style = if key.font_style == 1 { rustkit_css::FontStyle::Italic } else { rustkit_css::FontStyle::Normal };
+        // A recorded text fallback is the SYSTEM face layout measured (Segoe UI Symbol from the
+        // system collection): never a document's web face of that name.
+        let resolved = if system_face_only(key) {
+            None
+        } else {
+            rustkit_layout::text::resolve_windows_face(
+                &chain,
+                rustkit_css::FontWeight(key.font_weight),
+                style,
+                rustkit_css::FontStretch::Normal,
+            )
+        };
+        let web_face = resolved.map(|(face, _, _)| face.raw().clone());
+        match web_face {
+            Some(face) => Some(face),
+            None => {
+            let mut collection: Option<IDWriteFontCollection> = None;
+            if factory.GetSystemFontCollection(&mut collection, false).is_err() {
+                return None;
+            }
+            let collection = collection?;
+
+            // Family lookup with the same fallback ladder the Windows tree used.
+            let family_wide: Vec<u16> =
+                key.font_family.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut index: u32 = 0;
+            let mut exists = windows::core::BOOL(0);
+            let direct = !key.font_family.is_empty()
+                && collection
+                    .FindFamilyName(PCWSTR(family_wide.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                && exists.as_bool();
+            if !direct {
+                // The family Windows substitutes for the name ("Times" is Times New Roman), as in
+                // shaping, ahead of the fallback ladder.
+                let substitute = rustkit_text::family_substitute(&key.font_family);
+                let mut found = false;
+                for fallback in substitute.iter().map(String::as_str).chain(["Segoe UI", "Arial", "Tahoma"]) {
+                    let fb_wide: Vec<u16> =
+                        fallback.encode_utf16().chain(std::iter::once(0)).collect();
+                    if collection
+                        .FindFamilyName(PCWSTR(fb_wide.as_ptr()), &mut index, &mut exists)
+                        .is_ok()
+                        && exists.as_bool()
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return None;
+                }
+            }
+
+            let family = collection.GetFontFamily(index).ok()?;
+            let dw_weight = DWRITE_FONT_WEIGHT(key.font_weight as i32);
+            let dw_stretch = DWRITE_FONT_STRETCH(5); // Normal
+            let dw_style = if key.font_style == 1 {
+                DWRITE_FONT_STYLE_ITALIC
+            } else {
+                DWRITE_FONT_STYLE_NORMAL
+            };
+            let font = family
+                .GetFirstMatchingFont(dw_weight, dw_stretch, dw_style)
+                .ok()?;
+            font.CreateFontFace().ok()
+            }
+        }
+    }
+}
+
 /// Rasterize one glyph with DirectWrite into an 8-bit coverage bitmap.
 ///
 /// Returns `(bitmap, width, height, advance, bearing_x, bearing_y)` in the
@@ -1208,7 +1396,6 @@ fn rasterize_glyph_directwrite(
     key: &GlyphKey,
     font_size: f32,
 ) -> Option<(Vec<u8>, u32, u32, f32, f32, f32)> {
-    use windows::core::PCWSTR;
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
     unsafe {
@@ -1224,53 +1411,7 @@ fn rasterize_glyph_directwrite(
                 }
             };
 
-        let mut collection: Option<IDWriteFontCollection> = None;
-        if factory.GetSystemFontCollection(&mut collection, false).is_err() {
-            return None;
-        }
-        let collection = collection?;
-
-        // Family lookup with the same fallback ladder the Windows tree used.
-        let family_wide: Vec<u16> =
-            key.font_family.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut index: u32 = 0;
-        let mut exists = windows::core::BOOL(0);
-        let direct = !key.font_family.is_empty()
-            && collection
-                .FindFamilyName(PCWSTR(family_wide.as_ptr()), &mut index, &mut exists)
-                .is_ok()
-            && exists.as_bool();
-        if !direct {
-            let mut found = false;
-            for fallback in ["Segoe UI", "Arial", "Tahoma"] {
-                let fb_wide: Vec<u16> =
-                    fallback.encode_utf16().chain(std::iter::once(0)).collect();
-                if collection
-                    .FindFamilyName(PCWSTR(fb_wide.as_ptr()), &mut index, &mut exists)
-                    .is_ok()
-                    && exists.as_bool()
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return None;
-            }
-        }
-
-        let family = collection.GetFontFamily(index).ok()?;
-        let dw_weight = DWRITE_FONT_WEIGHT(key.font_weight as i32);
-        let dw_stretch = DWRITE_FONT_STRETCH(5); // Normal
-        let dw_style = if key.font_style == 1 {
-            DWRITE_FONT_STYLE_ITALIC
-        } else {
-            DWRITE_FONT_STYLE_NORMAL
-        };
-        let font = family
-            .GetFirstMatchingFont(dw_weight, dw_stretch, dw_style)
-            .ok()?;
-        let face = font.CreateFontFace().ok()?;
+        let face = directwrite_face_for(&factory, key)?;
 
         let codepoint = key.codepoint as u32;
         let mut glyph_indices = [0u16; 1];
@@ -1822,5 +1963,33 @@ mod tests {
         let (narrow_w, _) = estimate_glyph_size('i', 16.0);
         let (wide_w, _) = estimate_glyph_size('M', 16.0);
         assert!(narrow_w < wide_w);
+    }
+
+    /// One family LIST, one face: what layout measures a run with and what a per-character glyph
+    /// of that run paints with must be the same face, or the painted glyphs do not fill the
+    /// measured width. The glyph key carries the whole CSS list.
+    #[cfg(windows)]
+    #[test]
+    fn layout_and_paint_resolve_a_family_list_to_the_same_face() {
+        use rustkit_css::{FontStretch, FontStyle, FontWeight};
+        let factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) }.expect("factory");
+        for list in ["Times, serif", "NoSuchFamilyAtAll, Georgia, serif", "Helvetica, sans-serif", "Georgia"] {
+            let shaped = rustkit_layout::TextShaper::new()
+                .shape(
+                    "Abc",
+                    &rustkit_layout::FontFamilyChain::from_css_value(list),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shaped");
+            let measured = shaped.face.expect("a recorded face").postscript_name;
+            let key = GlyphKey { font_family: list.to_string(), ..key_at(0) };
+            let painted = unsafe { directwrite_face_for(&factory, &key) }
+                .map(|face| rustkit_text::FontFace::from_raw(face).postscript_name());
+            assert_eq!(painted.as_deref(), Some(measured.as_str()), "`{list}`: measured with {measured}, painted with {painted:?}");
+        }
     }
 }

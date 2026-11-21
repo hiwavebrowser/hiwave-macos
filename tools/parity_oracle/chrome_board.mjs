@@ -27,6 +27,7 @@ import { join, resolve } from 'path';
 import {
   createDeterministicContext,
   getDeterministicLaunchOptions,
+  settleAnimationFrames,
 } from './deterministic.mjs';
 import { extractPageGeometry } from './capture_baseline.mjs';
 
@@ -163,10 +164,14 @@ async function main() {
   const height = Number(heightArg);
   const actions = readActions(actionsArg);
 
-  const browser = await chromium.launch(getDeterministicLaunchOptions());
+  // The board's oracle is the pinned Chrome for Testing (PARITY_CHROME_PATH),
+  // never Playwright's bundled Chromium: an unset pin is an error here.
+  const launch = getDeterministicLaunchOptions({ requirePinned: true });
+  const browser = await chromium.launch(launch);
   const record = {
     status: 'ok',
     browser: browser.version(),
+    browser_path: launch.executablePath,
     viewport: { width, height },
     page_errors: [],
     console_errors: [],
@@ -185,6 +190,8 @@ async function main() {
     await page.waitForTimeout(SETTLE_MS);
     record.action_results = await runActions(page, actions, outDir);
     await page.waitForTimeout(SETTLE_MS);
+    // rAF-driven drawing (the report page's Chart.js charts) to its last frame.
+    record.animation_frames = await settleAnimationFrames(page);
 
     await page.screenshot({ path: join(outDir, 'chrome.png'), type: 'png', fullPage: false });
     const { styles, rects } = await extractPageGeometry(page);

@@ -23,11 +23,24 @@
 //! - `base64Encode(bytes)`: padded standard base64.
 //!
 //! `bytes` is an `ArrayBuffer` or a view on one.
+//!
+//! Canvas pixels cross the same way, through one slot the embedder holds
+//! ([`PixelSlot`]):
+//!
+//! - `pixelsOut(length, fresh)`: a new `Uint8ClampedArray` of `length`
+//!   bytes, the realm's own intrinsic whatever the page did to its
+//!   globals, holding what the embedder left in the slot (zeros with
+//!   `fresh`, or when it left nothing of that length). The slot is emptied
+//!   either way.
+//! - `pixelsIn(array, keep)`: `array`'s length in bytes when it is a
+//!   `Uint8ClampedArray` on a live `ArrayBuffer`, `-1` when its buffer is
+//!   detached, `-2` for anything else. With `keep`, a copy of its bytes is
+//!   left in the slot for the embedder. No property of `array` is read.
 
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 use base64::engine::DecodePaddingMode;
 use base64::Engine as _;
-use boa_engine::object::builtins::{JsArray, JsArrayBuffer, JsTypedArray, JsUint8Array};
+use boa_engine::object::builtins::{JsArray, JsArrayBuffer, JsTypedArray, JsUint8Array, JsUint8ClampedArray};
 use boa_engine::object::ObjectInitializer;
 use boa_engine::string::{JsStr, JsStrVariant};
 use boa_engine::{js_string, Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction};
@@ -35,14 +48,37 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// One run of canvas pixels on its way between the embedder and script
+/// (`__rk.pixelsOut`, `__rk.pixelsIn`): whoever fills it has it emptied by
+/// the very next step of the same call, so one slot serves a runtime.
+#[derive(Clone, Default)]
+pub struct PixelSlot(Rc<RefCell<Option<Vec<u8>>>>);
+
+impl PixelSlot {
+    /// Leave `bytes` for the script's next `pixelsOut`.
+    pub fn put(&self, bytes: Vec<u8>) {
+        *self.0.borrow_mut() = Some(bytes);
+    }
+
+    /// What the script's last `pixelsIn(array, true)` left, once.
+    pub fn take(&self) -> Option<Vec<u8>> {
+        self.0.borrow_mut().take()
+    }
+}
+
+/// The most `pixelsOut` makes in one array: the bytes of the largest
+/// bitmap a canvas keeps (16384 x 16384, RGBA).
+const MAX_PIXEL_BYTES: usize = 16384 * 16384 * 4;
+
 /// Bytes waiting for script to take them, by key.
 pub(crate) type Stash = Rc<RefCell<HashMap<u64, Vec<u8>>>>;
 
 /// What stands behind the page's blob URLs: a copy of the Blob's bytes and
 /// its type, by URL (without fragment). Kept on the host side: the engine
 /// reads it without running any script (`JsRuntime::blob_bytes`), and the
-/// page has no object to replace. One store per runtime, so the same-origin
-/// documents of a frame tree share it, as they share blob URLs.
+/// page has no object to replace. One store per runtime, so the documents
+/// of a frame tree share it; each record belongs to the origin of the
+/// document that made it, and only that origin's documents reach it.
 pub(crate) type Blobs = Rc<RefCell<BlobStore>>;
 
 /// The most the blob URLs of one runtime keep alive, in bytes. Every
@@ -51,33 +87,143 @@ pub(crate) type Blobs = Rc<RefCell<BlobStore>>;
 /// it a new URL has nothing behind it (as for a revoked one).
 pub(crate) const MAX_BLOB_STORE_BYTES: usize = 256 * 1024 * 1024;
 
+pub(crate) struct BlobRecord {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) kind: String,
+    /// The realm of the document that made it.
+    realm: usize,
+    /// That document's origin when the URL was made (`null`: opaque).
+    origin: String,
+}
+
 #[derive(Default)]
 pub(crate) struct BlobStore {
-    records: HashMap<String, (Vec<u8>, String)>,
+    records: HashMap<String, BlobRecord>,
     /// The bytes of all records together.
     held: usize,
-    /// The last number handed out for a URL: one sequence for the whole
-    /// runtime, so two documents sharing the store never make the same URL.
+    /// The bound on `held`, when not [`MAX_BLOB_STORE_BYTES`].
+    pub(crate) limit: Option<usize>,
+    /// Each realm's origin, as the embedder gave it
+    /// (`JsRuntime::set_realm_origin`): never what the page says it is.
+    origins: HashMap<usize, String>,
+    /// Where the names' random bytes come from (`JsRuntime::set_blob_random`).
+    pub(crate) random: Option<fn(usize) -> Option<Vec<u8>>>,
+    /// Numbers the URLs made while there is no random source; nothing is
+    /// kept behind those.
     last: u64,
 }
 
 impl BlobStore {
-    pub(crate) fn get(&self, url: &str) -> Option<&(Vec<u8>, String)> {
-        self.records.get(url)
+    pub(crate) fn set_origin(&mut self, realm: usize, origin: &str) {
+        self.origins.insert(realm, origin.to_string());
     }
-    fn put(&mut self, url: String, bytes: Vec<u8>, kind: String) {
-        self.remove(&url);
-        if bytes.len() > MAX_BLOB_STORE_BYTES - self.held {
-            return;
+
+    fn origin_of(&self, realm: usize) -> &str {
+        self.origins.get(&realm).map_or("null", String::as_str)
+    }
+
+    /// Whether a document in `realm` may read or revoke `record`: it made
+    /// it, or it is of the origin that did. An opaque origin is only itself.
+    fn reaches(&self, realm: usize, record: &BlobRecord) -> bool {
+        record.realm == realm || (record.origin != "null" && record.origin == self.origin_of(realm))
+    }
+
+    /// A new blob URL for a document in `realm` (`blob:<origin>/<uuid>`,
+    /// File API §8.3.1), with `blob` (bytes and type) behind it, and whether
+    /// what was asked was done: `false` when the bytes were not kept (the
+    /// store is full, or there is no random source to name them with).
+    fn make(&mut self, realm: usize, blob: Option<(Vec<u8>, String)>) -> (String, bool) {
+        let origin = self.origin_of(realm).to_string();
+        let Some(name) = self
+            .random
+            .and_then(|random| random(16))
+            .filter(|b| b.len() == 16)
+            .map(|b| uuid(&b))
+        else {
+            self.last += 1;
+            return (format!("blob:{origin}/{}", self.last), blob.is_none());
+        };
+        let url = format!("blob:{origin}/{name}");
+        let Some((bytes, kind)) = blob else {
+            return (url, true);
+        };
+        // A name is never reused: a record another document made is not
+        // replaced, whatever the random source says.
+        if self.records.contains_key(&url)
+            || bytes.len()
+                > self
+                    .limit
+                    .unwrap_or(MAX_BLOB_STORE_BYTES)
+                    .saturating_sub(self.held)
+        {
+            return (url, false);
         }
         self.held += bytes.len();
-        self.records.insert(url, (bytes, kind));
+        self.records.insert(
+            url.clone(),
+            BlobRecord {
+                bytes,
+                kind,
+                realm,
+                origin,
+            },
+        );
+        (url, true)
     }
-    fn remove(&mut self, url: &str) {
-        if let Some((bytes, _)) = self.records.remove(url) {
-            self.held -= bytes.len();
+
+    pub(crate) fn get(&self, realm: usize, url: &str) -> Option<&BlobRecord> {
+        self.records
+            .get(url)
+            .filter(|record| self.reaches(realm, record))
+    }
+
+    fn revoke(&mut self, realm: usize, url: &str) {
+        if self.get(realm, url).is_some() {
+            if let Some(record) = self.records.remove(url) {
+                self.held -= record.bytes.len();
+            }
         }
     }
+
+    /// A realm is gone: so are the URLs its document made (File API §8.3.5,
+    /// unloading a document revokes its blob URLs).
+    pub(crate) fn drop_realm(&mut self, realm: usize) {
+        self.records.retain(|_, record| record.realm != realm);
+        self.held = self.records.values().map(|record| record.bytes.len()).sum();
+        self.origins.remove(&realm);
+    }
+}
+
+/// RFC 9562 version 4 from 16 random bytes.
+fn uuid(random: &[u8]) -> String {
+    let mut b = [0u8; 16];
+    b.copy_from_slice(random);
+    b[6] = (b[6] & 0x0F) | 0x40;
+    b[8] = (b[8] & 0x3F) | 0x80;
+    let hex = |range: std::ops::Range<usize>| {
+        b[range]
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<String>()
+    };
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex(0..4),
+        hex(4..6),
+        hex(6..8),
+        hex(8..10),
+        hex(10..16)
+    )
+}
+
+/// The realm a blob native is called for: the first argument, which only
+/// the embedder's own scripts can supply (`__realm`).
+fn realm_arg(args: &[JsValue]) -> JsResult<usize> {
+    args.first()
+        .and_then(JsValue::as_number)
+        .filter(|n| *n >= 0.0)
+        .map(|n| n as usize)
+        .ok_or_else(|| JsNativeError::typ().with_message("expected a realm").into())
 }
 
 const BASE64: GeneralPurpose = GeneralPurpose::new(
@@ -199,31 +345,47 @@ fn string_arg(args: &[JsValue]) -> JsResult<JsString> {
 }
 
 /// Add the byte natives to the host object under construction.
-pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &Blobs) {
-    let put = blobs.clone();
+pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &Blobs, pixels: &PixelSlot) {
+    let make = blobs.clone();
     // SAFETY: the closures below hold an `Rc` of plain bytes and strings:
     // nothing the collector would need to trace.
-    // `blobPut(url, bytes, type)`: keep a copy of `bytes` behind `url`.
-    // `bytes` must be a real ArrayBuffer or view (`with_bytes`).
-    let blob_put = unsafe {
+    // `blobUrl(realm, bytes?, type?)`: a new blob URL for the document in
+    // `realm`, with a copy of `bytes` behind it when given (a real
+    // ArrayBuffer or view, `with_bytes`): `[url, done]`.
+    let blob_url = unsafe {
         NativeFunction::from_closure(move |_this, args, context| {
-            let url = string_arg(args)?.to_std_string_escaped();
-            let bytes = with_bytes(args.get(1), context, <[u8]>::to_vec)?;
-            let kind = args
-                .get(2)
-                .and_then(JsValue::as_string)
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            put.borrow_mut().put(url, bytes, kind);
-            Ok(JsValue::undefined())
+            let realm = realm_arg(args)?;
+            let blob = match args.get(1).filter(|v| !v.is_undefined()) {
+                Some(bytes) => {
+                    let bytes = with_bytes(Some(bytes), context, <[u8]>::to_vec)?;
+                    let kind = args
+                        .get(2)
+                        .and_then(JsValue::as_string)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_default();
+                    Some((bytes, kind))
+                }
+                None => None,
+            };
+            let (url, done) = make.borrow_mut().make(realm, blob);
+            let parts = [
+                JsValue::from(JsString::from(url.as_str())),
+                JsValue::from(done),
+            ];
+            Ok(JsArray::from_iter(parts, context).into())
         })
     };
     let get = blobs.clone();
-    // `blobGet(url)`: `[ArrayBuffer, type]`, or `undefined`.
+    // `blobGet(realm, url)`: `[ArrayBuffer, type]`, or `undefined` when
+    // nothing a document in `realm` may read stands behind `url`.
     let blob_get = unsafe {
         NativeFunction::from_closure(move |_this, args, context| {
-            let url = string_arg(args)?.to_std_string_escaped();
-            let found = get.borrow().get(&url).cloned();
+            let realm = realm_arg(args)?;
+            let url = string_arg(&args[1.min(args.len())..])?.to_std_string_escaped();
+            let found = get
+                .borrow()
+                .get(realm, &url)
+                .map(|record| (record.bytes.clone(), record.kind.clone()));
             match found {
                 Some((bytes, kind)) => {
                     let buffer = array_buffer(&bytes, context)?;
@@ -238,27 +400,21 @@ pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &B
         })
     };
     let revoke = blobs.clone();
+    // `blobRevoke(realm, url)`.
     let blob_revoke = unsafe {
         NativeFunction::from_closure(move |_this, args, _context| {
-            if let Ok(url) = string_arg(args) {
-                revoke.borrow_mut().remove(&url.to_std_string_escaped());
+            if let (Ok(realm), Ok(url)) = (realm_arg(args), string_arg(&args[1.min(args.len())..]))
+            {
+                revoke
+                    .borrow_mut()
+                    .revoke(realm, &url.to_std_string_escaped());
             }
             Ok(JsValue::undefined())
         })
     };
-    let number = blobs.clone();
-    // `blobNumber()`: the next number for a blob URL.
-    let blob_number = unsafe {
-        NativeFunction::from_closure(move |_this, _args, _context| {
-            let mut store = number.borrow_mut();
-            store.last += 1;
-            Ok(JsValue::from(store.last as f64))
-        })
-    };
-    host.function(blob_number, js_string!("blobNumber"), 0)
-        .function(blob_put, js_string!("blobPut"), 3)
-        .function(blob_get, js_string!("blobGet"), 1)
-        .function(blob_revoke, js_string!("blobRevoke"), 1);
+    host.function(blob_url, js_string!("blobUrl"), 3)
+        .function(blob_get, js_string!("blobGet"), 2)
+        .function(blob_revoke, js_string!("blobRevoke"), 2);
     let taken = stash.clone();
     // SAFETY: the closure holds an `Rc` of plain bytes: nothing the
     // collector would need to trace.
@@ -322,6 +478,49 @@ pub(crate) fn install(host: &mut ObjectInitializer<'_>, stash: &Stash, blobs: &B
         let text = with_bytes(args.first(), context, |bytes| BASE64.encode(bytes))?;
         Ok(JsString::from(JsStr::latin1(text.as_bytes())).into())
     });
+    let slot = pixels.clone();
+    // SAFETY: the closure holds an `Rc` of plain bytes, no GC handle.
+    let pixels_out = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let held = slot.take();
+            let length = args.first().and_then(JsValue::as_number).unwrap_or(-1.0);
+            if !(length >= 0.0 && length <= MAX_PIXEL_BYTES as f64 && length.fract() == 0.0) {
+                return Err(JsNativeError::range().with_message("not a pixel length").into());
+            }
+            let length = length as usize;
+            let buffer = JsArrayBuffer::new(length, context)?;
+            let fresh = args.get(1).is_some_and(JsValue::to_boolean);
+            if let (Some(held), Some(mut data)) = (held.filter(|held| !fresh && held.len() == length), buffer.data_mut()) {
+                data.copy_from_slice(&held);
+            }
+            Ok(JsUint8ClampedArray::from_array_buffer(buffer, context)?.into())
+        })
+    };
+    let slot = pixels.clone();
+    // SAFETY: as above.
+    let pixels_in = unsafe {
+        NativeFunction::from_closure(move |_this, args, context| {
+            let keep = args.get(1).is_some_and(JsValue::to_boolean);
+            let Some(view) = args.first().and_then(JsValue::as_object).and_then(|o| JsUint8ClampedArray::from_object(o.clone()).ok()) else {
+                return Ok(JsValue::from(-2));
+            };
+            let Some(buffer) = view.buffer(context)?.as_object().and_then(|o| JsArrayBuffer::from_object(o.clone()).ok()) else {
+                return Ok(JsValue::from(-2));
+            };
+            let Some(data) = buffer.data() else {
+                return Ok(JsValue::from(-1));
+            };
+            let start = view.byte_offset(context)?;
+            let end = start.saturating_add(view.byte_length(context)?).min(data.len());
+            let bytes = &data[start.min(end)..end];
+            if keep {
+                slot.put(bytes.to_vec());
+            }
+            Ok(JsValue::from(bytes.len() as f64))
+        })
+    };
+    host.function(pixels_out, js_string!("pixelsOut"), 2)
+        .function(pixels_in, js_string!("pixelsIn"), 2);
     host.function(take_bytes, js_string!("takeBytes"), 1)
         .function(decode, js_string!("utf8Decode"), 2)
         .function(encode, js_string!("utf8Encode"), 1)
