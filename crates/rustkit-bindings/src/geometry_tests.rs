@@ -495,3 +495,10 @@ fn a_custom_property_name_keeps_its_case() {
         "red,,7px,"
     );
 }
+
+#[test]
+fn computed_style_reports_named_properties() {
+    let (b, _) = bound();
+    assert_eq!(ev(&b, "var s = getComputedStyle(document.body); ['color','backgroundColor','background-color','getPropertyValue','unrecognizedExample','--missing'].map(p => p in s).join()"),
+               "true,true,true,true,false,false");
+}

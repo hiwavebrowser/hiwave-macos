@@ -5136,6 +5136,14 @@ const WRAPPERS_JS: &str = r#"
         Object.defineProperty(decl, 'length', { configurable: true, enumerable: false,
             get: function () { return names().length; } });
         return new Proxy(decl, {
+            has: function (t, p) {
+                if (Reflect.has(t, p)) return true;
+                if (typeof p !== 'string' || p.indexOf('--') === 0) return false;
+                if (/^(0|[1-9][0-9]*)$/.test(p)) return +p < names().length;
+                var n = p === 'cssFloat' ? 'float' : kebab(p).replace(/^webkit-/, '-webkit-');
+                return hasOwn(COMPUTED_INITIAL, n) || hasOwn(COMPUTED_SHORTHANDS, n) ||
+                       hasOwn(WEBKIT_ALIASES, n) || __rk.isStyleProperty(n);
+            },
             get: function (t, p, r) {
                 if (typeof p !== 'string') return Reflect.get(t, p, r);
                 var c0 = p.charCodeAt(0);
