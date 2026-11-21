@@ -3514,6 +3514,39 @@ mod tests {
     /// that sets no font was laid out in Arial (replaced_float_avoid_tests'
     /// "inline img with clear beside a float" placed the image at 130.23, Chrome
     /// at 128: "text " is 30.23 in Arial, 28 in Times New Roman).
+    /// Linux: the same. Chrome for Testing 148.0.7778.216 on Linux, the same
+    /// string at 16px with no `font-family`: 199.52 in Liberation Serif (its
+    /// standard font, Times New Roman, through fontconfig), as `serif`;
+    /// `sans-serif` (Liberation Sans) is 217.02 (measured 2026-11-21, with the
+    /// CI runner's fonts and with the board's alike). Runs in hiwave-linux,
+    /// which carries the Linux shaper.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_initial_family_is_chromes_default_font_on_linux() {
+        let width = |family: &str| {
+            TextShaper::new()
+                .shape(
+                    "Handgloves quick wizard 0123",
+                    &FontFamilyChain::from_css_value(family),
+                    FontWeight(400),
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    16.0,
+                )
+                .expect("shape")
+                .metrics
+                .width
+        };
+        for (family, chrome) in [
+            (rustkit_css::INITIAL_FONT_FAMILY, 199.52),
+            ("serif", 199.52),
+            ("sans-serif", 217.02),
+        ] {
+            let w = width(family);
+            assert!((w - chrome).abs() < 0.05, "{family}: {w}, Chrome {chrome}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn the_initial_family_is_chromes_default_font_on_windows() {
