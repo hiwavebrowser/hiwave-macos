@@ -1,0 +1,292 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "text": "HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.",
+  "span_style": "font-size:12.8px;line-height:1.5",
+  "cases": [
+    {
+      "label": "Arial: span alone after a block",
+      "family": "Arial",
+      "inner": "<strong style=\"display:block\">Notice</strong><span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 75.5625,
+      "span": [
+        0,
+        20,
+        488.09375,
+        53.375
+      ],
+      "span_fragments": [
+        [
+          0,
+          20,
+          483.78125,
+          15
+        ],
+        [
+          0,
+          39.1875,
+          488.09375,
+          15
+        ],
+        [
+          0,
+          58.375,
+          62.609375,
+          15
+        ]
+      ],
+      "neighbour": null
+    },
+    {
+      "label": "Arial: span alone, normal line-height",
+      "family": "Arial",
+      "inner": "<span id=s style=\"font-size:12.8px\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 54,
+      "span": [
+        0,
+        2,
+        488.09375,
+        51
+      ],
+      "span_fragments": [
+        [
+          0,
+          2,
+          483.78125,
+          15
+        ],
+        [
+          0,
+          20,
+          488.09375,
+          15
+        ],
+        [
+          0,
+          38,
+          62.609375,
+          15
+        ]
+      ],
+      "neighbour": null
+    },
+    {
+      "label": "Arial: text before the span",
+      "family": "Arial",
+      "inner": "<b id=n>Lead</b> <span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 57.5625,
+      "span": [
+        0,
+        2,
+        470.09375,
+        53.375
+      ],
+      "span_fragments": [
+        [
+          41.796875,
+          2,
+          428.296875,
+          15
+        ],
+        [
+          0,
+          21.1875,
+          466.03125,
+          15
+        ],
+        [
+          0,
+          40.375,
+          140.171875,
+          15
+        ]
+      ],
+      "neighbour": [
+        0,
+        0,
+        37.34375,
+        17
+      ]
+    },
+    {
+      "label": "Arial: text after the span",
+      "family": "Arial",
+      "inner": "<span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span> <b id=n>tail</b>",
+      "block_height": 57.5625,
+      "span": [
+        0,
+        2,
+        488.09375,
+        53.375
+      ],
+      "span_fragments": [
+        [
+          0,
+          2,
+          483.78125,
+          15
+        ],
+        [
+          0,
+          21.1875,
+          488.09375,
+          15
+        ],
+        [
+          0,
+          40.375,
+          62.609375,
+          15
+        ]
+      ],
+      "neighbour": [
+        67.0625,
+        38.375,
+        23.125,
+        17
+      ]
+    },
+    {
+      "label": "'Segoe UI': span alone after a block",
+      "family": "'Segoe UI'",
+      "inner": "<strong style=\"display:block\">Notice</strong><span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 84.5625,
+      "span": [
+        0,
+        24,
+        477,
+        59.375
+      ],
+      "span_fragments": [
+        [
+          0,
+          24,
+          475.71875,
+          17
+        ],
+        [
+          0,
+          45.1875,
+          477,
+          17
+        ],
+        [
+          0,
+          66.375,
+          60.09375,
+          17
+        ]
+      ],
+      "neighbour": null
+    },
+    {
+      "label": "'Segoe UI': span alone, normal line-height",
+      "family": "'Segoe UI'",
+      "inner": "<span id=s style=\"font-size:12.8px\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 63,
+      "span": [
+        0,
+        3,
+        477,
+        59
+      ],
+      "span_fragments": [
+        [
+          0,
+          3,
+          475.71875,
+          17
+        ],
+        [
+          0,
+          24,
+          477,
+          17
+        ],
+        [
+          0,
+          45,
+          60.09375,
+          17
+        ]
+      ],
+      "neighbour": null
+    },
+    {
+      "label": "'Segoe UI': text before the span",
+      "family": "'Segoe UI'",
+      "inner": "<b id=n>Lead</b> <span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span>",
+      "block_height": 63.5625,
+      "span": [
+        0,
+        3,
+        497.953125,
+        59.375
+      ],
+      "span_fragments": [
+        [
+          39.75,
+          3,
+          454.75,
+          17
+        ],
+        [
+          0,
+          24.1875,
+          497.953125,
+          17
+        ],
+        [
+          0,
+          45.375,
+          60.09375,
+          17
+        ]
+      ],
+      "neighbour": [
+        0,
+        0,
+        35.359375,
+        21
+      ]
+    },
+    {
+      "label": "'Segoe UI': text after the span",
+      "family": "'Segoe UI'",
+      "inner": "<span id=s style=\"font-size:12.8px;line-height:1.5\">HiWave analytics are 100% local and private. We track only domain names, never full URLs, page titles, or search queries. All data stays on your device and is never sent to any server.</span> <b id=n>tail</b>",
+      "block_height": 63.5625,
+      "span": [
+        0,
+        3,
+        477,
+        59.375
+      ],
+      "span_fragments": [
+        [
+          0,
+          3,
+          475.71875,
+          17
+        ],
+        [
+          0,
+          24.1875,
+          477,
+          17
+        ],
+        [
+          0,
+          45.375,
+          60.09375,
+          17
+        ]
+      ],
+      "neighbour": [
+        64.484375,
+        42.375,
+        23.9375,
+        21
+      ]
+    }
+  ]
+}
