@@ -226,9 +226,15 @@ pub fn fail_platform_roots_on_this_thread(reason: &str) -> PlatformRootsProbe {
     PlatformRootsProbe { loads }
 }
 
+/// NET-LAZY-TLS: how many times one load asks the platform before it fails, and the pauses
+/// between: the macOS keychain read behind the roots fails now and then under load
+/// ("failed to load user trust settings: I/O error") and answers on a second try.
+const ROOT_LOAD_ATTEMPTS: usize = 3;
+const ROOT_LOAD_RETRY_PAUSE: Duration = Duration::from_millis(50);
+
 fn roots_cached(
     cache: &RootsCache,
-    load: impl FnOnce() -> (tokio_rustls::rustls::RootCertStore, String),
+    mut load: impl FnMut() -> (tokio_rustls::rustls::RootCertStore, String),
 ) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
     let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(roots) = slot.as_ref() {
@@ -236,7 +242,14 @@ fn roots_cached(
     }
     // Only a usable store is cached: a transient platform failure (keychain
     // busy under load) must not turn every later handshake into an error.
-    let (roots, diagnostics) = load();
+    let (mut roots, mut diagnostics) = load();
+    for attempt in 1..ROOT_LOAD_ATTEMPTS {
+        if !roots.is_empty() {
+            break;
+        }
+        std::thread::sleep(ROOT_LOAD_RETRY_PAUSE * attempt as u32);
+        (roots, diagnostics) = load();
+    }
     let roots = Arc::new(roots);
     if roots.is_empty() {
         return Err(HttpError::TlsError(if diagnostics.is_empty() {
@@ -290,8 +303,11 @@ pub struct Client {
     /// Where `Set-Cookie` goes and `Cookie` comes from, at every hop; `None`
     /// sends and keeps no cookies.
     cookies: Option<Arc<CookieJar>>,
+    /// NET-LAZY-TLS: built on the first https connection (`tls_connector`), shared by the
+    /// client's clones: a client that never speaks TLS (data:, blob:, file:, about:, plain http)
+    /// never reads the platform roots.
     #[cfg(not(feature = "native-tls"))]
-    tls_connector: TlsConnector,
+    tls_connector: Arc<std::sync::Mutex<Option<TlsConnector>>>,
     #[cfg(feature = "native-tls")]
     tls_connector: tokio_native_tls::TlsConnector,
 }
@@ -356,6 +372,25 @@ impl Client {
         // currently keep speaking HTTP/1.1 only when the peer permits it —
         // see `connect_tls`, which records the negotiated protocol so the
         // caller can refuse mismatches loudly instead of desyncing.
+        Ok(Self {
+            config,
+            address_policy: AddressPolicy::default(),
+            resolver: Arc::new(SystemResolver),
+            max_body: None,
+            cookies: None,
+            tls_connector: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// NET-LAZY-TLS: the client's TLS connector, built on first use from the platform roots
+    /// (loaded once per process, `platform_roots`). A failed load is this connection's error and
+    /// is not kept: the next https connection tries again.
+    #[cfg(not(feature = "native-tls"))]
+    fn tls_connector(&self) -> Result<TlsConnector, HttpError> {
+        let mut slot = self.tls_connector.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(connector) = slot.as_ref() {
+            return Ok(connector.clone());
+        }
         let roots = platform_roots()?;
 
         // When multiple crypto providers (e.g. aws-lc-rs from rustkit-http and ring from
@@ -373,16 +408,9 @@ impl Client {
         // a silent protocol desync.
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-        let tls_connector = TlsConnector::from(Arc::new(tls_config));
-
-        Ok(Self {
-            config,
-            address_policy: AddressPolicy::default(),
-            resolver: Arc::new(SystemResolver),
-            max_body: None,
-            cookies: None,
-            tls_connector,
-        })
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        *slot = Some(connector.clone());
+        Ok(connector)
     }
 
     /// Open a TLS connection and report the ALPN-negotiated protocol.
@@ -403,7 +431,7 @@ impl Client {
             .map_err(|e| HttpError::TlsError(format!("invalid server name: {e}")))?;
 
         let tls_stream = self
-            .tls_connector
+            .tls_connector()?
             .connect(server_name, stream)
             .await
             .map_err(|e| HttpError::TlsError(e.to_string()))?;
@@ -1512,7 +1540,8 @@ mod tests {
             (one_anchor(), String::new())
         });
         assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
-        assert_eq!(loads, 2);
+        // The failing call asked the platform ROOT_LOAD_ATTEMPTS times (NET-LAZY-TLS).
+        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1);
         assert!(
             roots_cached(&cache, || {
                 loads += 1;
@@ -1520,7 +1549,7 @@ mod tests {
             })
             .is_ok()
         );
-        assert_eq!(loads, 2, "a good store is cached and not reloaded");
+        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1, "a good store is cached and not reloaded");
     }
 
     #[test]
