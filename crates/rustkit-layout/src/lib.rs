@@ -7367,13 +7367,19 @@ impl LayoutBox {
         // Apply text-align to all recorded lines
         let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
-        for (start, end, width, (_, band_width)) in lines {
-            Self::apply_text_align_offset(
-                &mut self.children[start..end],
-                width,
-                band_width,
-                text_align,
-            );
+        // YT-CARD-SUBTITLE: wrapped inlines align line by line over all their
+        // records at once; the records they took are not aligned again.
+        let records: Vec<(usize, usize, f32)> = lines.iter().map(|l| (l.0, l.1, (l.3).1)).collect();
+        let aligned = Self::align_wrapped_inline_records(&mut self.children, &records, text_align);
+        for (r, (start, end, width, (_, band_width))) in lines.into_iter().enumerate() {
+            if !aligned[r] {
+                Self::apply_text_align_offset(
+                    &mut self.children[start..end],
+                    width,
+                    band_width,
+                    text_align,
+                );
+            }
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
@@ -7714,6 +7720,136 @@ impl LayoutBox {
                 crate::flex::translate_subtree(child, offset, 0.0);
             }
         }
+    }
+
+    /// YT-CARD-SUBTITLE: the child-index path from the non-atomic inline `b`
+    /// down to the one wrapped text run it holds, through inlines that each
+    /// hold exactly one in-flow box. `None` when `b` is not such an inline,
+    /// when the run fits on one line, or when it is a phase-5 mid-line split
+    /// (aligned by `align_split_close` and the split branch instead).
+    fn wrapped_text_path(b: &LayoutBox) -> Option<Vec<usize>> {
+        if !matches!(b.box_type, BoxType::Inline) || b.style.display.is_atomic_inline() {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut cur = b;
+        loop {
+            if matches!(cur.box_type, BoxType::Text(_)) {
+                let wrapped = cur.text_flow_first_offset.is_none()
+                    && cur.text_lines.as_ref().is_some_and(|t| t.len() > 1);
+                return wrapped.then_some(path);
+            }
+            if !matches!(cur.box_type, BoxType::Inline) || cur.style.display.is_atomic_inline() {
+                return None;
+            }
+            let mut in_flow = cur.children.iter().enumerate().filter(|(_, c)| {
+                c.float == Float::None && !matches!(c.position, Position::Absolute | Position::Fixed)
+            });
+            let (i, only) = in_flow.next()?;
+            if in_flow.next().is_some() {
+                return None;
+            }
+            path.push(i);
+            cur = only;
+        }
+    }
+
+    /// YT-CARD-SUBTITLE: align, line by line, each non-atomic inline that holds one wrapped text
+    /// run (`wrapped_text_path`: `<span>`, `<b><span>`, a custom element) under Center/Right
+    /// (css-text-3 §7.1). Such an inline is recorded once per visual line, every record starting
+    /// at it. Moving it as one box (the record pass) left every line at its left edge, plus one
+    /// offset per record.
+    ///
+    /// Taken when the inline starts its first record and has no more records than visual lines,
+    /// alone in all but the last. Line 0 counts the inline's left edges (margin, border, padding
+    /// of the inlines on the path) and the middle lines align alone. The last line counts its
+    /// right edges and, when its record also holds what follows the inline (` B`, a link, another
+    /// span: R1 on #1407), aligns with that content as ONE line, which is placed after the
+    /// inline's tail. Following content that wraps itself is not taken. Returns the records it
+    /// aligned; the rest go through `apply_text_align_offset` as before.
+    fn align_wrapped_inline_records(
+        children: &mut [LayoutBox],
+        records: &[(usize, usize, f32)],
+        text_align: TextAlign,
+    ) -> Vec<bool> {
+        let mut aligned = vec![false; records.len()];
+        if !matches!(text_align, TextAlign::Right | TextAlign::Center) {
+            return aligned;
+        }
+        fn in_flow(c: &LayoutBox) -> bool {
+            c.float == Float::None && !matches!(c.position, Position::Absolute | Position::Fixed)
+        }
+        fn wraps(c: &LayoutBox) -> bool {
+            c.text_lines.as_ref().is_some_and(|t| t.len() > 1) || c.children.iter().any(wraps)
+        }
+        let align_in = |avail: f32, w: f32| match text_align {
+            TextAlign::Right => (avail - w).max(0.0),
+            _ => ((avail - w) / 2.0).max(0.0),
+        };
+        let mut r = 0;
+        while r < records.len() {
+            let (start, end, _) = records[r];
+            let i = start;
+            let eligible_start = i < end
+                && in_flow(&children[i])
+                && !records[..r].iter().any(|&(s, e, _)| s <= i && i < e);
+            let path = if eligible_start { Self::wrapped_text_path(&children[i]) } else { None };
+            let Some(path) = path else {
+                r += 1;
+                continue;
+            };
+            let group: Vec<usize> = (r..records.len()).take_while(|&k| records[k].0 == i).collect();
+            let last = *group.last().expect("the group holds record r");
+            let last_end = records[last].1;
+            let text = path.iter().fold(&children[i], |b, &j| &b.children[j]);
+            let n = text.text_lines.as_ref().map_or(0, Vec::len);
+            let alone_before = group[..group.len() - 1]
+                .iter()
+                .all(|&k| (i + 1..records[k].1).all(|j| !in_flow(&children[j])));
+            let followers: Vec<usize> = (i + 1..last_end).filter(|&j| in_flow(&children[j])).collect();
+            if group.len() > n || n < 2 || !alone_before || followers.iter().any(|&j| wraps(&children[j])) {
+                r += 1;
+                continue;
+            }
+            let outer = children[i].dimensions.margin_box();
+            let lines = text.text_lines.as_ref().expect("n > 1 lines");
+            let lead = text.dimensions.content.x - outer.x;
+            let trail = (outer.x + outer.width
+                - (text.dimensions.content.x + text.dimensions.content.width))
+                .max(0.0);
+            let tail = lines[n - 1].width + trail;
+            let follow: f32 = followers.iter().map(|&j| children[j].dimensions.margin_box().width).sum();
+            // A record per visual line at most (a run of lines can share one): later lines take
+            // the last record's band.
+            let avail = |k: usize| records[group[k.min(group.len() - 1)]].2;
+            let o0 = align_in(avail(0), lead + lines[0].width);
+            let o_last = align_in(avail(n - 1), tail + follow);
+            let xs: Vec<f32> = (1..n)
+                .map(|k| {
+                    let at = if k == n - 1 { o_last } else { align_in(avail(k), lines[k].width) };
+                    at - o0 - lead
+                })
+                .collect();
+            crate::flex::translate_subtree(&mut children[i], o0, 0.0);
+            let text = path.iter().fold(&mut children[i], |b, &j| &mut b.children[j]);
+            if let Some(lines) = text.text_lines.as_mut() {
+                for (tl, x) in lines.iter_mut().skip(1).zip(xs) {
+                    tl.x_offset = x;
+                }
+            }
+            // What follows on the last line goes after the inline's tail, in order.
+            let mut x = outer.x + o_last + tail;
+            for &j in &followers {
+                let dx = x - children[j].dimensions.margin_box().x;
+                crate::flex::translate_subtree(&mut children[j], dx, 0.0);
+                x += children[j].dimensions.margin_box().width;
+            }
+            for &k in &group {
+                aligned[k] = true;
+            }
+            r = last + 1;
+        }
+        aligned
     }
 
     /// IFC Slice B2: align the CLOSED visual lines of a phase-5 mid-line
@@ -8504,13 +8640,19 @@ impl LayoutBox {
         // Apply text-align to all recorded lines
         let line_ranges: Vec<(usize, usize)> = lines.iter().map(|l| (l.0, l.1)).collect();
         let valign_font = self.style.clone();
-        for (start, end, width, (_, band_width)) in lines {
-            Self::apply_text_align_offset(
-                &mut self.children[start..end],
-                width,
-                band_width,
-                text_align,
-            );
+        // YT-CARD-SUBTITLE: wrapped inlines align line by line over all their
+        // records at once; the records they took are not aligned again.
+        let records: Vec<(usize, usize, f32)> = lines.iter().map(|l| (l.0, l.1, (l.3).1)).collect();
+        let aligned = Self::align_wrapped_inline_records(&mut self.children, &records, text_align);
+        for (r, (start, end, width, (_, band_width))) in lines.into_iter().enumerate() {
+            if !aligned[r] {
+                Self::apply_text_align_offset(
+                    &mut self.children[start..end],
+                    width,
+                    band_width,
+                    text_align,
+                );
+            }
             // Slice C: vertical alignment about the line baseline.
             Self::apply_vertical_align(&mut self.children[start..end], &valign_font);
         }
