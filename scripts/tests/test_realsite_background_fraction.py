@@ -7,6 +7,7 @@ path exactly, including which colour is "dominant" when two colours tie (numpy's
 takes the smallest packed RGB value).
 """
 import builtins
+import os
 import sys
 import tempfile
 import unittest
@@ -67,6 +68,9 @@ class BackgroundFraction(unittest.TestCase):
         try:
             import numpy  # noqa: F401
         except ModuleNotFoundError:
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                # In CI a skip here would be a green check on a comparison that never ran.
+                self.fail("numpy is not installed in this CI lane: install it with the guard deps")
             self.skipTest("numpy not installed: the fallback is checked against hand values only")
         with tempfile.TemporaryDirectory() as d:
             for name, pixels, _ in CASES:
