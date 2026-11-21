@@ -1,0 +1,102 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "family": "Arial",
+      "label": "settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "Arial",
+      "label": "padding 8px 12px, 14px",
+      "style": "padding:8px 12px;font-size:14px",
+      "line": 36,
+      "button": 36,
+      "button_font": "Arial 14px"
+    },
+    {
+      "family": "Arial",
+      "label": "bare",
+      "style": "",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "Arial",
+      "label": "bare 16px",
+      "style": "font-size:16px",
+      "line": 24,
+      "button": 24,
+      "button_font": "Arial 16px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "padding 8px 12px, 14px",
+      "style": "padding:8px 12px;font-size:14px",
+      "line": 36,
+      "button": 36,
+      "button_font": "Arial 14px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "bare",
+      "style": "",
+      "line": 23,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Segoe UI'",
+      "label": "bare 16px",
+      "style": "font-size:16px",
+      "line": 24,
+      "button": 24,
+      "button_font": "Arial 16px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "settings .btn",
+      "style": "padding:.6rem 1rem;font-size:.85rem;font-weight:500;border:1px solid transparent",
+      "line": 36.1875,
+      "button": 36.1875,
+      "button_font": "Arial 13.6px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "padding 8px 12px, 14px",
+      "style": "padding:8px 12px;font-size:14px",
+      "line": 36,
+      "button": 36,
+      "button_font": "Arial 14px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "bare",
+      "style": "",
+      "line": 21,
+      "button": 21,
+      "button_font": "Arial 13.3333px"
+    },
+    {
+      "family": "'Times New Roman'",
+      "label": "bare 16px",
+      "style": "font-size:16px",
+      "line": 24,
+      "button": 24,
+      "button_font": "Arial 16px"
+    }
+  ]
+}

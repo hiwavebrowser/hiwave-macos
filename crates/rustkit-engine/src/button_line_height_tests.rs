@@ -161,3 +161,49 @@ fn the_form_controls_case_buttons_are_the_height_chrome_measured() {
     }
     assert_eq!(heights.iter().filter(|h| **h == 50.0).count(), 1, "exactly the .test4 button is 50: {text}");
 }
+
+/// A line holding only a button is the button's height when the button hangs further below the
+/// baseline than the strut does: the part below its baseline is its label line's below-baseline
+/// part plus its bottom padding and border (the control's padding and border are inside its
+/// content rect, so the layout box's own padding reads 0). Chrome for Testing 148.0.7778.216
+/// (win64), 16px Arial blocks, docs/diagnostics/2026-11-21/button_line_hang_cft148.json: the
+/// settings page's `.btn` (`padding: .6rem 1rem; font-size: .85rem; border: 1px solid`) makes a
+/// 36.1875 line for its 36.1875 box; `padding: 8px 12px; font-size: 14px` 36 for 36; a bare
+/// button 21 for 21; a bare 16px button 24 for 24. RustKit hung only the label's descent (about
+/// 3.4) below the baseline, the 16px strut's descent hung under the button and every such line
+/// was 0.45 to 0.62 too tall (each settings section with a button row, cascading down the page).
+#[test]
+fn a_line_holding_only_a_button_is_the_buttons_height() {
+    const PAGE: &str = "<html><head><style>*{box-sizing:border-box}body{margin:0}\
+        div{font:16px Arial;width:400px}</style></head><body>\
+        <div id=l1><button id=b1 style='padding:.6rem 1rem;font-size:.85rem;font-weight:500;\
+        border:1px solid transparent'>Clear Data</button></div>\
+        <div id=l2><button id=b2 style='padding:8px 12px;font-size:14px'>Clear Data</button></div>\
+        <div id=l3><button id=b3>Clear Data</button></div>\
+        <div id=l4><button id=b4 style='font-size:16px'>Clear Data</button></div>\
+        </body></html>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 400 })
+        .expect("view");
+    engine.load_html(view, PAGE).expect("load_html");
+    let ids = ["l1", "b1", "l2", "b2", "l3", "b3", "l4", "b4"];
+    let expr = ids
+        .iter()
+        .map(|id| format!("document.getElementById('{id}').getBoundingClientRect().height"))
+        .collect::<Vec<_>>()
+        .join(" + ',' + ");
+    let out = engine.execute_script(view, &format!("String({expr})")).unwrap();
+    let text = out.strip_prefix("String(\"").and_then(|v| v.strip_suffix("\")")).unwrap_or(&out).to_string();
+    let h: Vec<f64> = text.split(',').map(|n| n.parse().unwrap_or(f64::NAN)).collect();
+    // Chrome: (line, button) per row.
+    let chrome = [(36.1875, 36.1875), (36.0, 36.0), (21.0, 21.0), (24.0, 24.0)];
+    for (row, (line, button)) in chrome.iter().enumerate() {
+        let (got_line, got_button) = (h[2 * row], h[2 * row + 1]);
+        assert!((got_button - button).abs() < 0.05, "row {row}: the button is {button} in Chrome, got {got_button}");
+        assert!(
+            (got_line - line).abs() < 0.05,
+            "row {row}: the line holding only the button is {line} in Chrome (the button's height), got {got_line}"
+        );
+    }
+}
