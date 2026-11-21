@@ -21,7 +21,7 @@ import { chromium } from 'playwright';
 import { writeFileSync, readFileSync } from 'fs';
 import { join as pathJoin } from 'path';
 import { getDeterministicLaunchOptions } from './deterministic.mjs';
-import { oracleLaunchOptions } from './realsite_launch.mjs';
+import { oracleLaunchOptions, oracleUserAgent, oracleWantsHeadedUa } from './realsite_launch.mjs';
 import { comparePixels } from './compare_pixels.mjs';
 
 const NAV_TIMEOUT_MS = 30000;
@@ -62,15 +62,12 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs, ha
   const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: launch.headless };
   let harContext = null;
   try {
-    // The oracle's user agent, when the board pins one (Linux runs have no display to run headed on):
-    // REALSITE_ORACLE_UA sends an explicit UA (e.g. the product's honest one, so both arms are
-    // served the same page); REALSITE_ORACLE_HEADED_UA=1 sends what this same Chrome sends headed:
-    // its own navigator.userAgent with the "Headless" marker dropped, nothing else. Neither changes
-    // webdriver or anything else about the browser; no challenge solving.
-    let ua = process.env.REALSITE_ORACLE_UA || undefined;
-    if (!ua && launch.headless && process.env.REALSITE_ORACLE_HEADED_UA === '1') {
+    // REALSITE_ORACLE_HEADED_UA=1 on a headless oracle: send what this Chrome sends headed (its own
+    // UA without the Headless marker); see oracleUserAgent in realsite_launch.mjs.
+    let ua;
+    if (oracleWantsHeadedUa(launch.headless)) {
       const probe = await browser.newPage();
-      ua = (await probe.evaluate(() => navigator.userAgent)).replace('HeadlessChrome/', 'Chrome/');
+      ua = oracleUserAgent(await probe.evaluate(() => navigator.userAgent), launch.headless);
       await probe.close();
     }
     if (ua) result.oracle_user_agent = ua;
