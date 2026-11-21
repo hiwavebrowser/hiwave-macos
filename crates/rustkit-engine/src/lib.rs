@@ -531,6 +531,9 @@ mod html1_noscript_serialize_tests;
 mod html2_noscript_owner_document_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod spd3_range_rects_tests;
+// Menlo: the expected boxes are Chrome's on macOS.
+#[cfg(all(test, feature = "headless", target_os = "macos"))]
+mod root_rem_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod svg2_svg_geometry_events_tests;
 #[cfg(all(test, feature = "headless"))]
