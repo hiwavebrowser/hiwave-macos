@@ -53315,8 +53315,9 @@ mod aspect_ratio_empty_block_tests {
 
     /// An empty block whose ratio gives it no height is still an empty
     /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
-    /// ratio, keep no box, and margins collapse through it (R1 on #673;
-    /// Chromium 141 numbers).
+    /// ratio, add no height, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers). It keeps its box since empty element blocks
+    /// stopped being dropped; what this pins is that it takes no space.
     #[test]
     fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
