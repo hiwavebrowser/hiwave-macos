@@ -493,6 +493,8 @@ mod script_module_tests;
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
+#[cfg(test)]
+mod empty_block_box_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
