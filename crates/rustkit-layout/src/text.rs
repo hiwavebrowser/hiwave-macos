@@ -1486,6 +1486,10 @@ impl TextShaper {
                     // table, then DirectWrite's system fallback), by family,
                     // with its px-per-design-unit scale.
                     let mut text_faces: Vec<(String, rustkit_text::FontFace, f32)> = Vec::new();
+                    // Pair kerning, as Chrome kerns (HarfBuzz, the face's GPOS
+                    // `kern`): "Tools" in 13px Segoe UI Semibold is 30.437 in
+                    // Chrome for Testing 148 win64, 31.700 of nominal advances.
+                    let kerned = face.kerned_advances(text, size);
 
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
@@ -1559,6 +1563,8 @@ impl TextShaper {
                                 }
                                 None => notdef,
                             }
+                        } else if let Some(advance) = kerned.as_ref().and_then(|k| k.get(i).copied()) {
+                            advance
                         } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
