@@ -1,0 +1,45 @@
+//! YT-CARD-SUBTITLE: an inline element whose text wraps aligns each of its lines on its own.
+//!
+//! In a `text-align: center` or `right` block, a `<span>` (or a custom element, or `<b><span>`)
+//! whose text wraps onto several lines was moved as ONE box: every line kept the span's left edge
+//! and the whole span shifted by a single offset, so line 0 started mid-line and ran past the
+//! block's right edge. youtube.com's "Try searching to get started" card shows it on its subtitle.
+//! css-text-3 §7.1 aligns each line box's content; bare text already did.
+//!
+//! Expected lines: docs/diagnostics/2026-11-21/wrapped_inline_align_cft148.txt, `window.report()`
+//! of the page beside it in Chrome for Testing 148.0.7778.216 at 800x600 (Menlo 16px/20px), from
+//! tools/parity_oracle/wrapped_inline_align_log.mjs. Each line is a case: the text node's line
+//! rects (x, y, width).
+
+use super::*;
+
+const PAGE: &str = include_str!("../../../docs/diagnostics/2026-11-21/wrapped_inline_align.html");
+const CHROME: &str =
+    include_str!("../../../docs/diagnostics/2026-11-21/wrapped_inline_align_cft148.txt");
+
+#[test]
+fn a_wrapped_inline_aligns_each_line_like_bare_text() {
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, PAGE).expect("load");
+    let got = engine
+        .execute_script(view, "JSON.stringify(window.report().split('\\n'))")
+        .expect("report");
+    let got = got.strip_prefix("String(").and_then(|v| v.strip_suffix(')')).unwrap_or(&got).to_string();
+    let got: String = serde_json::from_str(&got).expect("a JSON string");
+    let got: Vec<String> = serde_json::from_str(&got).expect("a JSON array");
+    let expected: Vec<&str> = CHROME.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).collect();
+    assert_eq!(expected.len(), 9, "the Chrome report has 9 cases");
+    let wrong: Vec<String> = expected
+        .iter()
+        .enumerate()
+        .filter_map(|(i, want)| match got.get(i) {
+            Some(have) if have == want => None,
+            Some(have) => Some(format!("  {have}\n    Chromium: {want}")),
+            None => Some(format!("  (missing)\n    Chromium: {want}")),
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{} of {} cases differ:\n{}", wrong.len(), expected.len(), wrong.join("\n"));
+}
