@@ -62,9 +62,22 @@ async function captureChrome(url, pngPath, textPath, width, height, settleMs, ha
   const result = { url, status: 'ok', error: null, nav_error: null, oracle_headless: launch.headless };
   let harContext = null;
   try {
+    // The oracle's user agent, when the board pins one (Linux runs have no display to run headed on):
+    // REALSITE_ORACLE_UA sends an explicit UA (e.g. the product's honest one, so both arms are
+    // served the same page); REALSITE_ORACLE_HEADED_UA=1 sends what this same Chrome sends headed:
+    // its own navigator.userAgent with the "Headless" marker dropped, nothing else. Neither changes
+    // webdriver or anything else about the browser; no challenge solving.
+    let ua = process.env.REALSITE_ORACLE_UA || undefined;
+    if (!ua && launch.headless && process.env.REALSITE_ORACLE_HEADED_UA === '1') {
+      const probe = await browser.newPage();
+      ua = (await probe.evaluate(() => navigator.userAgent)).replace('HeadlessChrome/', 'Chrome/');
+      await probe.close();
+    }
+    if (ua) result.oracle_user_agent = ua;
     // colorScheme is pinned: left unset, headless Chrome followed the seat's
     // OS appearance and served Google's dark theme, which RustKit never gets.
     const context = await browser.newContext({
+      ...(ua ? { userAgent: ua } : {}),
       viewport: { width, height },
       deviceScaleFactor: 1,
       colorScheme: 'light',
