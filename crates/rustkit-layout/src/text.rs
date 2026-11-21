@@ -1486,6 +1486,10 @@ impl TextShaper {
                     // table, then DirectWrite's system fallback), by family,
                     // with its px-per-design-unit scale.
                     let mut text_faces: Vec<(String, rustkit_text::FontFace, f32)> = Vec::new();
+                    // Pair kerning, as Chrome kerns (HarfBuzz, the face's GPOS
+                    // `kern`): "Tools" in 13px Segoe UI Semibold is 30.437 in
+                    // Chrome for Testing 148 win64, 31.700 of nominal advances.
+                    let kerned = face.kerned_advances(text, size);
 
                     for (i, (&glyph_id, &c)) in
                         glyph_indices.iter().zip(text_chars.iter()).enumerate()
@@ -1559,6 +1563,8 @@ impl TextShaper {
                                 }
                                 None => notdef,
                             }
+                        } else if let Some(advance) = kerned.as_ref().and_then(|k| k.get(i).copied()) {
+                            advance
                         } else if i < glyph_metrics.len() {
                             glyph_metrics[i].advance_width as f32 * scale
                         } else {
@@ -4503,6 +4509,43 @@ mod tests {
             let m = &shaped.metrics;
             let got = (m.ascent + m.descent + m.leading).round();
             assert_eq!(got, line, "{text:?} at {size}px line");
+        }
+    }
+
+    /// Windows runs are kerned as Chrome kerns them: HarfBuzz applies the
+    /// face's GPOS `kern` pairs. Chrome for Testing 148 win64, canvas
+    /// `measureText` (the DOM agrees to a LayoutUnit): "Tools" in 13px Segoe UI
+    /// Semibold is 30.437 (its nominal advances sum to 31.700; RustKit gave
+    /// that, and the chrome board's right-sidebar title came out 1.26px wide),
+    /// Times New Roman "AVAWAY" at 16px is 64.227 (72.875 nominal). Regular
+    /// Segoe UI's GPOS pairs are not its legacy `kern` table's ("Tools" 29.440;
+    /// the table gives 29.371). Consolas has no kerning, and Chrome's widths
+    /// show no ligature changing an advance ("office fifty").
+    #[cfg(windows)]
+    #[test]
+    fn windows_runs_are_kerned_as_chrome_kerns_them() {
+        let shaper = TextShaper::new();
+        for (family, weight, size, text, chrome) in [
+            ("Segoe UI", 600, 13.0, "Tools", 30.437),
+            ("Segoe UI", 400, 13.0, "Tools", 29.440),
+            ("Segoe UI", 400, 11.0, "Recent Downloads", 89.993),
+            ("Arial", 700, 11.0, "HiWave", 39.327),
+            ("Arial", 400, 16.0, "AVAWAY", 63.711),
+            ("Times New Roman", 400, 16.0, "AVAWAY", 64.227),
+            ("Consolas", 400, 16.0, "AVAWAY", 52.781),
+            ("Segoe UI", 400, 16.0, "office fifty", 70.461),
+        ] {
+            let chain = FontFamilyChain::new(family);
+            let run = shaper
+                .shape(text, &chain, FontWeight(weight), FontStyle::Normal, FontStretch::Normal, size)
+                .unwrap();
+            let w = run.metrics.width;
+            assert!(
+                (w - chrome).abs() < 0.01,
+                "{family} {weight} {size}px {text:?}: RustKit {w}, Chrome {chrome}"
+            );
+            let sum: f32 = run.glyphs.iter().map(|g| g.advance).sum();
+            assert!((sum - w).abs() < 0.001, "{text:?}: the glyph advances carry the kerning");
         }
     }
 
