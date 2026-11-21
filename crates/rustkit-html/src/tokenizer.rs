@@ -476,7 +476,16 @@ impl Tokenizer {
                 self.emit_current_tag();
                 self.state = State::Data;
             }
-            _ => {
+            // eof-in-tag: the solidus ends the tag. Rewinding here would read
+            // that solidus again, and the tag would never end.
+            None => {
+                self.self_closing = true;
+                self.emit_current_tag();
+                self.state = State::Data;
+            }
+            // A character after the solidus starts an attribute. Reconsume it.
+            Some(_) => {
+                self.pos -= 1;
                 self.state = State::BeforeAttributeName;
             }
         }
@@ -485,8 +494,13 @@ impl Tokenizer {
     fn state_before_attribute_name(&mut self) {
         match self.consume() {
             Some(ch) if ch.is_ascii_whitespace() => {}
-            Some('/') | Some('>') | None => {
+            Some('/') | Some('>') => {
                 self.pos -= 1;
+                self.state = State::AfterAttributeName;
+            }
+            // EOF was not consumed, so it is not rewound. After-attribute name
+            // emits the tag when it sees it.
+            None => {
                 self.state = State::AfterAttributeName;
             }
             Some('=') => {
@@ -1288,6 +1302,44 @@ mod tests {
             tokens[0],
             Token::StartTag { ref name, self_closing: true, .. } if name == "br"
         ));
+    }
+
+    /// A start tag that ends on `/` at EOF (`<div/`, a truncated response) must
+    /// finish. The solidus is the self-closing flag; the tag is emitted.
+    #[test]
+    fn a_solidus_at_eof_ends_the_start_tag() {
+        for (html, name) in [
+            ("<div/", "div"),
+            ("<div /", "div"),
+            ("<br/", "br"),
+            ("<img src=a /", "img"),
+        ] {
+            let tokens = tokenize(html).expect(html);
+            assert!(
+                matches!(
+                    tokens.first(),
+                    Some(Token::StartTag { name: n, self_closing: true, .. }) if n == name
+                ),
+                "{html}: {tokens:?}"
+            );
+            assert!(matches!(tokens.last(), Some(Token::Eof)), "{html}: {tokens:?}");
+        }
+        let tokens = tokenize("<img src=a /").unwrap();
+        let Token::StartTag { attrs, .. } = &tokens[0] else { panic!("{tokens:?}") };
+        assert_eq!(attrs.get("src").map(String::as_str), Some("a"));
+    }
+
+    /// An unexpected solidus is reconsumed, so the attribute that follows it
+    /// keeps its first character (`<div/id=1>` is `id`, not `d`).
+    #[test]
+    fn an_unexpected_solidus_is_reconsumed_as_an_attribute() {
+        let tokens = tokenize("<div/id=1>").unwrap();
+        let Token::StartTag { name, attrs, self_closing } = &tokens[0] else {
+            panic!("Expected StartTag, got {tokens:?}");
+        };
+        assert_eq!(name, "div");
+        assert!(!self_closing);
+        assert_eq!(attrs.get("id"), Some(&"1".to_string()), "{tokens:?}");
     }
 
     #[test]
