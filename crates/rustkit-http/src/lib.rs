@@ -147,49 +147,140 @@ pub fn default_user_agent() -> String {
 /// its first scar. Approach and measurements from Atlas's
 /// rs-tls-roots-once (307fc8e), rebuilt here against post-#355 develop —
 /// #355 already removed the second (per-connection) load site.
+///
+/// NET-LAZY-TLS: asked for on a client's first https connection, never when it is built. The
+/// platform read runs on tokio's blocking pool, so the connecting runtime (the content thread's
+/// current-thread one) keeps running; see [`RootsCell`] for the retries and the failure hold.
 #[cfg(not(feature = "native-tls"))]
-fn platform_roots() -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
-    static ROOTS: RootsCache = std::sync::Mutex::new(None);
-    // NET-LAZY-TLS test seam: a thread that set a failing platform answers with it, outside the
-    // process cache.
-    if let Some((reason, loads)) = ROOTS_OVERRIDE.with(|o| o.borrow().clone()) {
-        let fresh: RootsCache = std::sync::Mutex::new(None);
-        return roots_cached(&fresh, || {
-            loads.set(loads.get() + 1);
-            (tokio_rustls::rustls::RootCertStore::empty(), reason.clone())
-        });
+async fn platform_roots() -> Result<Arc<RootStore>, HttpError> {
+    static ROOTS: std::sync::LazyLock<RootsCell> = std::sync::LazyLock::new(RootsCell::default);
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some((cell, load)) = ROOTS_OVERRIDE.with(|o| o.borrow().as_ref().map(|(c, l, _)| (c.clone(), l.clone()))) {
+        return cell.get(load, ROOT_LOAD_FAILURE_HOLD).await;
     }
-    roots_cached(&ROOTS, || {
-        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-        let loaded = rustls_native_certs::load_native_certs();
-        let mut rejected = 0usize;
-        for cert in loaded.certs {
-            // A single unparseable platform cert must not kill the store.
-            if roots.add(cert).is_err() {
-                rejected += 1;
-            }
-        }
-        let mut diagnostics = String::new();
-        if !loaded.errors.is_empty() || rejected > 0 {
-            diagnostics = format!(
-                "{} load errors, {} rejected certs, accepted {}",
-                loaded.errors.len(),
-                rejected,
-                roots.len()
-            );
-            if let Some(first) = loaded.errors.first() {
-                diagnostics.push_str(&format!(", first error: {first}"));
-            }
-            warn!(target: "rustkit_http::roots", "platform root load: {diagnostics}");
-        }
-        (roots, diagnostics)
-    })
+    ROOTS.get(Arc::new(load_platform_roots), ROOT_LOAD_FAILURE_HOLD).await
 }
 
-type RootsCache = std::sync::Mutex<Option<Arc<tokio_rustls::rustls::RootCertStore>>>;
+/// One read of the platform's roots (blocking: the macOS keychain).
+#[cfg(not(feature = "native-tls"))]
+fn load_platform_roots() -> (RootStore, String) {
+    let mut roots = RootStore::empty();
+    let loaded = rustls_native_certs::load_native_certs();
+    let mut rejected = 0usize;
+    for cert in loaded.certs {
+        // A single unparseable platform cert must not kill the store.
+        if roots.add(cert).is_err() {
+            rejected += 1;
+        }
+    }
+    let mut diagnostics = String::new();
+    if !loaded.errors.is_empty() || rejected > 0 {
+        diagnostics = format!(
+            "{} load errors, {} rejected certs, accepted {}",
+            loaded.errors.len(),
+            rejected,
+            roots.len()
+        );
+        if let Some(first) = loaded.errors.first() {
+            diagnostics.push_str(&format!(", first error: {first}"));
+        }
+        warn!(target: "rustkit_http::roots", "platform root load: {diagnostics}");
+    }
+    (roots, diagnostics)
+}
 
-type RootsOverride = Option<(String, std::rc::Rc<std::cell::Cell<usize>>)>;
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+type RootStore = tokio_rustls::rustls::RootCertStore;
+/// One blocking read of a root store and why it is empty, if it is.
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+type RootsLoad = Arc<dyn Fn() -> (RootStore, String) + Send + Sync>;
 
+/// NET-LAZY-TLS: how many times one load asks the platform before it fails, and the pauses
+/// between: the macOS keychain read behind the roots fails now and then under load
+/// ("failed to load user trust settings: I/O error") and answers on a second try.
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+const ROOT_LOAD_ATTEMPTS: usize = 3;
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+const ROOT_LOAD_RETRY_PAUSE: Duration = Duration::from_millis(50);
+/// NET-LAZY-TLS (R1 on #1413): how long a failed load is the answer before the platform is asked
+/// again, so K connections after a failure do not each pay the retries.
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+const ROOT_LOAD_FAILURE_HOLD: Duration = Duration::from_secs(1);
+
+/// A root store: loaded once and kept for the process, or a failed load kept for a moment.
+///
+/// `state` is only ever locked for a read or a write, never across a load or a pause; `loading`
+/// lets one load run at a time, and whoever waited for it takes its answer. A load asks the
+/// platform up to [`ROOT_LOAD_ATTEMPTS`] times on the blocking pool, pausing with tokio's timer.
+/// Only a usable store is kept: a transient platform failure (keychain busy under load) must not
+/// turn every later handshake into an error, so a failure is the answer only for `hold`.
+#[derive(Default)]
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+struct RootsCell {
+    state: std::sync::Mutex<RootsState>,
+    loading: tokio::sync::Mutex<()>,
+}
+
+#[derive(Default)]
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+struct RootsState {
+    roots: Option<Arc<RootStore>>,
+    failed: Option<(std::time::Instant, String)>,
+}
+
+#[cfg_attr(feature = "native-tls", allow(dead_code))] // the rustls path's (`platform_roots`)
+impl RootsCell {
+    fn known(&self, hold: Duration) -> Option<Result<Arc<RootStore>, HttpError>> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(roots) = &state.roots {
+            return Some(Ok(roots.clone()));
+        }
+        match &state.failed {
+            Some((at, why)) if at.elapsed() < hold => Some(Err(HttpError::TlsError(why.clone()))),
+            _ => None,
+        }
+    }
+
+    async fn get(&self, load: RootsLoad, hold: Duration) -> Result<Arc<RootStore>, HttpError> {
+        if let Some(known) = self.known(hold) {
+            return known;
+        }
+        let _one_load = self.loading.lock().await;
+        if let Some(known) = self.known(hold) {
+            return known;
+        }
+        let mut diagnostics = String::new();
+        for attempt in 0..ROOT_LOAD_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(ROOT_LOAD_RETRY_PAUSE * attempt as u32).await;
+            }
+            let load = load.clone();
+            let (roots, why) = tokio::task::spawn_blocking(move || load())
+                .await
+                .map_err(|e| HttpError::TlsError(format!("platform root load did not finish: {e}")))?;
+            if !roots.is_empty() {
+                let roots = Arc::new(roots);
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.roots = Some(roots.clone());
+                state.failed = None;
+                return Ok(roots);
+            }
+            diagnostics = why;
+        }
+        let why = if diagnostics.is_empty() {
+            "no usable platform root certificates".to_string()
+        } else {
+            format!("no usable platform root certificates ({diagnostics})")
+        };
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).failed = Some((std::time::Instant::now(), why.clone()));
+        Err(HttpError::TlsError(why))
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+type RootsOverride = Option<(Arc<RootsCell>, RootsLoad, Arc<std::sync::atomic::AtomicUsize>)>;
+
+#[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
     /// NET-LAZY-TLS test seam: on this thread, loading the platform roots fails with this reason
     /// and counts the attempts (`fail_platform_roots_on_this_thread`).
@@ -198,72 +289,45 @@ thread_local! {
 
 /// The attempts to load the platform roots on this thread since
 /// [`fail_platform_roots_on_this_thread`]; the override ends when this is dropped.
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub struct PlatformRootsProbe {
-    loads: std::rc::Rc<std::cell::Cell<usize>>,
+    loads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 impl PlatformRootsProbe {
-    /// How many times the platform roots were loaded on this thread.
+    /// How many times the platform roots were loaded for this thread's connections.
     pub fn loads(&self) -> usize {
-        self.loads.get()
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 impl Drop for PlatformRootsProbe {
     fn drop(&mut self) {
         ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = None);
     }
 }
 
-/// Test seam (NET-LAZY-TLS): until the returned probe is dropped, every load of the platform
-/// roots on this thread finds none and fails with `reason` (the keychain read that flakes under
-/// load), and is counted. For tests of what touches the platform roots and when.
+/// Test seam (NET-LAZY-TLS; the `test-hooks` feature, never in a shipped build): until the
+/// returned probe is dropped, every load of the platform roots for a connection made ON THIS
+/// THREAD finds none and fails with `reason` (the keychain read that flakes under load), and is
+/// counted. Its own store and failure hold, outside the process cache. The override is read on
+/// the connecting thread: a connection made on another thread (a multi-thread runtime's worker)
+/// does not see it, and `loads() == 0` would then hold for the wrong reason, so use it with a
+/// current-thread runtime.
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub fn fail_platform_roots_on_this_thread(reason: &str) -> PlatformRootsProbe {
-    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
-    ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = Some((reason.to_string(), loads.clone())));
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (counted, reason) = (loads.clone(), reason.to_string());
+    let load: RootsLoad = Arc::new(move || {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (RootStore::empty(), reason.clone())
+    });
+    ROOTS_OVERRIDE.with(|o| *o.borrow_mut() = Some((Arc::new(RootsCell::default()), load, loads.clone())));
     PlatformRootsProbe { loads }
-}
-
-/// NET-LAZY-TLS: how many times one load asks the platform before it fails, and the pauses
-/// between: the macOS keychain read behind the roots fails now and then under load
-/// ("failed to load user trust settings: I/O error") and answers on a second try.
-const ROOT_LOAD_ATTEMPTS: usize = 3;
-const ROOT_LOAD_RETRY_PAUSE: Duration = Duration::from_millis(50);
-/// NET-LAZY-TLS (R1 on #1413): how long a failed load is the answer before the platform is asked
-/// again, so K connections after a failure do not each pay the retries.
-#[cfg_attr(not(test), allow(dead_code))]
-const ROOT_LOAD_FAILURE_HOLD: Duration = Duration::from_secs(1);
-
-fn roots_cached(
-    cache: &RootsCache,
-    mut load: impl FnMut() -> (tokio_rustls::rustls::RootCertStore, String),
-) -> Result<Arc<tokio_rustls::rustls::RootCertStore>, HttpError> {
-    let mut slot = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(roots) = slot.as_ref() {
-        return Ok(roots.clone());
-    }
-    // Only a usable store is cached: a transient platform failure (keychain
-    // busy under load) must not turn every later handshake into an error.
-    let (mut roots, mut diagnostics) = load();
-    for attempt in 1..ROOT_LOAD_ATTEMPTS {
-        if !roots.is_empty() {
-            break;
-        }
-        std::thread::sleep(ROOT_LOAD_RETRY_PAUSE * attempt as u32);
-        (roots, diagnostics) = load();
-    }
-    let roots = Arc::new(roots);
-    if roots.is_empty() {
-        return Err(HttpError::TlsError(if diagnostics.is_empty() {
-            "no usable platform root certificates".into()
-        } else {
-            format!("no usable platform root certificates ({diagnostics})")
-        }));
-    }
-    *slot = Some(roots.clone());
-    Ok(roots)
 }
 
 /// ALPN outcome of a TLS handshake.
@@ -390,12 +454,12 @@ impl Client {
     /// (loaded once per process, `platform_roots`). A failed load is this connection's error and
     /// is not kept: the next https connection tries again.
     #[cfg(not(feature = "native-tls"))]
-    fn tls_connector(&self) -> Result<TlsConnector, HttpError> {
-        let mut slot = self.tls_connector.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(connector) = slot.as_ref() {
+    async fn tls_connector(&self) -> Result<TlsConnector, HttpError> {
+        // The slot is locked for a look or a store only, never across the load.
+        if let Some(connector) = self.tls_connector.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             return Ok(connector.clone());
         }
-        let roots = platform_roots()?;
+        let roots = platform_roots().await?;
 
         // When multiple crypto providers (e.g. aws-lc-rs from rustkit-http and ring from
         // reqwest in the workspace) are active, rustls requires an explicit default provider
@@ -413,8 +477,9 @@ impl Client {
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let connector = TlsConnector::from(Arc::new(tls_config));
-        *slot = Some(connector.clone());
-        Ok(connector)
+        let mut slot = self.tls_connector.lock().unwrap_or_else(|e| e.into_inner());
+        // Two connections that built at once keep the first; both are the same configuration.
+        Ok(slot.get_or_insert(connector).clone())
     }
 
     /// Open a TLS connection and report the ALPN-negotiated protocol.
@@ -435,7 +500,8 @@ impl Client {
             .map_err(|e| HttpError::TlsError(format!("invalid server name: {e}")))?;
 
         let tls_stream = self
-            .tls_connector()?
+            .tls_connector()
+            .await?
             .connect(server_name, stream)
             .await
             .map_err(|e| HttpError::TlsError(e.to_string()))?;
@@ -1520,51 +1586,45 @@ mod tests {
 
     #[test]
     fn an_empty_platform_root_load_is_not_cached_for_the_life_of_the_process() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let loads = Arc::new(AtomicUsize::new(0));
+        let cell = RootsCell::default();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        // A hold of zero: the failure is not kept at all, so the next load asks again.
+        assert!(rt.block_on(cell.get(counting(&loads, false), Duration::ZERO)).is_err(), "an empty load is an error");
+        let got = rt.block_on(cell.get(counting(&loads, true), Duration::ZERO));
+        assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
+        // The failing call asked the platform ROOT_LOAD_ATTEMPTS times (NET-LAZY-TLS).
+        assert_eq!(loads.load(Ordering::SeqCst), ROOT_LOAD_ATTEMPTS + 1);
+        assert!(rt.block_on(cell.get(counting(&loads, false), Duration::ZERO)).is_ok());
+        assert_eq!(loads.load(Ordering::SeqCst), ROOT_LOAD_ATTEMPTS + 1, "a good store is cached and not reloaded");
+    }
+
+    /// A load that counts itself and finds one anchor (`usable`) or none.
+    fn counting(loads: &Arc<std::sync::atomic::AtomicUsize>, usable: bool) -> RootsLoad {
+        let loads = loads.clone();
+        Arc::new(move || {
+            loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (if usable { one_anchor() } else { RootStore::empty() }, String::new())
+        })
+    }
+
+    fn one_anchor() -> RootStore {
         use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
-        use tokio_rustls::rustls::RootCertStore;
-        let one_anchor = || RootCertStore {
+        RootStore {
             roots: vec![TrustAnchor {
                 subject: Der::from_slice(b"subject"),
                 subject_public_key_info: Der::from_slice(b"spki"),
                 name_constraints: None,
             }],
-        };
-        let cache: RootsCache = std::sync::Mutex::new(None);
-        let mut loads = 0;
-        assert!(
-            roots_cached(&cache, || {
-                loads += 1;
-                (RootCertStore::empty(), String::new())
-            })
-            .is_err(),
-            "an empty load is an error"
-        );
-        let got = roots_cached(&cache, || {
-            loads += 1;
-            (one_anchor(), String::new())
-        });
-        assert!(got.is_ok(), "a later successful load must be used, not the earlier empty one");
-        // The failing call asked the platform ROOT_LOAD_ATTEMPTS times (NET-LAZY-TLS).
-        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1);
-        assert!(
-            roots_cached(&cache, || {
-                loads += 1;
-                (RootCertStore::empty(), String::new())
-            })
-            .is_ok()
-        );
-        assert_eq!(loads, ROOT_LOAD_ATTEMPTS + 1, "a good store is cached and not reloaded");
+        }
     }
 
     #[test]
     fn an_empty_platform_root_error_says_why() {
-        use tokio_rustls::rustls::RootCertStore;
-        let cache: RootsCache = std::sync::Mutex::new(None);
-        let err = roots_cached(&cache, || {
-            (RootCertStore::empty(), "2 load errors, first: keychain busy".to_string())
-        })
-        .unwrap_err()
-        .to_string();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let load: RootsLoad = Arc::new(|| (RootStore::empty(), "2 load errors, first: keychain busy".to_string()));
+        let err = rt.block_on(RootsCell::default().get(load, ROOT_LOAD_FAILURE_HOLD)).unwrap_err().to_string();
         assert!(err.contains("keychain busy"), "the platform's reason must reach the caller: {err}");
         assert!(err.contains("no usable platform root certificates"), "{err}");
     }
@@ -1673,27 +1733,22 @@ mod tests {
     /// once in a while), and a store that loaded is kept for the process.
     #[test]
     fn a_failed_root_load_is_tried_again_before_it_fails() {
-        use tokio_rustls::rustls::pki_types::{Der, TrustAnchor};
-        use tokio_rustls::rustls::RootCertStore;
-        let cache: RootsCache = std::sync::Mutex::new(None);
-        let mut loads = 0;
-        let got = roots_cached(&cache, || {
-            loads += 1;
-            if loads < 3 {
-                return (RootCertStore::empty(), "keychain busy".to_string());
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counted = loads.clone();
+        let load: RootsLoad = Arc::new(move || {
+            if counted.fetch_add(1, Ordering::SeqCst) + 1 < 3 {
+                return (RootStore::empty(), "keychain busy".to_string());
             }
-            let roots = RootCertStore {
-                roots: vec![TrustAnchor {
-                    subject: Der::from_slice(b"subject"),
-                    subject_public_key_info: Der::from_slice(b"spki"),
-                    name_constraints: None,
-                }],
-            };
-            (roots, String::new())
+            (one_anchor(), String::new())
         });
+        let cell = RootsCell::default();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let got = rt.block_on(cell.get(load, ROOT_LOAD_FAILURE_HOLD));
         assert!(got.is_ok(), "the third try loads: {:?}", got.err().map(|e| e.to_string()));
-        assert_eq!(loads, 3);
-        assert!(roots_cached(&cache, || unreachable!("kept")).is_ok());
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
+        let kept: RootsLoad = Arc::new(|| unreachable!("kept"));
+        assert!(rt.block_on(cell.get(kept, ROOT_LOAD_FAILURE_HOLD)).is_ok());
     }
 
     #[test]
