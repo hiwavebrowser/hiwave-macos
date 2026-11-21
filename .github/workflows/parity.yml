@@ -329,17 +329,13 @@ jobs:
           python-version: "3.11"
 
       - name: Install guard deps
-        # pyyaml: the lane guards parse parity.yml to assert that the steps
-        # they protect actually run. It is not in the runner image. Night 4's
-        # `test_both_gating_lanes_wire_the_scout_to_the_stability_minimum` has
-        # therefore never been runnable on a clean machine — it passed on the
-        # trench seat, where pyyaml happens to be installed, and died on
-        # ModuleNotFoundError the first time CI ran it.
-        # numpy: test_realsite_background_fraction compares the board's
-        # numpy-free fallback with its numpy path; without numpy that
-        # comparison never runs (it fails here rather than skip).
-        # Nothing else: each dependency is here because a guard needs it.
-        run: python3 -m pip install --disable-pip-version-check pyyaml numpy
+        # pyyaml, and only pyyaml: the lane guards parse parity.yml to assert
+        # that the steps they protect actually run. It is not in the runner
+        # image. Night 4's `test_both_gating_lanes_wire_the_scout_to_the_
+        # stability_minimum` has therefore never been runnable on a clean
+        # machine — it passed on the trench seat, where pyyaml happens to be
+        # installed, and died on ModuleNotFoundError the first time CI ran it.
+        run: python3 -m pip install --disable-pip-version-check pyyaml
 
       - uses: actions/setup-node@v4
         with:
@@ -376,6 +372,18 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
+
+      - name: Background fraction against its numpy reference
+        # numpy only as a reference, in its own venv: the guard loop above runs
+        # without it, so the scripts' numpy-free paths (realsite_board's and
+        # scorer_v2's fallbacks) stay the ones CI exercises. This step compares
+        # realsite_board's fallback with its numpy path; REALSITE_NUMPY_REFERENCE=1
+        # turns a skip (numpy missing) into a failure.
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/numpy-ref"
+          "$RUNNER_TEMP/numpy-ref/bin/pip" install --disable-pip-version-check numpy
+          REALSITE_NUMPY_REFERENCE=1 "$RUNNER_TEMP/numpy-ref/bin/python" scripts/tests/test_realsite_background_fraction.py
 
   # ===========================================================================
   # PR Gate: Sharded swarm (~30m total)
