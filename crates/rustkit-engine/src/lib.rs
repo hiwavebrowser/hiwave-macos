@@ -56762,6 +56762,37 @@ mod error_response_tests {
 mod scroll_extent_tests {
     use super::*;
 
+    #[test]
+    #[cfg(feature = "headless")]
+    fn scrolling_to_a_feed_sentinel_extends_the_page_repeatedly() {
+        let mut engine = Engine::new(EngineConfig::default()).unwrap();
+        let view = engine.create_headless_view(Bounds::new(0, 0, 400, 200)).unwrap();
+        engine.load_html(view, r#"<!doctype html>
+            <style>body { margin: 0 } article { height: 300px } #more { height: 20px }</style>
+            <main id="feed"><article>First batch</article><div id="more"></div></main>"#).unwrap();
+        engine.execute_script(view, r#"
+            const marker = document.getElementById('more');
+            const feed = document.getElementById('feed');
+            const io = new IntersectionObserver(([entry]) => {
+                if (!entry.isIntersecting) return;
+                const batch = document.createElement('article');
+                batch.textContent = 'Next batch';
+                feed.insertBefore(batch, marker);
+            });
+            io.observe(marker);
+        "#).unwrap();
+        assert_eq!(engine.views[&view].max_scroll_offset.1, 120.0);
+        for (offset, extent) in [(120.0, 420.0), (420.0, 720.0), (720.0, 1020.0)] {
+            assert!(engine.scroll_view(view, 0.0, -10000.0).unwrap());
+            assert_eq!(engine.get_scroll_offset(view).unwrap().1, offset);
+            assert_eq!(engine.views[&view].max_scroll_offset.1, extent);
+        }
+        assert_eq!(
+            engine.execute_script(view, "String(document.querySelectorAll('article').length)").unwrap(),
+            "String(\"4\")"
+        );
+    }
+
     // How far a page scrolls, against the pinned Chromium (Z lane I0, H6,
     // 2026-10-05). The pages and Chrome's answers are in
     // tools/parity_oracle/scroll_extent_cases.json, written by
