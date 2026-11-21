@@ -231,6 +231,10 @@ pub fn fail_platform_roots_on_this_thread(reason: &str) -> PlatformRootsProbe {
 /// ("failed to load user trust settings: I/O error") and answers on a second try.
 const ROOT_LOAD_ATTEMPTS: usize = 3;
 const ROOT_LOAD_RETRY_PAUSE: Duration = Duration::from_millis(50);
+/// NET-LAZY-TLS (R1 on #1413): how long a failed load is the answer before the platform is asked
+/// again, so K connections after a failure do not each pay the retries.
+#[cfg_attr(not(test), allow(dead_code))]
+const ROOT_LOAD_FAILURE_HOLD: Duration = Duration::from_secs(1);
 
 fn roots_cached(
     cache: &RootsCache,
@@ -1578,30 +1582,91 @@ mod tests {
         assert_eq!(probe.loads(), 0, "building a client loads no roots");
     }
 
+    /// A local TCP listener that accepts and holds `n` connections (no TLS spoken): enough for a
+    /// client to reach its TLS setup.
+    fn silent_listener(n: usize) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().take(n) {
+                held.push(stream);
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        port
+    }
+
     /// NET-LAZY-TLS: the first https request loads the roots; a failed load is the request's
-    /// error, says why, and is not kept: the next request loads them again.
+    /// error and says why. It is remembered for a moment (R1: K connections must not each pay
+    /// the retries), so a request right after fails at once without loading, and one after
+    /// that moment loads again.
     #[cfg(not(feature = "native-tls"))]
     #[test]
     fn the_first_https_request_loads_the_roots_and_a_failure_is_not_kept() {
         let probe = fail_platform_roots_on_this_thread("keychain busy");
         let client = Client::new().expect("a client");
         assert_eq!(probe.loads(), 0);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().take(2) {
-                std::thread::sleep(Duration::from_millis(500));
-                drop(stream);
-            }
-        });
+        let port = silent_listener(3);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let url = format!("https://127.0.0.1:{port}/");
         let err = rt.block_on(client.get(&url)).err().expect("no roots, no handshake").to_string();
         assert!(err.contains("no usable platform root certificates") && err.contains("keychain busy"), "{err}");
         let first = probe.loads();
         assert!(first >= 1, "the https request loaded the roots");
+        let err = rt.block_on(client.get(&url)).err().expect("still no roots").to_string();
+        assert!(err.contains("keychain busy"), "the remembered failure says why: {err}");
+        assert_eq!(probe.loads(), first, "a failure just seen is not loaded again at once");
+        std::thread::sleep(ROOT_LOAD_FAILURE_HOLD + Duration::from_millis(100));
         let _ = rt.block_on(client.get(&url));
-        assert!(probe.loads() > first, "a failed load is tried again by the next request");
+        assert!(probe.loads() > first, "after a moment, a failed load is tried again");
+    }
+
+    /// NET-LAZY-TLS (R1 on #1413): K concurrent https requests on one current-thread runtime (the
+    /// content thread's) with the platform roots failing neither stop the runtime nor each pay
+    /// the retries: the load runs off the thread, once, and the others share its answer.
+    #[cfg(not(feature = "native-tls"))]
+    #[test]
+    fn concurrent_https_requests_with_failing_roots_do_not_stall_the_runtime() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const K: usize = 8;
+        let probe = fail_platform_roots_on_this_thread("keychain busy");
+        let client = Client::new().expect("a client");
+        let port = silent_listener(K);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let (elapsed, failed) = rt.block_on(async {
+            let ticker = {
+                let ticks = ticks.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            };
+            let started = std::time::Instant::now();
+            let url = format!("https://127.0.0.1:{port}/");
+            let gets: Vec<_> = (0..K)
+                .map(|_| {
+                    let (client, url) = (client.clone(), url.clone());
+                    tokio::spawn(async move { client.get(&url).await.is_err() })
+                })
+                .collect();
+            let mut failed = 0;
+            for get in gets {
+                failed += usize::from(get.await.unwrap());
+            }
+            ticker.abort();
+            (started.elapsed(), failed)
+        });
+        assert_eq!(failed, K, "no roots, no handshake");
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "{K} requests took {elapsed:?}; each paying the retries in turn is {K} x 150 ms"
+        );
+        assert!(ticks.load(Ordering::SeqCst) >= 5, "the runtime kept running other tasks ({} ticks)", ticks.load(Ordering::SeqCst));
+        assert_eq!(probe.loads(), ROOT_LOAD_ATTEMPTS, "one load, its tries, for all {K} requests");
     }
 
     /// NET-LAZY-TLS: one load tries the platform again before it fails (the keychain read flakes
