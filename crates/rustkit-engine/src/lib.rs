@@ -357,6 +357,13 @@ mod content_thread;
 /// built-in that recurses in Rust throws a `RangeError` (see `rustkit_js`). Call it first thing
 /// on a thread whose stack size is known.
 pub use rustkit_js::set_thread_native_stack_budget;
+
+/// Where the app stops a live script that is still running: 30 s (Pete,
+/// 2026-11-21, up from the 5 s turn allowance that also stopped scripts; a
+/// Chrome-style "page unresponsive" prompt is a later row). The app's content
+/// views and parity-capture's live loop with `--interrupt-scripts` use it
+/// (`EngineConfig::live_script_stop_ms`).
+pub const LIVE_SCRIPT_STOP_MS: u64 = 30_000;
 pub use content_thread::{
     content_stack_bytes, content_thread_enabled, ContentThread, ContentThreadError,
 };
@@ -2173,7 +2180,24 @@ pub struct EngineConfig {
     /// do not count. Read only with `interrupt_scripts_at_budget`; the
     /// watchdog is armed once per execution, and script still running when
     /// its allowance is spent is stopped.
+    ///
+    /// This is the turn's **allowance**, what frame pacing rests on: once
+    /// the turn's JavaScript has spent it, no further callback starts in the
+    /// turn (the rest go out on the next turn, after this one's frame). With
+    /// [`Self::live_script_stop_ms`] unset it is also where a running script
+    /// is stopped.
     pub live_turn_budget_ms: u64,
+    /// Where a live script is **stopped**, apart from the allowance (Pete,
+    /// 2026-11-21: stop a script at 30 s, [`LIVE_SCRIPT_STOP_MS`]; how much
+    /// script a turn runs before yielding to rendering stays
+    /// [`Self::live_turn_budget_ms`]). With it set, one execution of a live
+    /// turn (a timer callback, a response handler, a microtask drain) and
+    /// the listeners of one input event may each run this long before they
+    /// are stopped, however much of the turn's allowance is left; the turn
+    /// still starts no further callback once its allowance is spent. Never
+    /// below the allowance: a raised allowance raises the stop with it.
+    /// `None` (the engine's default): the stop is the allowance, as before.
+    pub live_script_stop_ms: Option<u64>,
     /// Copy, cut and paste use the system clipboard (macOS `NSPasteboard`,
     /// CH2.E3) instead of an in-memory one. Off by default: tests and
     /// captures must not touch the user's clipboard. The app turns it on.
@@ -2226,6 +2250,7 @@ impl Default for EngineConfig {
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
+            live_script_stop_ms: None,
             follows_script_navigation: false,
             post_load_requests_live: false,
             inspector: InspectorConfig::tab(),
@@ -28481,6 +28506,13 @@ impl EngineBuilder {
     /// (`EngineConfig::live_turn_budget_ms`).
     pub fn live_turn_budget_ms(mut self, ms: u64) -> Self {
         self.config.live_turn_budget_ms = ms;
+        self
+    }
+
+    /// Where a live script is stopped, apart from the turn's allowance
+    /// (`EngineConfig::live_script_stop_ms`).
+    pub fn live_script_stop_ms(mut self, ms: u64) -> Self {
+        self.config.live_script_stop_ms = Some(ms);
         self
     }
 

@@ -1888,7 +1888,10 @@ mod tests {
     fn content_views_get_a_budget_for_script_after_the_load() {
         let config = content_engine_builder().config().clone();
         assert!(config.interrupt_scripts_at_budget);
+        // The turn's allowance (frame pacing) is unchanged; a running script
+        // is stopped at 30 s (Pete, 2026-11-21).
         assert_eq!(config.live_turn_budget_ms, 5_000);
+        assert_eq!(config.live_script_stop_ms, Some(30_000));
     }
 
     #[test]
