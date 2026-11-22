@@ -20,6 +20,10 @@ const CASES = [
   ['no transform', '', ''],
   ['translate(5px, 7px) on the svg', 'transform:translate(5px,7px)', ''],
   ['rotate(90deg) on the wrapper', '', 'transform:rotate(90deg)'],
+  // #1415 R1 nit 1: an origin other than the svg's centre, and the composition order.
+  ['rotate(90deg) on the wrapper about its top left', '', 'transform:rotate(90deg);transform-origin:0 0'],
+  ['translate(5px, 7px) on the wrapper, rotate(90deg) on the svg', 'transform:rotate(90deg)', 'transform:translate(5px,7px)'],
+  ['rotate(90deg) on the wrapper about its top left, translate(5px, 0) on the svg', 'transform:translate(5px,0)', 'transform:rotate(90deg);transform-origin:0 0'],
 ];
 
 const browser = await chromium.launch({

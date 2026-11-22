@@ -68,3 +68,34 @@ fn a_shape_in_a_translated_svg_moves_with_it() {
 fn an_untransformed_shape_keeps_its_rect() {
     assert_rect("no transform", path_rect("", ""), (26.75, 35.5, 2.5, 5.0));
 }
+
+// #1415 R1 nit 1: the cases above all pivot on the svg's centre, so they do not pin a
+// transform-origin elsewhere or the order the wrapper's and the svg's transforms compose in.
+
+#[test]
+fn a_shape_under_an_ancestor_rotated_about_its_corner_exports_its_rotated_rect() {
+    assert_rect(
+        "rotate(90deg) on the wrapper about its top left",
+        path_rect("", "transform:rotate(90deg);transform-origin:0 0"),
+        (9.5, 36.75, 5.0, 2.5),
+    );
+}
+
+#[test]
+fn a_rotated_svg_in_a_translated_ancestor_moves_and_turns() {
+    assert_rect(
+        "translate(5px, 7px) on the wrapper, rotate(90deg) on the svg",
+        path_rect("transform:rotate(90deg)", "transform:translate(5px,7px)"),
+        (30.5, 43.75, 5.0, 2.5),
+    );
+}
+
+#[test]
+fn the_svgs_transform_applies_inside_its_ancestors() {
+    // The svg's translate(5px, 0) is taken in the wrapper's rotated frame: down, not right.
+    assert_rect(
+        "rotate(90deg) on the wrapper about its top left, translate(5px, 0) on the svg",
+        path_rect("transform:translate(5px,0)", "transform:rotate(90deg);transform-origin:0 0"),
+        (9.5, 41.75, 5.0, 2.5),
+    );
+}

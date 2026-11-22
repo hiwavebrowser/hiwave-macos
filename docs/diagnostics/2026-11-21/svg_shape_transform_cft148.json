@@ -69,6 +69,57 @@
         5,
         2.5
       ]
+    },
+    {
+      "label": "rotate(90deg) on the wrapper about its top left",
+      "svg_style": "",
+      "wrapper_style": "transform:rotate(90deg);transform-origin:0 0",
+      "svg": [
+        7,
+        33,
+        10,
+        10
+      ],
+      "path": [
+        9.5,
+        36.75,
+        5,
+        2.5
+      ]
+    },
+    {
+      "label": "translate(5px, 7px) on the wrapper, rotate(90deg) on the svg",
+      "svg_style": "transform:rotate(90deg)",
+      "wrapper_style": "transform:translate(5px,7px)",
+      "svg": [
+        28,
+        40,
+        10,
+        10
+      ],
+      "path": [
+        30.5,
+        43.75,
+        5,
+        2.5
+      ]
+    },
+    {
+      "label": "rotate(90deg) on the wrapper about its top left, translate(5px, 0) on the svg",
+      "svg_style": "transform:translate(5px,0)",
+      "wrapper_style": "transform:rotate(90deg);transform-origin:0 0",
+      "svg": [
+        7,
+        38,
+        10,
+        10
+      ],
+      "path": [
+        9.5,
+        41.75,
+        5,
+        2.5
+      ]
     }
   ]
 }

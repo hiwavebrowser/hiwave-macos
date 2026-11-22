@@ -33416,7 +33416,10 @@ fn svg_shape_children_json(
                 // shapes too, and `getBoundingClientRect()` on a shape is post-transform, so a
                 // shape gets the same `visual_border_box` a transformed CSS box gets
                 // (SVG-SHAPE-TRANSFORM: the inspector's rotated DOM toggle, Chrome for Testing
-                // 148: its 2.5x5 path reads 5x2.5).
+                // 148: its 2.5x5 path reads 5x2.5). Only the CSS transform chain of the `<svg>`
+                // box and its ancestors is applied: a transform on the shape itself (CSS
+                // `transform` on a `<path>`, or a `transform` attribute on a shape or `<g>`) is
+                // not in this rect, where Chrome's would include it.
                 if let (Some(m), Some(object)) = (effective_transform, shape_json.as_object_mut()) {
                     let (vx, vy, vw, vh) = transformed_bounds(m, x, y, w, h);
                     object.insert(
