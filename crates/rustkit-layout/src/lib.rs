@@ -4662,6 +4662,30 @@ impl LayoutBox {
                 return (height - baseline).max(0.0) + self.dimensions.margin.bottom;
             }
         }
+        // A button with no author height (CONTROL-LINE-HANG): its label line sits on its bottom
+        // padding and border, which are inside this box's content rect (a control's content rect
+        // is its border box), so `dimensions.padding` reads 0 here; read them from the style as
+        // `form_control_intrinsic_size` does. The label line is the one that sized the button
+        // (`normal` unless the button declares a line-height) and Blink seats its baseline with
+        // whole-pixel metrics (`blink_baseline_offset`). Chrome for Testing 148: the settings
+        // page's `.btn` hangs 13.59 of its 36.19 below the baseline and a bare button 6 of 21,
+        // so a 16px block's strut stays inside them and the line is the button's height
+        // (docs/diagnostics/2026-11-21/button_line_hang_cft148.json). Hanging only the label's
+        // descent (about 3.4) put the strut's 4 under the button: 36.75 for 36.19, 21.62 for 21.
+        if matches!(self.box_type, BoxType::FormControl(FormControlType::Button { .. }))
+            && matches!(self.style.height, Length::Auto)
+        {
+            let (pad, border) = button_box_sides(&self.style, font_size);
+            let line = if self.style.line_height_declared {
+                line_height
+            } else {
+                normal_line_height(&self.style, font_size)
+            };
+            return line - blink_baseline_offset(line, ascent, descent)
+                + pad[2]
+                + border[2]
+                + self.dimensions.margin.bottom;
+        }
         let half_leading = half_leading(line_height, ascent, descent);
         // A single-line control taller than its text line (author `height`)
         // centres the line in its content box, so half the spare height
