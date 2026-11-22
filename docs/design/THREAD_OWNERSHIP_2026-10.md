@@ -530,7 +530,7 @@ Each is run in the built app on macOS, by hand and, where the driver can, by `to
    - Without it, pure script, such as the 8 s host-free stretch PR #616 measured on ebay's module graph, cannot be stopped short of abandoning the thread.
    - *Recommended:* yes. Vendor it under `third_party/boa_engine` with the roughly 30-line patch and a test. Offer it upstream as an interrupt hook. Drop the stale `boa_gc`/`boa_parser` patches in the same PR.
 2. **Script budget after load (`LIVE_TURN_BUDGET`)?**
-   - *Recommended:* 5 s per live turn or handler, interrupted. The load budget stays at 15 s. Once M4 lands, show a "this page is busy — Stop" bar on the window thread after 2 s of one turn, without killing the script. The user's Stop is always immediate.
+   - *Recommended:* 5 s per live turn or handler, interrupted. The load budget stays at 15 s. *(2026-11-21, Pete: a running live script is now stopped at 30 s; the 5 s stays as the turn's allowance, which paces frames. `EngineConfig::live_script_stop_ms`.)* Once M4 lands, show a "this page is busy — Stop" bar on the window thread after 2 s of one turn, without killing the script. The user's Stop is always immediate.
 3. **How many tabs keep a live page thread (M5/M6)?**
    - *Recommended:* the active tab plus the 7 most recently used. Discard the rest to (URL, scroll, last frame) and reload on activation. Fold this into Tab Decay instead of a separate setting.
 4. **Is a process per tab in scope?**

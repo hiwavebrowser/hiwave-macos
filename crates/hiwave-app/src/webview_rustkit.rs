@@ -224,13 +224,20 @@ const LIVE_SCRIPT_BUDGET_MS: u64 = 15_000;
 /// 5 s is the figure the thread-ownership design recommends (its open
 /// question 2); it is Pete's to set. It bounds the freeze and does not
 /// remove it: the script still runs on the window's thread.
+///
+/// Since 2026-11-21 it is the turn's **allowance** only (how much script a
+/// turn runs before it yields to rendering: frame pacing, unchanged). A
+/// script still running is stopped at [`rustkit_engine::LIVE_SCRIPT_STOP_MS`]
+/// (30 s, Pete's decision of that day; a Chrome-style "page unresponsive"
+/// prompt is a later row), not here.
 const LIVE_TURN_BUDGET_MS: u64 = 5_000;
 
 /// The stress harness's variable for a longer budget (tools/stress/run.py,
 /// which starts the app with it for a suite run and records it in the run's
 /// `engine_flags`). Chrome has no such stop, and a benchmark's long
-/// end-of-test computation dies at 5 s; a run that wants to see what comes
-/// after it raises the budget, and its score says so.
+/// end-of-test computation used to die at 5 s (now the 30 s stop); a run
+/// that wants to see what comes after it raises the budget, which raises the
+/// stop with it, and its score says so.
 ///
 /// It is honoured only together with the console log switch
 /// ([`STRESS_MARKER_ENV`], which the harness always starts the app with and
@@ -285,6 +292,9 @@ fn content_engine_builder() -> EngineBuilder {
         // minutes (Pete had to kill the app, 2026-10-08).
         .interrupt_scripts_at_budget(true)
         .live_turn_budget_ms(turn_budget)
+        // A running script is stopped at 30 s, apart from the allowance
+        // above (never below it: a raised stress budget raises the stop).
+        .live_script_stop_ms(rustkit_engine::LIVE_SCRIPT_STOP_MS)
         // The event loop loads what a page's script asks for
         // (`take_script_navigation`), so a page that has asked to leave is
         // not kept waiting for images its scripts added.
@@ -3086,7 +3096,8 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
         let (view, _took, _log) = load_spin(SPIN_PAGE);
         let mark = log_mark();
         let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
-        let said = wake_while(&view, Duration::from_secs(20), |v| {
+        // The live stop is 30 s (Pete, 2026-11-21).
+        let said = wake_while(&view, Duration::from_secs(45), |v| {
             let log = view_log(v, mark);
             log.contains("Script stopped at the loop-iteration limit") || log.contains("Script stopped at the script budget")
         });
@@ -3096,7 +3107,7 @@ row.forEach(function () { row.forEach(function () { spun++; }); });</script>\
     /// i0a_spin.html on the content thread, without the driver's Cmd+T (the
     /// new tab is loaded into the same content view, so the page it was
     /// measuring is gone). The page ticks; a timer then starts a spin the
-    /// live turn budget (5 s) stops, and a timer due in the same turn asks
+    /// live stop (30 s) stops, and a timer due in the same turn asks
     /// for `/asked`.
     const RECOVERY_PAGE: &str = "<body style='margin:0;background:#fff'><p id=p>alive</p>\
 <div style='width:200px;height:100px;background:#00ff00'></div>\
@@ -3112,7 +3123,7 @@ window.go = function () {\
 </script></body>";
 
     /// Loads [`RECOVERY_PAGE`], starts the spin and wakes the view until the
-    /// live turn budget has stopped it. Returns the view, the log mark at the
+    /// live stop has stopped it. Returns the view, the log mark at the
     /// stop and the green frame it showed before.
     fn spin_and_stop() -> (RustKitView, Arc<std::sync::Mutex<Vec<(String, Instant)>>>, usize) {
         let _ = captured_log();
@@ -3124,7 +3135,8 @@ window.go = function () {\
         assert!(ticking.is_some(), "the loaded page never ticked");
         assert!(green_frame(&view), "the page's frame is not green before the spin");
         let _ = read(&view, "window.go(); 'armed'");
-        let stopped = wake_while(&view, Duration::from_secs(20), |v| {
+        // The live stop is 30 s (Pete, 2026-11-21).
+        let stopped = wake_while(&view, Duration::from_secs(45), |v| {
             budget_stops(&view_log(v, mark)).iter().any(|(source, _)| source == "timers")
         });
         assert!(stopped.is_some(), "the spin was never stopped:\n{}", view_log(&view, mark));

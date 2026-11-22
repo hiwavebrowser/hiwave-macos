@@ -27,7 +27,7 @@
 //! (the page's thread died, the view was torn down mid-dispatch) is given
 //! up after [`STARTED_CHORD_GIVE_UP`] and goes to the menu, so it neither
 //! stays held nor leaks its `NSEvent`; a listener that just runs long is
-//! stopped first by the app's 5 s live turn budget, whose end lets the
+//! stopped first by the app's 30 s live stop, whose end lets the
 //! page answer. And later chords keep their order: one whose wait runs out
 //! while an earlier chord's keydown is still running in the page (it
 //! cannot have been reached) waits for that chord's answer and then goes
@@ -54,12 +54,12 @@ pub const CHORD_ANSWER_TIMEOUT: Duration = Duration::from_millis(100);
 /// waits for the page's answer before the view gives up on it
 /// ([`HeldChords::give_up`]) and sends it to the menu. The answer normally
 /// comes as soon as the listeners return, and the app stops an input
-/// event's listeners at its live turn budget (5 s, `LIVE_TURN_BUDGET_MS` in
-/// hiwave-app), so this is set past that: it is for a page that never
+/// event's listeners at its live stop (30 s, `rustkit_engine::LIVE_SCRIPT_STOP_MS`,
+/// Pete 2026-11-21; 5 s before), so this is set past that: it is for a page that never
 /// answers at all (its thread died, its view was torn down mid-dispatch),
 /// whose chord would otherwise stay held and its `NSEvent` retained for
 /// good (#1023 R1 item 1).
-pub const STARTED_CHORD_GIVE_UP: Duration = Duration::from_secs(6);
+pub const STARTED_CHORD_GIVE_UP: Duration = Duration::from_secs(31);
 
 /// What became of a held chord.
 #[derive(Debug, PartialEq, Eq)]

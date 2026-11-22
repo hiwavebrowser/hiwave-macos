@@ -142,7 +142,7 @@ I0A_LOG = """\
 INFO hiwave: Window thread stall log on
 INFO rustkit_engine: Root box built total_children=1
 INFO hiwave: New tab - navigating to start page
-WARN rustkit_engine: Script stopped at the script budget source=timers elapsed_ms=5000 late_ms=0
+WARN rustkit_engine: Script stopped at the script budget source=timers elapsed_ms=30000 late_ms=0
 """
 
 
@@ -166,7 +166,7 @@ def test_i0a_script_reads_the_content_thread_s_stop(tmp_path, monkeypatch):
 
     monkeypatch.setattr(LogApp, "wait_log", wait_log)
     d.i0a_script()
-    assert status(d, "i0a_script", "the hold ended within 10 s of the script's start")[0] == "PASS"
+    assert status(d, "i0a_script", "the hold ended within 35 s of the script's start")[0] == "PASS"
     assert status(d, "i0a_script", "the page ticks again afterwards")[0] == "PASS"
 
 

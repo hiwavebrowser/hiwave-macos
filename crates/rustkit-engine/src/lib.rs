@@ -2902,9 +2902,17 @@ fn armed_microtask_job_cap(config: &EngineConfig) -> u64 {
     }
 }
 
-/// Starts the live turn budget (`EngineConfig::live_turn_budget_ms`) for the
-/// script about to run on `bindings`, and returns when it started. `None`
-/// when scripts are not interrupted (the board).
+/// Where a live script is stopped: `EngineConfig::live_script_stop_ms`, never
+/// below the turn's allowance, or the allowance when it is not set.
+fn live_stop_ms(config: &EngineConfig) -> u64 {
+    config
+        .live_script_stop_ms
+        .map_or(config.live_turn_budget_ms, |stop| stop.max(config.live_turn_budget_ms))
+}
+
+/// Starts the live stop ([`live_stop_ms`]) for the script about to run on
+/// `bindings` (an input event's listeners), and returns when it started.
+/// `None` when scripts are not interrupted (the board).
 ///
 /// The budget is kept twice: by the deadline, which refuses host calls
 /// past it, and by the watchdog thread, which sets the view's interrupt
@@ -2914,7 +2922,7 @@ fn arm_live_turn(config: &EngineConfig, bindings: &DomBindings) -> Option<std::t
         return None;
     }
     let now = std::time::Instant::now();
-    let budget = std::time::Duration::from_millis(config.live_turn_budget_ms);
+    let budget = std::time::Duration::from_millis(live_stop_ms(config));
     bindings.set_execution_deadline(Some(now + budget));
     begin_script_turn(bindings, budget);
     Some(now)
@@ -2960,7 +2968,7 @@ fn record_stopped_script(
     // limit as well. The note is its own execution: the budget it reports
     // is the one the stopped script ran past.
     let limit_ms = if source.starts_with("event:") || source == "timers" || source == "network" {
-        config.live_turn_budget_ms
+        live_stop_ms(config)
     } else {
         config.script_budget_ms
     };
@@ -2984,6 +2992,10 @@ fn record_stopped_script(
 /// a callback, a microtask drain) and disarmed before the next await.
 struct ScriptJs {
     limit_us: std::cell::Cell<u64>,
+    /// Where one execution is stopped, from its own start, when it is not
+    /// the allowance left (`EngineConfig::live_script_stop_ms`); 0: the
+    /// allowance left, as a load's budget is.
+    stop_us: std::cell::Cell<u64>,
     spent_us: std::cell::Cell<u64>,
     interrupt: std::cell::Cell<bool>,
     /// Non-zero while an execution is on the stack. A nested one joins it.
@@ -3000,6 +3012,7 @@ struct ScriptJs {
 thread_local! {
     static SCRIPT_JS: ScriptJs = const { ScriptJs {
         limit_us: std::cell::Cell::new(0),
+        stop_us: std::cell::Cell::new(0),
         spent_us: std::cell::Cell::new(0),
         interrupt: std::cell::Cell::new(false),
         depth: std::cell::Cell::new(0),
@@ -3011,13 +3024,18 @@ thread_local! {
 }
 
 /// Charges JavaScript against `limit` until dropped. One load or one live
-/// turn installs one; executions inside it share what is left.
+/// turn installs one; executions inside it share what is left. `stop`, when
+/// given, is where each execution is stopped instead of at what is left of
+/// `limit` (a live turn with `EngineConfig::live_script_stop_ms`): `limit`
+/// then only decides whether another execution starts.
 struct ScriptJsInstall;
 
-fn install_script_js(limit: std::time::Duration, interrupt: bool) -> ScriptJsInstall {
+fn install_script_js(limit: std::time::Duration, stop: Option<std::time::Duration>, interrupt: bool) -> ScriptJsInstall {
     SCRIPT_JS.with(|js| {
         js.limit_us
             .set(limit.as_micros().min(u64::MAX as u128) as u64);
+        js.stop_us
+            .set(stop.map_or(0, |stop| stop.as_micros().clamp(1, u64::MAX as u128) as u64));
         js.spent_us.set(0);
         js.interrupt.set(interrupt);
         js.depth.set(0);
@@ -3031,7 +3049,10 @@ fn install_script_js(limit: std::time::Duration, interrupt: bool) -> ScriptJsIns
 
 impl Drop for ScriptJsInstall {
     fn drop(&mut self) {
-        SCRIPT_JS.with(|js| js.limit_us.set(0));
+        SCRIPT_JS.with(|js| {
+            js.limit_us.set(0);
+            js.stop_us.set(0);
+        });
     }
 }
 
@@ -3089,6 +3110,13 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
         rustkit_js::control::STOP_GRACE
     } else {
         allowance
+    };
+    // With a stop of its own (a live turn, Pete 2026-11-21) the execution
+    // runs to that, whatever is left of the allowance: the allowance only
+    // decides whether the next one starts (`script_js_exhausted`).
+    let allowance = match SCRIPT_JS.with(|js| js.stop_us.get()) {
+        0 => allowance,
+        stop => std::time::Duration::from_micros(stop),
     };
     if interrupt {
         bindings.set_execution_deadline(Some(std::time::Instant::now() + allowance));
@@ -7408,6 +7436,7 @@ impl Engine {
         if tail_open {
             let _tail_js = install_script_js(
                 std::time::Duration::from_millis(self.config.script_budget_ms),
+                None,
                 self.config.interrupt_scripts_at_budget,
             );
             self.advance_load_tail(id).await;
@@ -7444,8 +7473,11 @@ impl Engine {
         // them do not, and a wait cannot refuse a host call. This thread
         // is the window's: until 2026-10-12 a callback that did not end
         // held it for as long as it ran.
+        // The allowance paces the turn (no callback starts once it is
+        // spent); each execution is stopped at the live stop.
         let _js = install_script_js(
             std::time::Duration::from_millis(self.config.live_turn_budget_ms),
+            self.config.live_script_stop_ms.map(|_| std::time::Duration::from_millis(live_stop_ms(&self.config))),
             self.config.interrupt_scripts_at_budget,
         );
         // Where in `threw` the error that unwound a stopped script is. The
@@ -9273,7 +9305,7 @@ impl Engine {
         // One budget of JavaScript time for the phase. Each script,
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
-        let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+        let _js = install_script_js(budget, None, self.config.interrupt_scripts_at_budget);
         // Out of the view, except while a safe point lends the engine out
         // between two scripts (LAT15): then the view holds them again, so
         // the window's input reaches the page's listeners.
@@ -11437,7 +11469,7 @@ impl Engine {
         bindings.set_max_job_iterations(microtask_job_cap(&self.config));
         bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
-        let _js = install_script_js(budget, self.config.interrupt_scripts_at_budget);
+        let _js = install_script_js(budget, None, self.config.interrupt_scripts_at_budget);
 
         // Counted as `fetch_page_scripts` counts them, so `inline#n` names
         // the same element on either path.
