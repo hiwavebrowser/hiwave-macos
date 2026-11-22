@@ -493,6 +493,10 @@ mod script_module_tests;
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
+#[cfg(test)]
+mod empty_block_box_tests;
+#[cfg(test)]
+mod aspect_ratio_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -507,6 +511,8 @@ mod ua_em_margin_tests;
 mod ua_heading_font_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod ua_control_margin_tests;
+#[cfg(all(test, feature = "headless"))]
+mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod emoji_presentation_fallback_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -14971,6 +14977,16 @@ impl Engine {
     /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
     fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
         match child.box_type {
+            // An element's block keeps its box even when empty, as in Chrome: it breaks
+            // the line between inline content (`aaa<div></div>bbb` is two lines) and has
+            // a rect scripts and the geometry oracle read. Its margins still collapse
+            // through it. The boxes left to drop are anonymous ones and the stand-ins
+            // that carry no element: `display: none`, and head/script/style content.
+            BoxType::Block
+                if child.node_id.is_some() && child.style.display != rustkit_css::Display::None =>
+            {
+                true
+            }
             BoxType::Block | BoxType::AnonymousBlock => {
                 !child.children.is_empty()
                     || Engine::has_visible_styling(&child.style)
@@ -33396,6 +33412,7 @@ fn layout_box_to_json(layout_box: &LayoutBox) -> serde_json::Value {
 fn svg_shape_children_json(
     layout_box: &LayoutBox,
     shapes: &HashMap<String, InlineSvgShapes>,
+    effective_transform: Option<[f32; 6]>,
 ) -> Option<Vec<serde_json::Value>> {
     let identity = layout_box.identity()?;
     if identity.tag != "svg" {
@@ -33441,13 +33458,10 @@ fn svg_shape_children_json(
             .shapes
             .iter()
             .map(|shape| {
-                let rect = serde_json::json!({
-                    "x": origin_x + shape.x * scale_x,
-                    "y": origin_y + shape.y * scale_y,
-                    "width": shape.width * scale_x,
-                    "height": shape.height * scale_y,
-                });
-                serde_json::json!({
+                let (x, y, w, h) =
+                    (origin_x + shape.x * scale_x, origin_y + shape.y * scale_y, shape.width * scale_x, shape.height * scale_y);
+                let rect = serde_json::json!({ "x": x, "y": y, "width": w, "height": h });
+                let mut shape_json = serde_json::json!({
                     // NOT a CSS box, and named so no reader treats it as one.
                     "type": "svg_shape",
                     "tag": shape.tag,
@@ -33457,7 +33471,23 @@ fn svg_shape_children_json(
                     // falls back to `rect`, and the two must not disagree.
                     "rect": rect,
                     "border_box": rect,
-                })
+                });
+                // The `<svg>`'s transform (its own composed with its ancestors') applies to its
+                // shapes too, and `getBoundingClientRect()` on a shape is post-transform, so a
+                // shape gets the same `visual_border_box` a transformed CSS box gets
+                // (SVG-SHAPE-TRANSFORM: the inspector's rotated DOM toggle, Chrome for Testing
+                // 148: its 2.5x5 path reads 5x2.5). Only the CSS transform chain of the `<svg>`
+                // box and its ancestors is applied: a transform on the shape itself (CSS
+                // `transform` on a `<path>`, or a `transform` attribute on a shape or `<g>`) is
+                // not in this rect, where Chrome's would include it.
+                if let (Some(m), Some(object)) = (effective_transform, shape_json.as_object_mut()) {
+                    let (vx, vy, vw, vh) = transformed_bounds(m, x, y, w, h);
+                    object.insert(
+                        "visual_border_box".into(),
+                        serde_json::json!({ "x": vx, "y": vy, "width": vw, "height": vh }),
+                    );
+                }
+                shape_json
             })
             .collect(),
     )
@@ -33494,7 +33524,7 @@ fn layout_box_to_json_under(
     // because that is what they are — a join key plus the geometry the paint
     // lane will use. See `SvgShapeBox`.
     if let (Some(children), Some(object)) = (
-        svg_shape_children_json(layout_box, svg_shapes),
+        svg_shape_children_json(layout_box, svg_shapes, effective),
         value.as_object_mut(),
     ) {
         if !children.is_empty() {
@@ -53401,8 +53431,9 @@ mod aspect_ratio_empty_block_tests {
 
     /// An empty block whose ratio gives it no height is still an empty
     /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
-    /// ratio, keep no box, and margins collapse through it (R1 on #673;
-    /// Chromium 141 numbers).
+    /// ratio, add no height, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers). It keeps its box since empty element blocks
+    /// stopped being dropped; what this pins is that it takes no space.
     #[test]
     fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
