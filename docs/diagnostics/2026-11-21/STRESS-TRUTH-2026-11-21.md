@@ -20,7 +20,7 @@ JetStream fails its first test.
 | MotionMark 1.3.2 | no 0/1 / no 0/3 | no score; **125.31** with the watchdog raised to 60 s (1 diagnostic run, not a score) | 8082 (8043-8129), 3 | 1.6% (raised run) |
 | JetStream 2.2 | not run / no 0/1 (traced) | no score | 433.89 (429.92-445.22), 3 | - |
 
-After this PR's fix (FRAME-MODULE-MAP), see [After the fix](#after-the-fix).
+After this PR's fix (FRAME-MODULE-MAP) and #1423's 30 s stop: **Speedometer completes, 0.52 (0.52-0.53, N=3) vs 44.99; MotionMark completes, 146.44 (111.34-225.06, N=3) vs 8082.** See [After the fix](#after-the-fix).
 
 ## How it was measured
 
@@ -176,4 +176,83 @@ gate and is bigger.
 
 ## After the fix
 
-(filled in below by the fix's re-measure)
+Re-measured 2026-11-21 23:34 to 2026-11-22 00:34, in the quiet slot after
+batch 121 (lane 1 idle). Each run started below a 1-minute load of 3
+(1.7-2.4), one at a time, offline checks clean, headless,
+`HIWAVE_NESTED_CONTEXTS=1`. Records: `~/zg-measure/stress-runs/truth-1121/after/`.
+
+| suite | build | completes? | HiWave median (min-max), N | Chrome 148 median | ratio |
+|---|---|---|---|---|---|
+| Speedometer 3.1 | this PR (module map per realm), `c9067be2` | **yes, 3/3** (774 s each) | **0.52** (0.52-0.53), 3 | 44.99 | **1.2%** |
+| MotionMark 1.3.2 | this PR + #1423 (30 s live stop), local merge `e5e93967` | **yes, 3/3**, default budget | **146.44** (111.34-225.06), 3 | 8082 | **1.8%** |
+| JetStream 2.2 | - | not re-run (nothing here moves it: blocker #4) | - | 433.89 | - |
+
+**Speedometer.** Before: 0/3 complete (iteration 2 threw, then hung). After:
+3/3 complete, no page or engine errors, spread 1.7%. That number was checked
+before it was reported: Editor-TipTap's ~15 s sits next to the app's 15 s
+load script budget, but it is 14.4, 15.5 and 15.0 s across the runs and no
+run logged a script stop (`log_findings` empty), so it is TipTap's own time.
+A completion check on a busy machine before this re-measure (load 2-7,
+`checks/speedometer_hiwave-headless_fmm-c9067be2-busycheck_20261121T210137`,
+not a measurement) hung once in iteration 7 at Perf-Dashboard after six
+clean iterations; the three quiet runs did not. That hang is unexplained and
+worth a look if it comes back.
+
+Per workload (ms per iteration, lower is better; sorted by the gap):
+
+| workload | HiWave ms (median, N=3) | Chrome ms | HiWave / Chrome |
+|---|---:|---:|---:|
+| TodoMVC-Lit-Complex-DOM | 3935 | 9.68 | 407x |
+| Editor-TipTap | 15010 | 48.26 | 311x |
+| TodoMVC-Svelte-Complex-DOM | 2018 | 6.98 | 289x |
+| TodoMVC-Preact-Complex-DOM | 1906 | 7.40 | 258x |
+| NewsSite-Nuxt | 7432 | 38.53 | 193x |
+| NewsSite-Next | 7753 | 46.76 | 166x |
+| TodoMVC-Angular-Complex-DOM | 2632 | 19.35 | 136x |
+| TodoMVC-React-Complex-DOM | 2866 | 21.94 | 131x |
+| TodoMVC-JavaScript-ES6-Webpack-Complex-DOM | 2733 | 25.84 | 106x |
+| TodoMVC-WebComponents | 949 | 9.89 | 96x |
+| Editor-CodeMirror | 1236 | 15.66 | 79x |
+| TodoMVC-React-Redux | 1505 | 22.39 | 67x |
+| Perf-Dashboard | 1392 | 28.35 | 49x |
+| TodoMVC-Vue | 659 | 13.52 | 49x |
+| React-Stockcharts-SVG | 2232 | 51.70 | 43x |
+| TodoMVC-jQuery | 2555 | 69.69 | 37x |
+| TodoMVC-Backbone | 483 | 15.69 | 31x |
+| Charts-chartjs | 834 | 29.00 | 29x |
+| TodoMVC-JavaScript-ES5 | 798 | 29.38 | 27x |
+| Charts-observable-plot | 817 | 31.66 | 26x |
+
+**MotionMark.** Before: 0/3 at the default budget (stopped at 5 s in
+Multiply's end-of-test analysis). With the 30 s stop (#1423, Pete's
+2026-11-21 decision; the turn's 5 s allowance and pacing unchanged) the
+suite completes at the default engine settings. The 78% spread is Multiply
+alone (1 / 11 / 198): every other subtest is within about 30% across the
+three runs, but Multiply sits near the floor, where MotionMark's ramp
+settles anywhere, and the suite's geometric mean amplifies it. Read the
+median with that in mind.
+
+| subtest | HiWave median (N=3) | runs | Chrome median | ratio |
+|---|---:|---|---:|---:|
+| Multiply | 11 | 1 / 11 / 197.8 | 6420 | 0.17% |
+| Canvas Arcs | 597.08 | 607.2 / 587.8 / 597.1 | 31338 | 1.91% |
+| Leaves | 584.32 | 580.8 / 584.3 / 597.1 | 5399 | 10.82% |
+| Paths | 1598 | 2121.2 / 1597.5 / 1521.7 | 78997 | 2.02% |
+| Canvas Lines | 1060 | 1059.9 / 1100.3 / 1010.4 | 70572 | 1.50% |
+| Images | 16.66 | 16.7 / 16.6 / 24.7 | 799.12 | 2.08% |
+| Design | 40.36 | 35.5 / 40.4 / 49.7 | 827.02 | 4.88% |
+| Suits | 49.32 | 50.3 / 47.6 / 49.3 | 4664 | 1.06% |
+
+**What moved, in one line each.** Speedometer: no score -> 0.52 (Chrome
+44.99, 87x behind). MotionMark: no score -> 146 (Chrome 8082, 55x behind).
+JetStream: unchanged, no score.
+
+**Next, by the ranking above.** #3 (the frames flag) is a gated batch trial
+(Pete, 11-21). #4 (synchronous about:blank and `document.open/write`) is the
+JetStream gate. Then speed: on Speedometer the largest gaps are
+TodoMVC-Lit-Complex-DOM (407x), Editor-TipTap (311x),
+TodoMVC-Svelte-Complex-DOM (289x) and TodoMVC-Preact-Complex-DOM (258x); in
+absolute time, Editor-TipTap and the two NewsSite workloads are 30 of the
+~60 s an iteration takes. On MotionMark, Multiply (floor) and Suits (1%).
+
+*This section was added after the first review head; it needs a delta R1.*
