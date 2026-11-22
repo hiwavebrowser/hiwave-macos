@@ -493,6 +493,10 @@ mod script_module_tests;
 mod css_display_tests;
 #[cfg(all(test, feature = "headless"))]
 mod computed_display_tests;
+#[cfg(test)]
+mod empty_block_box_tests;
+#[cfg(test)]
+mod aspect_ratio_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -14973,6 +14977,16 @@ impl Engine {
     /// restyle build's roots both ask this (BOXES-DIFF), so a splice keeps what a full build keeps.
     fn parent_keeps(child: &LayoutBox, parent_style: &ComputedStyle) -> bool {
         match child.box_type {
+            // An element's block keeps its box even when empty, as in Chrome: it breaks
+            // the line between inline content (`aaa<div></div>bbb` is two lines) and has
+            // a rect scripts and the geometry oracle read. Its margins still collapse
+            // through it. The boxes left to drop are anonymous ones and the stand-ins
+            // that carry no element: `display: none`, and head/script/style content.
+            BoxType::Block
+                if child.node_id.is_some() && child.style.display != rustkit_css::Display::None =>
+            {
+                true
+            }
             BoxType::Block | BoxType::AnonymousBlock => {
                 !child.children.is_empty()
                     || Engine::has_visible_styling(&child.style)
@@ -53417,8 +53431,9 @@ mod aspect_ratio_empty_block_tests {
 
     /// An empty block whose ratio gives it no height is still an empty
     /// block: `aspect-ratio: auto` over an earlier ratio, and a degenerate
-    /// ratio, keep no box, and margins collapse through it (R1 on #673;
-    /// Chromium 141 numbers).
+    /// ratio, add no height, and margins collapse through it (R1 on #673;
+    /// Chromium 141 numbers). It keeps its box since empty element blocks
+    /// stopped being dropped; what this pins is that it takes no space.
     #[test]
     fn an_empty_block_without_a_usable_ratio_is_still_dropped() {
         let e = Engine::new(EngineConfig::default()).expect("engine");
