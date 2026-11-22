@@ -497,6 +497,10 @@ mod computed_display_tests;
 mod empty_block_box_tests;
 #[cfg(test)]
 mod aspect_ratio_width_tests;
+#[cfg(test)]
+mod transformed_bounds_unit_tests;
+#[cfg(test)]
+mod root_font_absolutize_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -31892,7 +31896,7 @@ fn own_transform_affine(layout_box: &LayoutBox) -> Option<[f32; 6]> {
 
 /// Axis-aligned bounding box of a rect under an affine — what
 /// `getBoundingClientRect()` returns, which is the geometry oracle's baseline.
-fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+pub(crate) fn transformed_bounds(m: [f32; 6], x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
     let map = |px: f32, py: f32| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]);
     let corners = [map(x, y), map(x + w, y), map(x, y + h), map(x + w, y + h)];
     let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
@@ -50843,7 +50847,7 @@ fn forget_styles_for_root_font() {
 /// ROOT-REM: absolutize the root element's own `font-size` against the initial value (16px):
 /// `em`, `%` and `rem` on `<html>` all refer to it (css-values-4 §6.1.1), viewport units and
 /// math functions to the viewport when the build knows it. Returns the px.
-fn absolutize_root_font_size(style: &mut ComputedStyle, viewport: Option<(f32, f32)>) -> f32 {
+pub(crate) fn absolutize_root_font_size(style: &mut ComputedStyle, viewport: Option<(f32, f32)>) -> f32 {
     use rustkit_css::Length;
     const INITIAL: f32 = 16.0;
     let px = match &style.font_size {

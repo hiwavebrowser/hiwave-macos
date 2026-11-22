@@ -4040,6 +4040,8 @@ mod monospace_size_unit_tests;
 mod clip_parse_tests;
 #[cfg(test)]
 mod outline_parse_tests;
+#[cfg(test)]
+mod root_font_px_tests;
 pub mod content;
 pub mod scrollbar;
 pub use scrollbar::{parse_scrollbar_color, parse_scrollbar_width, ScrollbarPart, WebkitScrollbar};

@@ -92,6 +92,10 @@ mod percent_height_definite_tests;
 mod form_control_content_box_tests;
 #[cfg(test)]
 mod form_control_appearance_tests;
+#[cfg(test)]
+mod button_line_hang_unit_tests;
+#[cfg(test)]
+mod text_decoration_rem_tests;
 
 #[cfg(test)]
 mod replaced_size_unit_tests;
@@ -785,6 +789,24 @@ pub fn run_line_height(style: &ComputedStyle, font_size: f32, metrics: &TextMetr
 pub(crate) fn blink_baseline_offset(line_height: f32, ascent: f32, descent: f32) -> f32 {
     let (ascent, descent) = (ascent.round(), descent.round());
     half_leading(line_height, ascent, descent).floor() + ascent
+}
+
+/// CONTROL-LINE-HANG: how far below the line baseline an auto-height button hangs —
+/// the seated label line's bottom, plus bottom padding and border (inside the
+/// content/border box) and the author margin. Pure so Linux `--lib` can pin the
+/// pad+border composition without font metrics.
+pub(crate) fn button_baseline_hang(
+    line: f32,
+    ascent: f32,
+    descent: f32,
+    pad_bottom: f32,
+    border_bottom: f32,
+    margin_bottom: f32,
+) -> f32 {
+    line - blink_baseline_offset(line, ascent, descent)
+        + pad_bottom
+        + border_bottom
+        + margin_bottom
 }
 
 /// Half-leading of a line: half of `line-height` minus the content area
@@ -4681,10 +4703,14 @@ impl LayoutBox {
             } else {
                 normal_line_height(&self.style, font_size)
             };
-            return line - blink_baseline_offset(line, ascent, descent)
-                + pad[2]
-                + border[2]
-                + self.dimensions.margin.bottom;
+            return button_baseline_hang(
+                line,
+                ascent,
+                descent,
+                pad[2],
+                border[2],
+                self.dimensions.margin.bottom,
+            );
         }
         let half_leading = half_leading(line_height, ascent, descent);
         // A single-line control taller than its text line (author `height`)
