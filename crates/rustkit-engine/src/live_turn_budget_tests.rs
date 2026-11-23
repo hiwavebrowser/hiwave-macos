@@ -357,3 +357,90 @@ setTimeout(function () {{
         engine.script_log(view)
     );
 }
+
+// ── The stop apart from the allowance (Pete, 2026-11-21) ────────────────────
+//
+// Pete's decision is about when a script is stopped (30 s), not how much
+// script one turn runs before it yields to rendering: the turn's allowance
+// (`live_turn_budget_ms`) keeps pacing frames as before, and the stop
+// (`live_script_stop_ms`) is its own number. Scaled down here: allowance
+// 200 ms, stop 1500 ms.
+
+fn split_config() -> EngineConfig {
+    EngineConfig {
+        interrupt_scripts_at_budget: true,
+        live_turn_budget_ms: 200,
+        live_script_stop_ms: Some(1_500),
+        ..EngineConfig::default()
+    }
+}
+
+/// Spins `ms` of wall clock, then says it finished.
+fn busy(ms: u64) -> String {
+    format!("window.began = true; var t = Date.now(); while (Date.now() - t < {ms}) {{}} window.finished = true;")
+}
+
+/// A callback that runs past the turn's allowance but not to the stop runs
+/// to its end and is not stopped; the timer due beside it still waits for
+/// the next turn (the allowance is spent), so pacing is unchanged.
+#[test]
+fn a_callback_past_the_allowance_runs_on_to_the_stop_and_the_next_waits_a_turn() {
+    let page = format!(
+        "<html><body><p id=p>alive</p><script>
+window.second = 0;
+setTimeout(function () {{ {} }}, 60000);
+setTimeout(function () {{ window.second = window.finished ? 1 : -1; }}, 60000);
+</script></body></html>",
+        busy(500)
+    );
+    let (mut engine, view) = load(split_config(), page);
+    let rt = runtime();
+    rt.block_on(engine.pump_live(view, 60_000));
+    assert!(over_budget(&engine, view).is_empty(), "stopped before the stop: {:#?}", engine.script_log(view));
+    assert_eq!(engine.execute_script(view, "window.finished === true").unwrap(), "Boolean(true)");
+    assert_eq!(
+        engine.execute_script(view, "window.second").unwrap(),
+        "Number(0.0)",
+        "the second callback ran in the turn whose allowance the first had spent"
+    );
+    rt.block_on(engine.pump_live(view, 10));
+    assert_eq!(engine.execute_script(view, "window.second").unwrap(), "Number(1.0)");
+}
+
+/// A callback that does not end is still stopped, at the stop and not at the
+/// allowance.
+#[test]
+fn a_callback_that_does_not_end_is_stopped_at_the_stop_not_the_allowance() {
+    let (mut engine, view) = load(split_config(), timer_page());
+    let started = std::time::Instant::now();
+    runtime().block_on(engine.pump_live(view, 60_000));
+    let took = started.elapsed();
+    assert_eq!(over_budget(&engine, view), ["timers"], "{:#?}", engine.script_log(view));
+    assert!(took >= std::time::Duration::from_millis(1_400), "stopped at the allowance, not the stop: {took:?}");
+    assert!(took < std::time::Duration::from_millis(4_000), "ran on past the stop: {took:?}");
+}
+
+/// An input event's listeners get the stop as well.
+#[test]
+fn a_click_listener_past_the_allowance_runs_on_to_the_stop() {
+    let page = format!(
+        "<html><body style=\"margin:0\"><p id=p style=\"margin:0;height:100px\">alive</p><script>
+document.getElementById('p').addEventListener('click', function () {{ {} }});
+</script></body></html>",
+        busy(500)
+    );
+    let (mut engine, view) = load(split_config(), page);
+    engine.click_at_point(view, 20.0, 20.0);
+    assert!(over_budget(&engine, view).is_empty(), "{:#?}", engine.script_log(view));
+    assert_eq!(engine.execute_script(view, "window.finished === true").unwrap(), "Boolean(true)");
+}
+
+/// The engine's default is unchanged: no separate stop, so the stop is the
+/// allowance (parity-capture without `--interrupt-scripts`, the board, and
+/// every test that sets only `live_turn_budget_ms`).
+#[test]
+fn by_default_the_stop_is_the_allowance() {
+    let config = EngineConfig::default();
+    assert_eq!(config.live_turn_budget_ms, 5_000);
+    assert_eq!(config.live_script_stop_ms, None);
+}

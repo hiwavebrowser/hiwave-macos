@@ -1165,7 +1165,7 @@ class Driver:
         return len(self.app.log_text()) if log_from is not None else None
 
     def i0a_script(self):
-        """I0(a): a script that does not end leaves the window usable, is stopped at the turn budget (5 s), and the page carries on."""
+        """I0(a): a script that does not end leaves the window usable, is stopped at the live stop (30 s), and the page carries on."""
         c = "i0a_script"
         log_from = self.start_spin(c)
         if self.app is None or not self.app.alive():
@@ -1180,11 +1180,12 @@ class Driver:
         self.expect_no_hold(c, "5 s of the script running", log_from)
         # The page's script runs on the content thread, so the window thread
         # is never held and its stall log has no hold to end: the hold that
-        # ends is the page thread's, at the live turn budget (5 s), and the
+        # ends is the page thread's, at the live stop (30 s since Pete's
+        # 2026-11-21 decision; the turn's 5 s allowance only paces), and the
         # engine says so.
-        stopped = self.app.wait_log(self.STOP_LINE, 5, spin_from)
+        stopped = self.app.wait_log(self.STOP_LINE, 30, spin_from)
         ended = stopped if stopped and stopped.group(1) == "timers" else None
-        self.expect(c, "the hold ended within 10 s of the script's start", bool(ended),
+        self.expect(c, "the hold ended within 35 s of the script's start", bool(ended),
                     ended.group(0) if ended else "no 'Script stopped at the script budget source=timers' line")
         mark = self.fixture.mark()
         self.expect(c, "the page ticks again afterwards",
