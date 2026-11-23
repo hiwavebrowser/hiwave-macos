@@ -267,6 +267,11 @@ class ReplayHandler(BaseHTTPRequestHandler):
                     break
                 remaining -= len(chunk)
         target = self._target_url()
+        if urlparse(target).path.endswith("/generate_204"):
+            # A connectivity probe: its random query never matches the HAR.
+            self.server.log_miss(f"SHIM204 {self.command.upper()} {normalize_url(target)}")
+            self._send(204, "No Content", [], b"", send_body, 0)
+            return
         entry, notes = self.server.archive.take(self.command, target)
         for line in notes:
             self.server.log_miss(line)
@@ -302,7 +307,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
             value = str(header.get("value") or "")
             if not name or name.lower() in HOP_BY_HOP:
                 continue
-            if name.lower() == "content-encoding" and encoding != "base64":
+            if name.lower() == "content-encoding":  # HAR bodies are stored decoded, base64 ones too
                 continue
             if name.lower() == "content-type":
                 saw_type = True
