@@ -7016,11 +7016,15 @@ impl Engine {
             }) else {
                 continue;
             };
+            // A frame's own frames are browsing contexts too (with nested
+            // contexts on, as the top page's are): a frame made inside a
+            // frame gets a window, as in Chrome (JetStream's `magicframe`).
             let bound = child
                 .set_document(document.clone())
                 .and_then(|_| child.set_location(&target))
                 .and_then(|_| child.set_dimensions(width, height))
-                .and_then(|_| child.enable_net_bridge());
+                .and_then(|_| child.enable_net_bridge())
+                .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) });
             let attached = bound.is_ok()
                 && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
             if !attached {
