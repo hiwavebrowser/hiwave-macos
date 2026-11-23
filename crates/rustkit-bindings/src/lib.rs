@@ -539,8 +539,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
-    "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
+    "imageFailed", "imageFailedFor", "joinTimers", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
+    "implicitSubmit", "inertDocumentMethods", "inertFrameDocument", "inlineStyleParses", "installFrameWrite", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "pendingFrameRound", "perfNow", "pickOption", "realTop", "registerProperty", "resizeHeld", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
@@ -1938,6 +1938,9 @@ pub struct DomBindings {
     /// frame inside the insertion and the engine then adopts. Built by the
     /// engine at a drain ([`Self::offer_spare`]); one at a time.
     spare: RefCell<Option<Box<DomBindings>>>,
+    /// An about:blank document's creator's origin ([`Self::inherit_origin_from`]);
+    /// cleared when a location is set.
+    inherited_origin: RefCell<Option<String>>,
     /// The `sandbox` attribute of each iframe of the document as it was
     /// bound (the parser's), until that frame is first asked for: a markup
     /// frame is asked for at the engine's scan, after the page's first
@@ -2180,6 +2183,26 @@ impl DomBindings {
         Ok(matches!(fired, JsValue::Boolean(true)))
     }
 
+    /// An about:blank document's origin is its creator's (HTML: "about:blank
+    /// inherits the origin of its creator"): blob URLs the parent made are
+    /// reachable from the frame, as in Chrome. Called for an unsandboxed
+    /// about:blank child, after its location (which set an opaque origin).
+    pub fn inherit_origin_from(&self, parent: &DomBindings) {
+        let origin = parent.origin();
+        self.runtime.borrow_mut().set_realm_origin(self.runtime.realm, &origin);
+        *self.inherited_origin.borrow_mut() = Some(origin);
+        self.canvases.borrow_mut().origin = parent.canvases.borrow().origin.clone();
+    }
+
+    /// The document's origin as the engine knows it: its URL's, or for an
+    /// about:blank document, the one it inherited ([`Self::inherit_origin_from`]).
+    pub fn origin(&self) -> String {
+        if let Some(o) = self.inherited_origin.borrow().as_ref() {
+            return o.clone();
+        }
+        self.window.borrow().location.origin.clone()
+    }
+
     /// The document these bindings are bound to.
     pub fn document(&self) -> Option<Rc<Document>> {
         self.window.borrow().document.clone()
@@ -2348,6 +2371,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
+        // `document.write` in a frame runs its scripts through this, in this
+        // realm (JETSTREAM-IFRAME-SYNC); web_document.js takes it off the
+        // window.
+        runtime.register_script_runner("__rustkit_run_written")?;
         runtime.evaluate_with_host(include_str!("web_document.js"))?;
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
@@ -2422,6 +2449,7 @@ impl DomBindings {
             clock_origin,
             frame_requests: Rc::new(RefCell::new(Vec::new())),
             spare: RefCell::new(None),
+            inherited_origin: RefCell::new(None),
             frame_sandbox_parsed: Rc::new(RefCell::new(None)),
             window: RefCell::new(WindowState::default()),
             dom_host,
@@ -3436,6 +3464,7 @@ impl DomBindings {
 
         // Update state
         self.window.borrow_mut().location = location.clone();
+        *self.inherited_origin.borrow_mut() = None;
         self.canvases.borrow_mut().origin = Some(url.origin());
         // The file an `error` event names for code with no script of its own.
         self.runtime.borrow_mut().set_document_url(url.as_str());

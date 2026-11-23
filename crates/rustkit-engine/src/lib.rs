@@ -7103,6 +7103,11 @@ impl Engine {
                 .and_then(|_| child.set_dimensions(width, height))
                 .and_then(|_| child.enable_net_bridge())
                 .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) });
+            if bound.is_ok() && blank {
+                if let Some(parent) = parent_of(self, id) {
+                    child.inherit_origin_from(parent);
+                }
+            }
             let attached = bound.is_ok()
                 && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
             if !attached {
@@ -7337,6 +7342,7 @@ impl Engine {
             parent.drop_child(child);
             return;
         }
+        child.inherit_origin_from(parent);
         if let Err(e) = parent.offer_spare(child) {
             debug!(error = %e, "frames: the spare child was not taken");
         }

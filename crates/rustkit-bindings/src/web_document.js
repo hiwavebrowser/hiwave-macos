@@ -326,6 +326,10 @@
     }
     __rk.inertFrameDocument = function (frame) {
         if (!inert || !frame || !frame.isConnected) return null;
+        // A sandbox without allow-same-origin makes even the initial
+        // about:blank an opaque origin: Chrome answers null.
+        var sb = frame.getAttribute('sandbox');
+        if (sb !== null && !/(^|\s)allow-same-origin(\s|$)/i.test(sb)) return null;
         var d = inert.get(frame);
         if (!d) {
             d = new g.DOMParser().parseFromString(BLANK, 'text/html');
@@ -375,6 +379,121 @@
         s.open = false;
         this.readyState = 'complete';
     }
+    // ---- A frame's own document: open / write / close that run the written
+    // scripts (JETSTREAM-IFRAME-SYNC phase 3). Installed when this realm
+    // becomes a frame's window (`__rk.becomeFrame`), so a page's own document
+    // gains nothing. Chrome 148 (docs/diagnostics/2026-11-23/
+    // chrome148_iframe_write.json): open() empties the document; write()
+    // parses as it goes and runs each inline script when the parser reaches
+    // it, synchronously, in this realm; close() finishes, `complete`.
+    //
+    // The parser here is a splitter: the markup between scripts goes in
+    // through insertAdjacentHTML (no script in it, so nothing is queued to
+    // run later), each script element in as it is reached, its source run at
+    // once as a classic script of this realm (`__rustkit_run_written`; no
+    // microtask checkpoint between them), a `blob:` src read from the blob
+    // store first (parser-blocking: it runs before the markup after it). Any
+    // other src is not fetched (a stated limit). A written script's exception
+    // goes to this window's `error` handling, then the next script runs.
+    var runWritten = g.__rustkit_run_written;
+    try { delete g.__rustkit_run_written; } catch (_) {}
+    var realmIndex = typeof __realm === 'number' ? __realm : 0;
+    var HEAD_TAGS = /^(title|meta|link|style|base|script|noscript|template)$/i;
+    function skeleton(d) {
+        if (d.documentElement) return;
+        var html = d.createElement('html');
+        html.appendChild(d.createElement('head'));
+        html.appendChild(d.createElement('body'));
+        d.appendChild(html);
+    }
+    function headOf(d) { return d.head || d.documentElement.firstChild; }
+    function bodyOf(d) { return d.body || d.documentElement.lastChild; }
+    // Markup with no script in it, into the head or the body.
+    function insertMarkup(d, st, html) {
+        if (!html) return;
+        if (/<body[\s>]/i.test(html) || /<\/head\s*>/i.test(html)) st.inBody = true;
+        html = html.replace(/<!doctype[^>]*>/ig, '')
+            .replace(/<\/?(html|head|body)(\s[^>]*)?>/ig, '');
+        if (!/\S/.test(html)) return;
+        skeleton(d);
+        if (!st.inBody) {
+            var first = /<\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(html);
+            if (first && !HEAD_TAGS.test(first[1])) st.inBody = true;
+            else if (!first && /\S/.test(html.replace(/<[^>]*>/g, ''))) st.inBody = true;
+        }
+        var target = st.inBody ? bodyOf(d) : headOf(d);
+        target.insertAdjacentHTML('beforeend', html);
+    }
+    function attrOf(attrs, name) {
+        var m = new RegExp('\\b' + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i').exec(attrs);
+        return m ? (m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4]) : null;
+    }
+    function runScript(d, st, attrs, text) {
+        skeleton(d);
+        var el = d.createElement('script');
+        // Put in as a script the engine will not queue to run again, then
+        // given back its own type: written scripts run here, once.
+        el.setAttribute('type', 'text/x-rustkit-written');
+        el.text = text;
+        (st.inBody ? bodyOf(d) : headOf(d)).appendChild(el);
+        var type = attrOf(attrs, 'type');
+        if (type === null) el.removeAttribute('type'); else el.setAttribute('type', type);
+        var src = attrOf(attrs, 'src');
+        if (src !== null) el.setAttribute('src', src);
+        var source = text;
+        if (src !== null) {
+            var url = String(src).split('#')[0];
+            var found = /^blob:/i.test(url) && __rk.blobGet ? __rk.blobGet(realmIndex, url) : null;
+            if (!found) { if (__rk.unsupported) __rk.unsupported('document.write', 'a written script src other than blob:'); return; }
+            try { source = new g.TextDecoder().decode(new Uint8Array(found[0])); } catch (e) { return; }
+        }
+        if (type !== null && !/^(text|application)\/(java|ecma)script$|^module$/i.test(type) && type !== '') return;
+        try { runWritten(source); } catch (e) { try { __rk.reportError(e); } catch (_) {} }
+    }
+    // Parse what has been written so far; `final` (close): everything.
+    function pump(d, st, final) {
+        var re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/i, m;
+        while ((m = re.exec(st.buffer))) {
+            insertMarkup(d, st, st.buffer.slice(0, m.index));
+            st.buffer = st.buffer.slice(m.index + m[0].length);
+            runScript(d, st, m[1], m[2]);
+        }
+        if (final) { insertMarkup(d, st, st.buffer); st.buffer = ''; return; }
+        // A script not yet closed, or a tag cut off at the end, waits for the
+        // next write.
+        var open = st.buffer.search(/<script\b/i), cut = st.buffer.lastIndexOf('<');
+        var keepFrom = open >= 0 ? open : (cut > st.buffer.lastIndexOf('>') ? cut : st.buffer.length);
+        insertMarkup(d, st, st.buffer.slice(0, keepFrom));
+        st.buffer = st.buffer.slice(keepFrom);
+    }
+    var writeInstalled = null;
+    __rk.installFrameWrite = function () {
+        var d = g.document;
+        if (!d || !runWritten || writeInstalled === d) return;
+        writeInstalled = d;
+        var st = { buffer: '', open: false, inBody: false };
+        method(d, 'open', function open() {
+            while (d.firstChild) d.removeChild(d.firstChild);
+            st.buffer = ''; st.open = true; st.inBody = false;
+            d.readyState = 'loading';
+            return d;
+        });
+        method(d, 'write', function write() {
+            if (!st.open) d.open();
+            for (var i = 0; i < arguments.length; i++) st.buffer += String(arguments[i]);
+            pump(d, st, false);
+        });
+        method(d, 'writeln', function writeln() {
+            var a = Array.prototype.slice.call(arguments); a.push('\n');
+            return d.write.apply(d, a);
+        });
+        method(d, 'close', function close() {
+            if (!st.open) return;
+            pump(d, st, true);
+            st.open = false;
+            d.readyState = 'complete';
+        });
+    };
     __rk.inertDocumentMethods = function (d) {
         method(d, 'open', openInert); method(d, 'write', writeInert);
         method(d, 'writeln', writelnInert); method(d, 'close', closeInert);
