@@ -78,7 +78,9 @@ fn an_auto_width_follows_a_definite_height_across_the_ratio() {
 /// A percentage height against an indefinite containing block is not
 /// definite: the width fills the parent and the height follows it (Chrome:
 /// 600x600). The percentage computes to `auto`, so the ratio gives the
-/// height, as it does for `height: auto` (RustKit had 20, the line).
+/// height, as it does for `height: auto` (RustKit had 20, the line). Despite
+/// the name, this pins both sides: the width fills AND the height follows
+/// the ratio.
 #[test]
 fn a_percentage_height_of_an_auto_height_parent_does_not_drive_the_width() {
     let got = sizes(
@@ -124,6 +126,33 @@ fn a_percentage_height_in_a_stretched_grid_item_drives_the_width() {
         &["gi", "g1"],
     );
     let want = [("gi", 600.0, 200.0), ("g1", 200.0, 100.0)];
+    let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
+    assert_eq!(got, want);
+}
+
+/// A `calc()` with no percentage term is a length: it drives the width even
+/// under an auto-height parent (Chrome: `height: calc(2em + 4px);
+/// aspect-ratio: 2` at 16px is 72x36 in the 600px parent).
+#[test]
+fn a_calc_height_without_a_percentage_drives_the_width_like_a_length() {
+    let got = sizes(r#"<div><div id="c" style="height:calc(2em + 4px);aspect-ratio:2">x</div></div>"#, &["c"]);
+    assert_eq!(got, vec![("c".to_string(), 72.0, 36.0)]);
+}
+
+/// LIMIT (Prometheus's nit 2 on #1430, measured rather than pinned as "fills"):
+/// `min()` / `clamp()` over a percentage in a 200px parent are 200x100 in
+/// Chrome (the percentage resolves to 100 and drives the width). RustKit
+/// resolves the height itself wrongly here (300, the clamp's maximum) and
+/// fills the width: a math-function height follow-up, outside this PR.
+#[test]
+#[ignore = "min()/clamp() heights over a percentage resolve wrongly (height-side math-function follow-up)"]
+fn a_math_function_height_over_a_percentage_of_a_definite_parent() {
+    let got = sizes(
+        r#"<div style="height:200px"><div id="cl" style="height:clamp(10px, 50%, 300px);aspect-ratio:2">x</div></div>
+<div style="height:200px"><div id="mn" style="height:min(50%, 300px);aspect-ratio:2">x</div></div>"#,
+        &["cl", "mn"],
+    );
+    let want = [("cl", 200.0, 100.0), ("mn", 200.0, 100.0)];
     let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
     assert_eq!(got, want);
 }
