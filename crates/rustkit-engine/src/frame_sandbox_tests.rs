@@ -327,7 +327,9 @@ remove.call(f, 'sandbox');</script>"
 }
 
 /// Off (the default), nothing changes, with the attribute or without: no request for a
-/// frame's document, `contentWindow` null, no `load`.
+/// frame's document, `contentWindow` null, no `load`. `contentDocument` is the inert
+/// about:blank document a frame with no browsing context has (JETSTREAM-IFRAME-SYNC [R6];
+/// it was `null`), hence `object` in the row.
 #[test]
 fn with_nested_contexts_off_the_attribute_changes_nothing() {
     let body = format!(
@@ -338,7 +340,7 @@ make('src_empty', '', 'src'); make('src_none', null, 'src');</script>"
     let mut page = Page::load(false, &body);
     page.turns(15);
     for id in ["off_with", "off_without", "src_empty", "src_none"] {
-        assert_eq!(page.row(id), "0|0|null", "{id}");
+        assert_eq!(page.row(id), "0|0|object", "{id}");
         assert_eq!(page.js(&format!("String(document.getElementById('{id}').contentWindow)")), "null");
         assert_eq!(page.served(&format!("/{id}.html")), 0);
     }
