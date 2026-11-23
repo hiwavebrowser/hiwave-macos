@@ -6983,6 +6983,9 @@ impl Engine {
         // What decides whether a frame of this document may load at all: its
         // nesting depth and the URLs above it (the requesting document first).
         let ancestry = self.frame_ancestry_urls(id);
+        // An idle frames turn: nothing to drain. Spares are built only on one
+        // (Atlas ruling C): never inside a drain on the load path.
+        let idle = requests.is_empty();
         for request in requests {
             changed |= self.drop_frame(id, request.node);
             let Some(mut target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
@@ -7311,13 +7314,19 @@ impl Engine {
                 debug!(error = %e, "frames: the parent's layout after a frame change failed");
             }
         }
-        self.refill_spare(id);
+        if idle {
+            self.refill_spare(id);
+        }
     }
 
     /// Give view `id`'s document a spare child if it should hold one and does
     /// not (JETSTREAM-IFRAME-SYNC [R1]): a document that has frames, or is
-    /// itself a frame, within the nesting cap. Built here, at a drain, where
-    /// no script runs; a frameless page never pays for one. The spare is a
+    /// itself a frame, within the nesting cap. Built OFF the load path (Atlas
+    /// ruling C, after the [R5] measurement: one spare is ~134 ms and ~13 MB):
+    /// only on an idle frames turn (no request drained in it) after the
+    /// document's window `load`, so never inside a load-path drain. A frame
+    /// inserted by script before then attaches late (pinned by a test); a
+    /// frameless page never pays for one. The spare is a
     /// child exactly as the drain makes one for an about:blank frame, and it
     /// belongs to this document: a navigation replaces the document's
     /// bindings, and the spare goes with them ([R2]).
@@ -7327,7 +7336,7 @@ impl Engine {
         }
         let Some(view) = self.views.get(&id) else { return };
         let Some(parent) = view.doc.bindings.as_ref() else { return };
-        if parent.has_spare() {
+        if parent.has_spare() || !parent.window_loaded() {
             return;
         }
         let depth = self.frame_ancestry_urls(id).len();

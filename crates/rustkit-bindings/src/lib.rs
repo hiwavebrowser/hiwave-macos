@@ -1941,6 +1941,10 @@ pub struct DomBindings {
     /// An about:blank document's creator's origin ([`Self::inherit_origin_from`]);
     /// cleared when a location is set.
     inherited_origin: RefCell<Option<String>>,
+    /// The window's `load` has fired for the bound document (set by
+    /// [`Self::fire_lifecycle_event`], so script cannot fake it): the engine
+    /// builds a spare only after it (JETSTREAM-IFRAME-SYNC, off the load path).
+    window_loaded: std::cell::Cell<bool>,
     /// The `sandbox` attribute of each iframe of the document as it was
     /// bound (the parser's), until that frame is first asked for: a markup
     /// frame is asked for at the engine's scan, after the page's first
@@ -2208,6 +2212,11 @@ impl DomBindings {
         self.window.borrow().document.clone()
     }
 
+    /// Whether the window's `load` has fired for the bound document.
+    pub fn window_loaded(&self) -> bool {
+        self.window_loaded.get()
+    }
+
     /// Whether the document holds a spare child.
     pub fn has_spare(&self) -> bool {
         self.spare.borrow().is_some()
@@ -2450,6 +2459,7 @@ impl DomBindings {
             frame_requests: Rc::new(RefCell::new(Vec::new())),
             spare: RefCell::new(None),
             inherited_origin: RefCell::new(None),
+            window_loaded: std::cell::Cell::new(false),
             frame_sandbox_parsed: Rc::new(RefCell::new(None)),
             window: RefCell::new(WindowState::default()),
             dom_host,
@@ -3431,6 +3441,7 @@ impl DomBindings {
 
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
+        self.window_loaded.set(false);
         // Update state. Marks against the previous document are moot: the
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
@@ -4152,6 +4163,9 @@ impl DomBindings {
         target: LifecycleTarget,
         event_type: &str,
     ) -> Result<(), BindingError> {
+        if matches!(target, LifecycleTarget::Window) && event_type == "load" {
+            self.window_loaded.set(true);
+        }
         let target = match target {
             LifecycleTarget::Window => "window",
             LifecycleTarget::Document => "document",

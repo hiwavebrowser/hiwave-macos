@@ -56,8 +56,10 @@ impl Page {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(engine.load_url(view, url)).expect("load_url");
         let mut page = Page { engine, view, rt, _server: server };
-        // Let the markup frames drain (and their spares be built).
-        page.turns("true", 10);
+        // Let the markup frames drain, then settle: spares are built on an
+        // idle frames turn after `load` (Atlas ruling C), so a drain turn is
+        // followed by idle ones, as a loaded page's live loop runs.
+        page.turns("false", 3);
         page
     }
 
@@ -101,7 +103,7 @@ fn the_blank_document_is_there_right_after_insertion() {
         ),
         r#"String("true|about:blank|complete|<html><head></head><body></body></html>|true")"#
     );
-    page.turns("true", 2);
+    page.turns("false", 3); // the drain, then idle turns (the spare comes back on one)
     assert_eq!(
         page.js(
             "var b = document.createElement('iframe'); b.src = 'about:blank'; document.body.appendChild(b); \
@@ -257,7 +259,7 @@ fn no_microtask_checkpoint_between_written_scripts() {
         ),
         r#"String("unset")"#
     );
-    page.turns("true", 2);
+    page.turns("false", 3); // the drain, then idle turns (the spare comes back on one)
     assert_eq!(page.js("top.__flag"), r#"String("set")"#);
 }
 
@@ -446,4 +448,46 @@ fn spare_build_cost() {
     for c in held {
         bindings.drop_child(c);
     }
+}
+
+/// LIMIT (Atlas ruling C), pinned: spares are built off the load path, on
+/// an idle turn after the document's `load`. A frame a script inserts while
+/// the page is still loading attaches late (Chrome: at once); after `load`
+/// and an idle turn, an inserted frame has its window inside the insertion.
+#[test]
+fn a_frame_inserted_during_load_attaches_late() {
+    let page_src = "<!doctype html><body><iframe id=first></iframe><script>\
+        var early = document.createElement('iframe'); document.body.appendChild(early); \
+        window.earlyAtOnce = early.contentWindow !== null; window.earlyFrame = early;</script></body>";
+    let mut page = Page::load(true, page_src);
+    assert_eq!(page.js("String(window.earlyAtOnce)"), r#"String("false")"#, "during load: no spare yet");
+    page.turns("!!window.earlyFrame.contentWindow", 10);
+    assert_eq!(page.js("String(!!earlyFrame.contentWindow)"), r#"String("true")"#, "it attaches at the drain");
+    assert_eq!(
+        page.js("var late = document.createElement('iframe'); document.body.appendChild(late); String(late.contentWindow !== null)"),
+        r#"String("true")"#,
+        "after load and an idle turn: at once"
+    );
+}
+
+/// Ruling C itself: a spare is never built inside a drain. The turn that
+/// drains a frame (taking the spare) leaves the document without one; the
+/// next idle turn builds it. (Before ruling C the drain rebuilt it at once.)
+#[test]
+fn the_spare_is_rebuilt_on_the_idle_turn_not_in_the_drain() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    let has_spare = |page: &Page| {
+        page.engine.views.get(&page.view).and_then(|v| v.doc.bindings.as_ref()).is_some_and(|b| b.has_spare())
+    };
+    assert!(has_spare(&page), "a loaded, settled page with a frame holds a spare");
+    // The page half takes it inside the insertion; the engine adopts it at
+    // the drain.
+    assert_eq!(
+        page.js("var f = document.createElement('iframe'); document.body.appendChild(f); String(f.contentWindow !== null)"),
+        r#"String("true")"#
+    );
+    page.turns("false", 1);
+    assert!(!has_spare(&page), "the drain turn adopted it and does not rebuild it");
+    page.turns("false", 1);
+    assert!(has_spare(&page), "the next idle turn does");
 }
