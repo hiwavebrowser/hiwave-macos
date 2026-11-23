@@ -438,6 +438,8 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(test)]
+mod frames_sync_blank_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
 #[cfg(all(test, feature = "headless"))]
