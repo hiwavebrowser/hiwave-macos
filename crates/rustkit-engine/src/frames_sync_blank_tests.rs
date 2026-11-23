@@ -82,6 +82,9 @@ const WITH_MAGIC: &str = "<!doctype html><body><iframe id=magic></iframe></body>
 /// Test 1. Chrome: null before insertion; right after appendChild, with no
 /// src and with src=about:blank, an about:blank document, complete, with an
 /// empty head and body, and contentWindow.document the same object.
+///
+/// The second frame (src=about:blank) is inserted by a later script: one
+/// spare per document per script (the limit below).
 #[test]
 fn the_blank_document_is_there_right_after_insertion() {
     let mut page = Page::load(true, WITH_MAGIC);
@@ -89,12 +92,38 @@ fn the_blank_document_is_there_right_after_insertion() {
         page.js(
             "var a = document.createElement('iframe'); var before = a.contentDocument === null; \
              document.body.appendChild(a); var d = a.contentDocument; \
-             var b = document.createElement('iframe'); b.src = 'about:blank'; document.body.appendChild(b); \
              [before, !!d && d.URL, !!d && d.readyState, !!d && d.documentElement.outerHTML, \
-              !!d && a.contentWindow.document === d, !!b.contentDocument && b.contentDocument.URL].join('|')"
+              !!d && a.contentWindow.document === d].join('|')"
         ),
-        r#"String("true|about:blank|complete|<html><head></head><body></body></html>|true|about:blank")"#
+        r#"String("true|about:blank|complete|<html><head></head><body></body></html>|true")"#
     );
+    page.turns("true", 2);
+    assert_eq!(
+        page.js(
+            "var b = document.createElement('iframe'); b.src = 'about:blank'; document.body.appendChild(b); \
+             String(!!b.contentDocument && b.contentDocument.URL)"
+        ),
+        r#"String("about:blank")"#
+    );
+}
+
+/// LIMIT, pinned so it is seen: one spare per document per script. A second
+/// frame inserted by the same script attaches late (Chrome: at once). JetStream
+/// inserts one frame per document per script; a page inserting several (ad
+/// slots) gets the first at once and the others after the script.
+#[test]
+fn a_second_frame_in_the_same_script_attaches_late() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(
+            "var a = document.createElement('iframe'); document.body.appendChild(a); \
+             var b = document.createElement('iframe'); document.body.appendChild(b); \
+             window.bFrame = b; [!!a.contentDocument, b.contentDocument === null].join('|')"
+        ),
+        r#"String("true|true")"#
+    );
+    page.turns("!!window.bFrame.contentDocument", 10);
+    assert_eq!(page.js("String(!!bFrame.contentDocument && bFrame.contentDocument.URL)"), r#"String("about:blank")"#);
 }
 
 /// Test 2. JetStream's pattern: a frame made by innerHTML inside the
@@ -228,10 +257,17 @@ fn no_microtask_checkpoint_between_written_scripts() {
     assert_eq!(page.js("top.__flag"), r#"String("set")"#);
 }
 
-/// Test 9 ([R2]). A spare belongs to one document: after the top document
-/// navigates, a frame inserted in the new document is never the old
-/// document's spare: if it has a window at once, that window's parent is
-/// the new document's window.
+/// Test 9 ([R2]). A spare belongs to one document. After the top document
+/// navigates, a frame inserted in the new document gets a window whose parent
+/// is the new document's window.
+///
+/// What this can and cannot show: reuse of the OLD document's spare is
+/// impossible by construction, not merely untested. A navigation builds a new
+/// JsRuntime and new DomBindings (`load_url_for_nav`, `load_html_doc`), and the
+/// spare lives in the old bindings, so it is dropped with them and their
+/// runtime. No page behaviour could reveal a reuse (the new page's script
+/// would attach even an old spare to the new window), so this test is a
+/// behavioural pin of the new document's frame, not a falsifiable guard.
 #[test]
 fn a_spare_taken_after_the_parent_navigated_is_never_used() {
     let mut page = Page::load(true, WITH_MAGIC);

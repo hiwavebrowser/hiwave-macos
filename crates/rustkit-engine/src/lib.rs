@@ -7019,6 +7019,26 @@ impl Engine {
                 }
                 continue;
             }
+            // A spare the page half attached inside the insertion
+            // (JETSTREAM-IFRAME-SYNC): adopt it instead of making a child. It
+            // is already bound to its about:blank document and is the frame's
+            // window; what is left is its size, and the view below.
+            let adopted = if request.prebuilt && blank {
+                parent_of(self, id).and_then(|parent| parent.take_spare().map(|child| (child, parent.frame_size(request.node))))
+            } else {
+                None
+            };
+            let (child, document, target, width, height) = if let Some((child, (width, height))) = adopted {
+                let document = child.document();
+                let held = parent_of(self, id).is_some_and(|parent| parent.frame_holds_window(request.node));
+                let Some(document) = document.filter(|_| held && child.set_dimensions(width, height).is_ok()) else {
+                    if let Some(parent) = parent_of(self, id) {
+                        parent.drop_child(child);
+                    }
+                    continue;
+                };
+                (child, document, target, width, height)
+            } else {
             // The document's URL is the response's, after redirects; it is
             // same-origin only when every URL of the chain is the page's
             // origin (one that left and came back is not).
@@ -7091,6 +7111,8 @@ impl Engine {
                 }
                 continue;
             }
+            (child, document, target, width, height)
+            };
             // The frame's own page state, offscreen, at its viewport.
             let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
             let Ok(fid) = self.insert_offscreen_view(bounds) else {
@@ -7276,6 +7298,47 @@ impl Engine {
             if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
                 debug!(error = %e, "frames: the parent's layout after a frame change failed");
             }
+        }
+        self.refill_spare(id);
+    }
+
+    /// Give view `id`'s document a spare child if it should hold one and does
+    /// not (JETSTREAM-IFRAME-SYNC [R1]): a document that has frames, or is
+    /// itself a frame, within the nesting cap. Built here, at a drain, where
+    /// no script runs; a frameless page never pays for one. The spare is a
+    /// child exactly as the drain makes one for an about:blank frame, and it
+    /// belongs to this document: a navigation replaces the document's
+    /// bindings, and the spare goes with them ([R2]).
+    fn refill_spare(&mut self, id: EngineViewId) {
+        let Some(view) = self.views.get(&id) else { return };
+        let Some(parent) = view.doc.bindings.as_ref() else { return };
+        if parent.has_spare() {
+            return;
+        }
+        let depth = self.frame_ancestry_urls(id).len();
+        let wanted = !view.frames.is_empty() || depth > 1;
+        if !wanted || depth >= MAX_FRAME_DEPTH {
+            return;
+        }
+        let Ok(child) = parent.new_child() else { return };
+        let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
+            .ok()
+            .zip(Url::parse("about:blank").ok());
+        let Some((document, blank)) = built else {
+            parent.drop_child(child);
+            return;
+        };
+        let bound = child
+            .set_document(Rc::new(document))
+            .and_then(|_| child.set_location(&blank))
+            .and_then(|_| child.enable_net_bridge())
+            .and_then(|_| child.enable_frames());
+        if bound.is_err() {
+            parent.drop_child(child);
+            return;
+        }
+        if let Err(e) = parent.offer_spare(child) {
+            debug!(error = %e, "frames: the spare child was not taken");
         }
     }
 
