@@ -2766,6 +2766,17 @@ pub struct LivePump {
     pub next_timer_exact_us: Option<u64>,
 }
 
+/// The bindings of view `id`'s document (the drain's `parent_of`, outside it).
+fn parent_of_view(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+    engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+}
+
+/// How many frames deep a page may nest (JETSTREAM-IFRAME-SYNC phase 2a: a
+/// frame's own frames are browsing contexts, so a chain must stop). JetStream
+/// needs 2, Speedometer 1. A stated deviation from Chrome, which caps the
+/// number of frames instead.
+pub(crate) const MAX_FRAME_DEPTH: usize = 16;
+
 /// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
 /// for Testing 148 renders a same-origin frame's response: only HTML types
 /// are parsed as markup; text and JSON become a text document, an image an
@@ -6919,6 +6930,26 @@ impl Engine {
     /// layout and paint of the frame, the child's timers and network
     /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
     /// waiting for its frames.
+    /// The URLs of view `id`'s document and of each document above it, from
+    /// `id` up to the top page (frames are found through their parents'
+    /// `frames`). Its length less one is `id`'s nesting depth.
+    fn frame_ancestry_urls(&self, id: EngineViewId) -> Vec<Option<Url>> {
+        let mut out = Vec::new();
+        let mut cur = Some(id);
+        while let Some(at) = cur {
+            out.push(self.views.get(&at).and_then(|v| v.doc.url.clone()));
+            cur = self
+                .views
+                .iter()
+                .find(|(_, v)| v.frames.values().any(|f| f.view == at))
+                .map(|(pid, _)| *pid);
+            if out.len() > MAX_FRAME_DEPTH + 1 {
+                break;
+            }
+        }
+        out
+    }
+
     async fn drive_frames(&mut self, id: EngineViewId) {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
@@ -6942,9 +6973,36 @@ impl Engine {
             out
         };
         let mut changed = false;
+        // What decides whether a frame of this document may load at all: its
+        // nesting depth and the URLs above it (the requesting document first).
+        let ancestry = self.frame_ancestry_urls(id);
         for request in requests {
             changed |= self.drop_frame(id, request.node);
-            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let Some(mut target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            // A nesting cap, so a chain of frames cannot recurse without end
+            // (a stated deviation: Chrome caps the frame count, not the
+            // depth). Past it, the floor: no document, no window, one `load`.
+            if ancestry.len() > MAX_FRAME_DEPTH {
+                if let Some(parent) = parent_of_view(self, id) {
+                    let _ = parent.frame_loaded(request.node, false);
+                }
+                continue;
+            }
+            // Chrome's recursion check (Blink allows one level of
+            // self-reference): a frame whose URL is already the URL of two of
+            // the documents above it, fragment aside, is left blank.
+            if target.scheme() != "about" {
+                let unfragmented = |u: &Url| {
+                    let mut u = u.clone();
+                    u.set_fragment(None);
+                    u
+                };
+                let wanted = unfragmented(&target);
+                let seen = ancestry.iter().flatten().filter(|u| unfragmented(u) == wanted).count();
+                if seen >= 2 {
+                    target = Url::parse("about:blank").expect("about:blank");
+                }
+            }
             let blank = target.scheme() == "about";
             let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
             fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
@@ -7070,6 +7128,10 @@ impl Engine {
                 frame.doc.document = Some(document.clone());
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
+                // Not yet scanned for its markup frames: the first turn of
+                // this view scans (`drive_frames` scans when the two differ),
+                // so a frame's own `<iframe>` in its markup is requested.
+                frame.frames_nav = frame.nav_id.wrapping_add(1);
             }
             // The frame's linked stylesheets, before its scripts and its
             // `load`, as a page's are before its own: what the parent's
