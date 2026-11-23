@@ -2285,7 +2285,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// #727 Atlas hold, item 3: a click that comes after a live turn the
     /// watchdog stopped (cnn's Agree landed in a 5.03 s turn) reaches its
     /// listener.
-    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the live stop, not the iteration cap, ends it.
     #[test]
     fn a_click_after_a_stopped_live_turn_reaches_its_listener() {
         let url = slow_server(
@@ -2606,11 +2606,17 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     /// The page's answer to `script`, on either path.
     fn read(view: &RustKitView, script: &str) -> String {
+        read_within(view, script, Duration::from_secs(10))
+    }
+
+    /// `read`, waiting up to `wait` for the answer (a page that is still
+    /// spinning answers only once the live stop ends the spin).
+    fn read_within(view: &RustKitView, script: &str, wait: Duration) -> String {
         let Some(thread) = &view.content else {
             return view.execute_script_sync(script).unwrap_or_default();
         };
         let mut rx = thread.eval(script);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + wait;
         loop {
             if let Ok(answer) = rx.try_recv() {
                 return answer.unwrap_or_default();
@@ -2640,7 +2646,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     fn a_url_bar_navigation_lands_within_100_ms_while_a_page_script_spins(view: RustKitView) {
         let (base, log) = logging_server(SPIN_PAGE);
         load_and_settle(&view, &base);
-        // A timer the page set spins until the turn budget stops it (5 s).
+        // A timer the page set spins until the live stop ends it (30 s).
         let _ = read(&view, "setTimeout(function () { while (true) {} }, 30); 'armed'");
         let at = Instant::now() + Duration::from_millis(250);
         let late = wake_until(&view, at);
@@ -2664,7 +2670,7 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
     /// M4 acceptance: with a page script spinning, a click is taken by the
     /// window within 100 ms, and the page hears it once the spin is
     /// stopped: queued, never dropped.
-    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the turn budget, not the iteration cap, stops it.
+    /// The spin calls `spin()`: Boa's loop limit (row JS1) counts per call frame, so the live stop, not the iteration cap, ends it.
     fn a_click_is_taken_within_100_ms_while_a_page_script_spins_and_is_not_dropped(view: RustKitView) {
         let (base, _log) = logging_server(SPIN_PAGE);
         load_and_settle(&view, &base);
@@ -2679,17 +2685,19 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
             late < Duration::from_millis(100) && taken < Duration::from_millis(100),
             "window free {late:?} late, click taken at {taken:?}"
         );
-        // The turn budget (5 s) stops the spin; then the listener runs.
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // The live stop (30 s, LIVE_SCRIPT_STOP_MS) ends the spin; then the
+        // listener runs. The read queues behind the spin, so it waits past it.
+        let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             wake(&view);
-            if read(&view, "String(window.clicks)").contains('1') {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if read_within(&view, "String(window.clicks)", left).contains('1') {
                 break;
             }
             assert!(Instant::now() < deadline, "the click was dropped");
             std::thread::sleep(Duration::from_millis(20));
         }
-        // Heard only once the budget stopped the spin: it was spinning.
+        // Heard only once the live stop ended the spin: it was spinning.
         let heard = at.elapsed();
         assert!(heard > Duration::from_secs(1), "the page was not spinning: heard at {heard:?}");
     }
