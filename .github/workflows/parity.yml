@@ -373,6 +373,18 @@ jobs:
           done
           exit $failed
 
+      - name: Background fraction against its numpy reference
+        # numpy only as a reference, in its own venv: the guard loop above runs
+        # without it, so the scripts' numpy-free paths (realsite_board's and
+        # scorer_v2's fallbacks) stay the ones CI exercises. This step compares
+        # realsite_board's fallback with its numpy path; REALSITE_NUMPY_REFERENCE=1
+        # turns a skip (numpy missing) into a failure.
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/numpy-ref"
+          "$RUNNER_TEMP/numpy-ref/bin/pip" install --disable-pip-version-check numpy
+          REALSITE_NUMPY_REFERENCE=1 "$RUNNER_TEMP/numpy-ref/bin/python" scripts/tests/test_realsite_background_fraction.py
+
   # ===========================================================================
   # PR Gate: Sharded swarm (~30m total)
   # ===========================================================================
