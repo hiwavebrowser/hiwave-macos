@@ -310,4 +310,73 @@
     });
     var impl = Object.create(DIP);
     getter('implementation', function () { return impl; });
+
+    // ---- A frame's inert about:blank document, with nested contexts off
+    // (JETSTREAM-IFRAME-SYNC [R6]). Chrome gives an iframe an about:blank
+    // document the moment it is inserted (URL about:blank, complete, an empty
+    // head and body). Off, there is no browsing context for it, so this is a
+    // detached document in this realm: the same object on every read, `null`
+    // while the frame is not in the document. open/write/close parse into it
+    // and run no script: there is nothing to run it in.
+    var inert = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var inertState = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var BLANK = '<html><head></head><body></body></html>';
+    function setLive(d, name, value) {
+        Object.defineProperty(d, name, { value: value, writable: true, configurable: true, enumerable: true });
+    }
+    __rk.inertFrameDocument = function (frame) {
+        if (!inert || !frame || !frame.isConnected) return null;
+        var d = inert.get(frame);
+        if (!d) {
+            d = new g.DOMParser().parseFromString(BLANK, 'text/html');
+            setLive(d, 'URL', 'about:blank');
+            setLive(d, 'documentURI', 'about:blank');
+            setLive(d, 'readyState', 'complete');
+            inert.set(frame, d);
+            inertState.set(d, { buffer: '', open: false });
+            __rk.inertDocumentMethods(d);
+        }
+        return d;
+    };
+    function inertDoc(d) { return inertState ? inertState.get(d) : undefined; }
+    function emptyDoc(d) { while (d.firstChild) d.removeChild(d.firstChild); }
+    // The markup written so far, parsed again into the document: the parse is
+    // whole each time (no script runs, so nothing can observe a partial one).
+    function reparse(d, s) {
+        var parsed = new g.DOMParser().parseFromString(s.buffer, 'text/html');
+        emptyDoc(d);
+        if (parsed.documentElement) d.appendChild(parsed.documentElement);
+    }
+    // On the inert document only, as its own methods: a page's own document
+    // keeps no `open`/`write` (as before this row; real-site script that
+    // feature-detects `document.write` sees what it saw).
+    function method(d, name, fn) {
+        Object.defineProperty(d, name, { configurable: true, writable: true, value: fn });
+    }
+    function openInert() {
+        var s = inertDoc(this);
+        emptyDoc(this);
+        s.buffer = ''; s.open = true;
+        this.readyState = 'loading';
+        return this;
+    }
+    function writeInert() {
+        var s = inertDoc(this);
+        if (!s.open) this.open();
+        for (var i = 0; i < arguments.length; i++) s.buffer += String(arguments[i]);
+        reparse(this, s);
+    }
+    function writelnInert() {
+        var a = Array.prototype.slice.call(arguments); a.push('\n');
+        return this.write.apply(this, a);
+    }
+    function closeInert() {
+        var s = inertDoc(this);
+        s.open = false;
+        this.readyState = 'complete';
+    }
+    __rk.inertDocumentMethods = function (d) {
+        method(d, 'open', openInert); method(d, 'write', writeInert);
+        method(d, 'writeln', writelnInert); method(d, 'close', closeInert);
+    };
 })(typeof globalThis === 'object' ? globalThis : this);

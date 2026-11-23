@@ -227,3 +227,21 @@ fn a_spare_taken_after_the_parent_navigated_is_never_used() {
         r#"String("true")"#
     );
 }
+
+/// Guard: only a frame's document gets open/write/close. A page's own
+/// document keeps what it had before this row, with frames on and off: no
+/// `open`, nothing on Document.prototype (its `write` is the legacy stub,
+/// untouched). Real sites feature-detect these. A first draft put them on
+/// Document.prototype; this test fails against it.
+#[test]
+fn the_pages_own_document_gains_no_open_or_write() {
+    for on in [false, true] {
+        let mut page = Page::load(on, "<!doctype html><body></body>");
+        assert_eq!(
+            page.js("[typeof document.open, typeof document.close, typeof Document.prototype.open, \
+                     typeof Document.prototype.write, typeof Document.prototype.close].join('|')"),
+            r#"String("undefined|undefined|undefined|undefined|undefined")"#,
+            "nested_contexts = {on}"
+        );
+    }
+}
