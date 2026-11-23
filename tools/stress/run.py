@@ -682,7 +682,8 @@ def headless_pacing(binary):
 # when this is set; the run says so loudly and records it, report.py keeps such runs apart, and its score
 # is not a default-engine score.
 TURN_BUDGET_ENV = "HIWAVE_STRESS_TURN_BUDGET_MS"
-# The engine's own budget (`EngineConfig::live_turn_budget_ms`), for messages.
+# The engine's own allowance (`EngineConfig::live_turn_budget_ms`), for messages. A running script is
+# stopped at 30 s (`LIVE_SCRIPT_STOP_MS`, Pete 2026-11-21) or at a raised allowance, whichever is higher.
 ENGINE_TURN_BUDGET_MS = 5000
 # What parity-capture's --live-turn-budget-ms takes at most (an hour).
 TURN_BUDGET_MAX_MS = 3600000
