@@ -114,6 +114,9 @@ mod own_context_collapse_tests;
 #[cfg(test)]
 mod clip_rect_unit_tests;
 
+#[cfg(test)]
+mod wrapped_inline_align_unit_tests;
+
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
     calculate_caret_position, calculate_selection_rects, render_button, render_checkbox,
@@ -7831,7 +7834,7 @@ impl LayoutBox {
     /// hold exactly one in-flow box. `None` when `b` is not such an inline,
     /// when the run fits on one line, or when it is a phase-5 mid-line split
     /// (aligned by `align_split_close` and the split branch instead).
-    fn wrapped_text_path(b: &LayoutBox) -> Option<Vec<usize>> {
+    pub(crate) fn wrapped_text_path(b: &LayoutBox) -> Option<Vec<usize>> {
         if !matches!(b.box_type, BoxType::Inline) || b.style.display.is_atomic_inline() {
             return None;
         }
@@ -7871,7 +7874,7 @@ impl LayoutBox {
     /// span: R1 on #1407), aligns with that content as ONE line, which is placed after the
     /// inline's tail. Following content that wraps itself is not taken. Returns the records it
     /// aligned; the rest go through `apply_text_align_offset` as before.
-    fn align_wrapped_inline_records(
+    pub(crate) fn align_wrapped_inline_records(
         children: &mut [LayoutBox],
         records: &[(usize, usize, f32)],
         text_align: TextAlign,
