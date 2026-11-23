@@ -5138,8 +5138,9 @@ impl LayoutBox {
             "layout_block_with_definite_height called"
         );
 
-        // Calculate width first (depends on containing block)
-        self.calculate_block_width(containing_block);
+        // Calculate width first (depends on containing block; a percentage
+        // height's base matters only to an aspect-ratio width)
+        self.calculate_block_width_based(containing_block, definite_height);
 
         tracing::trace!(
             calculated_width = self.dimensions.content.width,
@@ -5183,8 +5184,9 @@ impl LayoutBox {
         float_context: &mut FloatContext,
         percent_height_base: Option<f32>,
     ) {
-        // Calculate width first (depends on containing block)
-        self.calculate_block_width(containing_block);
+        // Calculate width first (depends on containing block; a percentage
+        // height's base matters only to an aspect-ratio width)
+        self.calculate_block_width_based(containing_block, percent_height_base);
 
         // Calculate margin/padding/border
         self.calculate_block_vertical_box_model(containing_block);
@@ -6291,20 +6293,34 @@ impl LayoutBox {
     /// block's height may be indefinite. Under
     /// `border-box` the ratio is the border box's, so this box's horizontal
     /// padding and border (`padding_border_w`) come off the derived width.
-    fn aspect_ratio_width_from_height(&self, containing_block: &Dimensions, padding_border_w: f32) -> Option<f32> {
+    fn aspect_ratio_width_from_height(
+        &self,
+        containing_block: &Dimensions,
+        percent_base: Option<f32>,
+        padding_border_w: f32,
+    ) -> Option<f32> {
         let ratio = self.style.aspect_ratio?;
         if !(ratio > 0.0) || !ratio.is_finite() || !matches!(self.box_type, BoxType::Block) {
             return None;
         }
-        // Lengths only; min()/max()/clamp()/calc() may hold a percentage.
-        if !matches!(
+        let length = matches!(
             self.style.height,
             Length::Px(_) | Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_)
                 | Length::Vmin(_) | Length::Vmax(_) | Length::Zero
-        ) {
-            return None;
-        }
-        let height = self.length_to_px(&self.style.height, containing_block.content.height);
+        );
+        // A percentage (bare, or a calc() term) is definite when the parent
+        // hands down a definite base (`percent_base`, the definite height a
+        // block's layout receives) and it does not compute to auto (Chrome
+        // 148: `height:50%; aspect-ratio:2` in a 200px-tall parent is
+        // 200x100). min()/max()/clamp() still fill.
+        let percentage = matches!(self.style.height, Length::Percent(_) | Length::Calc(_))
+            && !self.percent_height_computes_to_auto();
+        let base = match (length, percentage, percent_base) {
+            (true, _, _) => containing_block.content.height,
+            (false, true, Some(base)) => base,
+            _ => return None,
+        };
+        let height = self.length_to_px(&self.style.height, base);
         Some(if self.style.box_sizing == BoxSizing::BorderBox {
             (height * ratio - padding_border_w).max(0.0)
         } else {
@@ -6313,6 +6329,13 @@ impl LayoutBox {
     }
 
     fn calculate_block_width(&mut self, containing_block: &Dimensions) {
+        self.calculate_block_width_based(containing_block, None);
+    }
+
+    /// `calculate_block_width` with the definite height the parent hands
+    /// down (`layout_with_percent_base`), which a percentage height needs to
+    /// give an aspect-ratio width.
+    fn calculate_block_width_based(&mut self, containing_block: &Dimensions, percent_base: Option<f32>) {
         let style = &self.style;
 
         // Get values from style
@@ -6380,6 +6403,7 @@ impl LayoutBox {
                     shrink_to_fit_content_width(self, available)
                 } else if let Some(width) = self.aspect_ratio_width_from_height(
                     containing_block,
+                    percent_base,
                     border_left + border_right + padding_left + padding_right,
                 ) {
                     // css-sizing-4 §5.1: with a definite height, the ratio
