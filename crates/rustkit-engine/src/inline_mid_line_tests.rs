@@ -121,3 +121,79 @@ fn a_span_that_does_not_fit_the_rest_of_the_line_starts_on_it_segoe_ui() {
     let wrong = wrong_rows("'Segoe UI'", &rows);
     assert!(wrong.is_empty(), "a span after text, 16px block, 500px wide:\n{}", wrong.join("\n"));
 }
+
+// Batch 124 found two WPT cases that the mid-line start moved away from Chrome:
+// css-text/letter-spacing/letter-spacing-200 (a span that starts at a line end and holds a forced
+// break lost a line) and css-position/position-absolute-in-inline-007b (a span that starts mid-line
+// and is split by a block counted one line too many). Chrome for Testing 148.0.7778.216 (win64),
+// docs/diagnostics/2026-11-23/inline_mid_line_breaks_cft148.json
+// (tools/parity_oracle/inline_mid_line_breaks_log.mjs, the same markup, Ahem).
+
+const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
+
+/// The border-box height of `#p` in `body`, laid out with Ahem.
+fn height_with_ahem(style: &str, body: &str) -> f64 {
+    use base64::Engine as _;
+    let face = format!(
+        "@font-face{{font-family:Ahem;src:url(data:font/ttf;base64,{})}}",
+        base64::engine::general_purpose::STANDARD.encode(AHEM)
+    );
+    let page = format!("<!doctype html><style>{face} {style}</style>{body}");
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, &page).expect("load_html");
+    let file = std::env::temp_dir().join(format!(
+        "inline_mid_line_breaks_{}_{}.json",
+        std::process::id(),
+        body.len() * 7 + style.len()
+    ));
+    engine.export_layout_json(view, file.to_str().unwrap()).expect("export");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&file);
+    fn find<'a>(v: &'a serde_json::Value, sel: &str) -> Option<&'a serde_json::Value> {
+        if v.get("selector").and_then(|t| t.as_str()) == Some(sel) {
+            return Some(v);
+        }
+        v.get("children")?.as_array()?.iter().find_map(|c| find(c, sel))
+    }
+    let p = find(&json["root"], "#p").expect("#p");
+    p["border_box"]["height"].as_f64().expect("height")
+}
+
+#[test]
+fn a_span_that_starts_at_a_line_end_with_a_forced_break_or_split_by_a_block_keeps_its_lines() {
+    const LS: &str =
+        "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}";
+    const POS: &str = "body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .rel{position:relative} \
+        .block{inline-size:8em;block-size:1em;background:black}";
+    const SPLIT: &str = "XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    \
+        XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span>";
+    // The rows that RustKit laid out as Chrome does before INLINE-MID-LINE or that it fixed. Chrome's
+    // `<br>` rows of the same boxes are 80 tall (a letter-spaced "4 5" wraps to two lines); RustKit
+    // gives 60 with or without INLINE-MID-LINE, a separate gap (letter-spacing at a wrap).
+    let rows: [(&str, &str, String, f64); 3] = [
+        (
+            "span starting at a line end, holding newlines (pre-wrap)",
+            LS,
+            "<div class=c><p id=p class=pre>1 2 3<span id=s>\n4 5\n</span>6 7 8</p></div>".into(),
+            80.0,
+        ),
+        (
+            "span between newlines (pre-wrap)",
+            LS,
+            "<div class=c><p id=p class=pre>1 2 3\n<span id=s>4 5</span>\n6 7 8</p></div>".into(),
+            80.0,
+        ),
+        ("span after text, split by a block", POS, format!("<div class=c id=p>{SPLIT}</div>"), 120.0),
+    ];
+    let wrong: Vec<String> = rows
+        .iter()
+        .filter_map(|(label, style, body, chrome)| {
+            let got = height_with_ahem(style, body);
+            ((got - chrome).abs() >= 0.1).then(|| format!("{label}: Chrome height {chrome}, got {got}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "Ahem 20px/1:\n{}", wrong.join("\n"));
+}
