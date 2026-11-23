@@ -112,3 +112,18 @@ fn a_percentage_height_of_a_definite_parent_drives_the_width() {
     let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
     assert_eq!(got, want);
 }
+
+/// A grid item stretched to a 200px row has a definite height (css-grid-1
+/// §11.6), so its child's percentage drives the width the same way (Chrome:
+/// item 600x200, child 50%/2 200x100). The grid's pass that re-sizes an
+/// item's block children dropped that base and filled the item.
+#[test]
+fn a_percentage_height_in_a_stretched_grid_item_drives_the_width() {
+    let got = sizes(
+        r#"<div style="display:grid;grid-template-rows:200px"><div id="gi"><div id="g1" style="height:50%;aspect-ratio:2">x</div></div></div>"#,
+        &["gi", "g1"],
+    );
+    let want = [("gi", 600.0, 200.0), ("g1", 200.0, 100.0)];
+    let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
+    assert_eq!(got, want);
+}
