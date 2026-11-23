@@ -109,9 +109,10 @@ struct Args {
     #[arg(long)]
     script_budget_ms: Option<u64>,
 
-    /// The live turn's watchdog, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): how long
-    /// one callback's JavaScript may run before it is stopped, and also the turn's whole allowance of
-    /// script time, so a raised value paces frames differently even when no single callback is long.
+    /// The live turn's allowance, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): the turn's
+    /// whole allowance of script time, so a raised value paces frames differently even when no single
+    /// callback is long. A running callback is stopped at 30 s (`LIVE_SCRIPT_STOP_MS`), or at this
+    /// value when it is higher.
     /// Needs `--interrupt-scripts`; 1 to 3600000 (an hour). For stress-suite runs only (tools/stress,
     /// `HIWAVE_STRESS_TURN_BUDGET_MS`): MotionMark's end-of-test analysis runs longer than the default and
     /// the stop ends the suite. A capture taken with it is not comparable with the board or the app: it says
@@ -2447,6 +2448,11 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
         config.live_turn_budget_ms = budget;
     }
     config.interrupt_scripts_at_budget = args.interrupt_scripts;
+    // As the app: a running live script is stopped at 30 s, apart from the
+    // turn's allowance (Pete, 2026-11-21).
+    if args.interrupt_scripts {
+        config.live_script_stop_ms = Some(rustkit_engine::LIVE_SCRIPT_STOP_MS);
+    }
     config.post_load_requests_live = args.post_load_live || args.wpt;
     if args.animations {
         config.disable_animations = false;
