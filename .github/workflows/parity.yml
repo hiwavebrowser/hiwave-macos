@@ -307,7 +307,10 @@ jobs:
         # so script-guards spent 402 s here (attempt 1 hit the 10 min timeout
         # before a guard ran). ubuntu-24.04 ships Google Chrome and its
         # libraries; a missing one fails the launch loudly (the pins skip only
-        # on "Executable doesn't exist"), never silently.
+        # on "Executable doesn't exist"), never silently. It also installed
+        # Playwright's fonts (Liberation, Noto Color Emoji, WQY, ...): neither
+        # job compares rendered text today, but one that does would now run on
+        # the image's default fonts, so pin fonts in that job, not here.
         run: npx playwright install chromium
 
       - name: Verify the join key still reproduces every committed selector
