@@ -391,3 +391,59 @@ fn with_spares_off_an_inserted_frame_attaches_at_the_drain() {
     page.turns("!!window.aFrame.contentWindow", 10);
     assert_eq!(page.js("String(!!aFrame.contentWindow && aFrame.contentWindow.document.URL)"), r#"String("about:blank")"#);
 }
+
+/// The cost gate's [R5] build measurement, run by hand
+/// (`cargo test --release ... spare_build_cost -- --ignored --nocapture`):
+/// the time to build one spare pair (a document's spare, and the spare that
+/// spare's own document then holds is built at ITS drain, so one is the unit
+/// here), and the resident memory each one held keeps. 40 builds, each spare
+/// dropped and rebuilt; reported, not asserted.
+#[test]
+#[ignore]
+fn spare_build_cost() {
+    fn rss_kb() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+        let pages: u64 = statm.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        pages * 4
+    }
+    let mut page = Page::load(true, WITH_MAGIC);
+    let id = page.view;
+    let mut times = Vec::new();
+    for _ in 0..40 {
+        // The page takes the spare as a page does (a frame inserted, here
+        // removed at once), then the engine's side is taken too.
+        page.js("var f = document.createElement('iframe'); document.body.appendChild(f); f.remove(); 0");
+        let bindings = page.engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref()).expect("bindings");
+        let spare = bindings.take_spare().expect("a spare to take");
+        bindings.drop_child(spare);
+        let t = std::time::Instant::now();
+        page.engine.refill_spare(id);
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        assert!(page.engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref()).is_some_and(|b| b.has_spare()));
+    }
+    // Memory: spares HELD (built, not dropped), the steady state of a page
+    // that has frames: one more per view. Measured as N held children.
+    let before = rss_kb();
+    let mut held = Vec::new();
+    for _ in 0..20 {
+        page.js("var f = document.createElement('iframe'); document.body.appendChild(f); f.remove(); 0");
+        let bindings = page.engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref()).expect("bindings");
+        held.push(bindings.take_spare().expect("a spare"));
+        page.engine.refill_spare(id);
+    }
+    let after = rss_kb();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = times[times.len() / 2];
+    println!(
+        "SPARE_COST build_ms median={med:.2} min={:.2} max={:.2} (n={}); held 20 -> rss +{} KiB = {:.0} KiB/spare",
+        times[0],
+        times[times.len() - 1],
+        times.len(),
+        after.saturating_sub(before),
+        after.saturating_sub(before) as f64 / 20.0
+    );
+    let bindings = page.engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref()).expect("bindings");
+    for c in held {
+        bindings.drop_child(c);
+    }
+}
