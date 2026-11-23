@@ -194,6 +194,18 @@ Plus the stress check: JetStream with frames on runs past its first test. That's
 - **[R2]'s reuse across navigation is impossible by construction.** Every navigation builds a new `JsRuntime` and new `DomBindings` (`load_url_for_nav`, `load_html_doc`), and the spare lives in the old ones. Test 9 is therefore a behavioural pin, not a falsifiable guard.
 - **Nesting:** a page that frames itself nests once (Chrome's recursion check), and nothing is created deeper than `MAX_FRAME_DEPTH` = 16.
 
+## [R5] measured, and Atlas's ruling C
+
+- **Build cost** (`spare_build_cost`, release, legion5): one spare takes a median 133.6 ms to build (n=40) and holds about 13 MB. It is a full page environment, the same cost a drained blank frame already pays.
+- **The gate as first written couldn't see it.** The Chrome board's 5 pages have no iframe, and the parity campaign has 1 in 106 files.
+- **Ruling C (Atlas):** keep a spare for every same-origin document, but build it off the load path. It is built only on an idle frames turn (a drain with no requests) after the document's window `load`; never inside a load-path drain. `window_loaded` is set only by the engine's `fire_lifecycle_event`. A frame a script inserts before then attaches late (pinned: `a_frame_inserted_during_load_attaches_late`). `HIWAVE_FRAME_SPARES=0` is the rollback switch.
+- **Page load, measured** (approved replay of 20 archived real-site HARs on legion5 through `tools/replay/server.py`; frames on, spares on vs off, median of 3; load = the event log's lifecycle `load`):
+  - Sites with an iframe: lyft +0.4%, squarespace +0.3%, youtube +0.9%, walmart +1.3%, yahoo +0.5%. All within the 5% gate.
+  - Spares were actually built only on walmart (+27 MB peak RSS, about 2 spares) and yahoo (+55 MB, about 4). The other iframe sites' frames are cross-origin: no child, so no spare.
+  - cnn timed out in both arms (unscorable).
+  - Two frameless sites moved at n=3 and were rerun 10x per arm. Microsoft went to −8% (noise). Weather stayed near +21%, but it has no frames and both arms are bimodal; the spare code does no work on a frameless page. That reading is inferred from the code path, not measured.
+- **No-regression:** Chrome board 42/42 with frames off and with frames on; parity campaign 26/26, mean 0.7566% both ways.
+
 ## Limits, stated
 
 - Synchronous frames go one spare chain deep (enough for JetStream); deeper nesting in one statement falls back to today's late attach.
