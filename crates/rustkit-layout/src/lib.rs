@@ -6303,11 +6303,14 @@ impl LayoutBox {
         if !(ratio > 0.0) || !ratio.is_finite() || !matches!(self.box_type, BoxType::Block) {
             return None;
         }
-        let length = matches!(
-            self.style.height,
+        // A calc() with no percentage term is a length too (Chrome 148:
+        // `calc(2em + 4px)`, ratio 2, under an auto-height parent is 72x36).
+        let length = match &self.style.height {
             Length::Px(_) | Length::Em(_) | Length::Rem(_) | Length::Vw(_) | Length::Vh(_)
-                | Length::Vmin(_) | Length::Vmax(_) | Length::Zero
-        );
+            | Length::Vmin(_) | Length::Vmax(_) | Length::Zero => true,
+            Length::Calc(sum) => sum.percent == 0.0,
+            _ => false,
+        };
         // A percentage (bare, or a calc() term) is definite when the parent
         // hands down a definite base (`percent_base`, the definite height a
         // block's layout receives) and it does not compute to auto (Chrome
