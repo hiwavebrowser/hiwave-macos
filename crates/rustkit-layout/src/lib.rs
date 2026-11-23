@@ -5600,8 +5600,8 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         let laid_out_at = (self.dimensions.content.x, self.dimensions.content.y);
-        // Calculate dimensions
-        self.calculate_block_width(containing_block);
+        // Calculate dimensions (the base gives a percentage-height aspect-ratio width)
+        self.calculate_block_width_based(containing_block, percent_height_base);
         self.calculate_block_vertical_box_model(containing_block);
 
         // Find position based on float type
@@ -5990,6 +5990,14 @@ impl LayoutBox {
         // Only the lengths that actually depend on the base are recomputed:
         // a `Px` height is already right, and an `auto` one is its content.
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
+            // With an aspect-ratio the width follows that height: the flow
+            // pass had no base and shrank it to its content (Chrome 148:
+            // `height:50%; aspect-ratio:2` in a 200px positioned parent is
+            // 200x100). The width goes first; the height is resolved after.
+            if self.style.aspect_ratio.is_some() && matches!(self.box_type, BoxType::Block) {
+                self.percent_height_is_auto = false;
+                self.calculate_block_width_based(containing_block, Some(containing_block.content.height));
+            }
             self.calculate_block_height(Some(containing_block.content.height));
         }
         // A replaced box is sized by `layout_image_in`, not by
@@ -6219,8 +6227,18 @@ impl LayoutBox {
             let left = offsets.left.unwrap();
             let right = offsets.right.unwrap();
 
-            // Calculate stretched width if width is auto
-            if matches!(self.style.width, Length::Auto) && !replaced_image {
+            // Calculate stretched width if width is auto. A definite height
+            // and an aspect-ratio give the width instead (Chrome 148:
+            // `left:0; right:0; height:100px; aspect-ratio:2` is 200 wide, not
+            // the 600 between the insets); that width was set with the box.
+            let pb_w = self.dimensions.border.left
+                + self.dimensions.border_with_gutter().right
+                + self.dimensions.padding.left
+                + self.dimensions.padding.right;
+            let ratio_width = self
+                .aspect_ratio_width_from_height(containing_block, Some(containing_block.content.height), pb_w)
+                .is_some();
+            if matches!(self.style.width, Length::Auto) && !replaced_image && !ratio_width {
                 let available_width = containing_block.content.width
                     - left
                     - right
@@ -6372,6 +6390,18 @@ impl LayoutBox {
                     // border-box width, so strip this box's padding and border.
                     let pb = border_left + border_right + padding_left + padding_right;
                     (crate::grid::estimate_max_content_width(self) - pb).max(0.0)
+                } else if let Some(width) = self.aspect_ratio_width_from_height(
+                    containing_block,
+                    percent_base,
+                    border_left + border_right + padding_left + padding_right,
+                ) {
+                    // css-sizing-4 §5.1: with a definite height, the ratio
+                    // gives the auto width, ahead of fill AND of shrink-to-fit:
+                    // a float, inline-block, absolutely positioned box (even
+                    // with left and right) or table with `height:100px;
+                    // aspect-ratio:2` is 200 wide in Chrome 148, and a ratio
+                    // of 10 is 1000 wide in a 600px parent (not clamped).
+                    width
                 } else if style.display.is_atomic_inline() {
                     // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
                     // -grid) with width:auto shrinks to fit —
@@ -6411,16 +6441,6 @@ impl LayoutBox {
                     // An auto-width table does too (§17.5.2.2: its max-content
                     // width, clamped to the containing block).
                     shrink_to_fit_content_width(self, available)
-                } else if let Some(width) = self.aspect_ratio_width_from_height(
-                    containing_block,
-                    percent_base,
-                    border_left + border_right + padding_left + padding_right,
-                ) {
-                    // css-sizing-4 §5.1: with a definite height, the ratio
-                    // gives the auto width instead of the fill (Chrome 148:
-                    // `height:100px; aspect-ratio:1` is 100 wide, and a ratio
-                    // of 10 is 1000 wide in a 600px parent: not clamped to it).
-                    width
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
