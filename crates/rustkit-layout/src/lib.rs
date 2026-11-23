@@ -8909,8 +8909,24 @@ impl LayoutBox {
         let percent_is_auto = self.percent_height_computes_to_auto();
         match self.style.height {
             // Content-sized parent: the percentage is `auto` (see
-            // `mark_percent_height_bases`); the children already set it.
-            Length::Percent(_) | Length::Calc(_) if percent_is_auto => {}
+            // `mark_percent_height_bases`); the children already set it. As
+            // for `auto`, an aspect-ratio gives the height from the width
+            // (Chrome 148: `height:50%; aspect-ratio:1` in a 600px-wide
+            // auto-height parent is 600x600).
+            Length::Percent(_) | Length::Calc(_) if percent_is_auto => {
+                let padding_border_width = self.dimensions.padding.left
+                    + self.dimensions.padding.right
+                    + self.dimensions.border.left
+                    + self.dimensions.border_with_gutter().right;
+                if let Some(h) = aspect_ratio_content_height(
+                    &self.style,
+                    self.dimensions.content.width,
+                    padding_border_width,
+                    padding_border_height,
+                ) {
+                    self.dimensions.content.height = h;
+                }
+            }
             Length::Px(h) => {
                 // With box-sizing: border-box, specified height includes padding and border
                 self.dimensions.content.height = if is_border_box {
