@@ -186,6 +186,14 @@ rustkit-engine, `--features headless`:
 
 Plus the stress check: JetStream with frames on runs past its first test. That's a receipt in the code PR, not a unit test.
 
+## Learned while building phase 2b
+
+- **One spare per document per script.** A second frame inserted by the same script attaches late (Chrome: at once). This is pinned by `a_second_frame_in_the_same_script_attaches_late`. JetStream inserts one frame per document per script.
+- **Spares are no documents of the tree until adopted.** Every realm registers a pump in the shared timer queue, so spares would be asked for workers and counted as documents (`frames_stage2_tests::a_removed_frames_workers_are_no_longer_asked` caught it). A spare now leaves the timer tables when offered and joins them in `become`.
+- **[R2]'s clock concern doesn't arise.** A frame's realm is given its parent's clock origin (`new_child` passes the tree clock), so a spare built earlier reads the tree's clock, as every frame does.
+- **[R2]'s reuse across navigation is impossible by construction.** Every navigation builds a new `JsRuntime` and new `DomBindings` (`load_url_for_nav`, `load_html_doc`), and the spare lives in the old ones. Test 9 is therefore a behavioural pin, not a falsifiable guard.
+- **Nesting:** a page that frames itself nests once (Chrome's recursion check), and nothing is created deeper than `MAX_FRAME_DEPTH` = 16.
+
 ## Limits, stated
 
 - Synchronous frames go one spare chain deep (enough for JetStream); deeper nesting in one statement falls back to today's late attach.
