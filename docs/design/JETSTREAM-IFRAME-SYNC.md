@@ -169,6 +169,10 @@ Plus the stress check: JetStream with frames on runs past its first test. That's
 ## Limits, stated
 
 - Synchronous frames go one spare chain deep (enough for JetStream); deeper nesting in one statement falls back to today's late attach.
+- **A consequence of [R1]:** a document's **first** script-inserted iframe, before any frame of that document has drained, still gets today's late attach (`contentDocument` `null` until the drain), where Chrome attaches it at once.
+  - This is the price of no spares on frameless pages.
+  - JetStream is unaffected: `magic` drains at load.
+  - The red tests that need a synchronous frame start from a page with one markup iframe.
 - Written scripts don't appear in the runtime's source registry (their logs carry shapes).
 - `write` runs inline and `blob:` scripts only.
 - No top-document `open()` navigation.
