@@ -2173,6 +2173,12 @@ pub struct EngineConfig {
     /// Off by default: an iframe stays an empty box with `contentWindow`
     /// null, as before.
     pub nested_contexts: bool,
+    /// With nested contexts on: pre-built spare frames, so a frame inserted
+    /// by script has its about:blank document at once (JETSTREAM-IFRAME-SYNC).
+    /// On unless `HIWAVE_FRAME_SPARES=0`: the switch for the cost gate's
+    /// spares-on/off comparison, and a way back. Off, a script-inserted
+    /// frame attaches at the next drain, as before.
+    pub frame_spares: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -2257,6 +2263,7 @@ impl Default for EngineConfig {
             // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
             // frames in a built app or parity-capture before the flip.
             nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
+            frame_spares: std::env::var("HIWAVE_FRAME_SPARES").ok().as_deref() != Some("0"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -7315,6 +7322,9 @@ impl Engine {
     /// belongs to this document: a navigation replaces the document's
     /// bindings, and the spare goes with them ([R2]).
     fn refill_spare(&mut self, id: EngineViewId) {
+        if !self.config.frame_spares {
+            return;
+        }
         let Some(view) = self.views.get(&id) else { return };
         let Some(parent) = view.doc.bindings.as_ref() else { return };
         if parent.has_spare() {

@@ -31,6 +31,10 @@ const CHAIN: [&str; 40] = [
 
 impl Page {
     fn load(nested_contexts: bool, page: &str) -> Self {
+        Self::load_spares(nested_contexts, true, page)
+    }
+
+    fn load_spares(nested_contexts: bool, frame_spares: bool, page: &str) -> Self {
         let mut routes = vec![
             ("/", "text/html", page.to_string()),
             ("/next.html", "text/html", "<!doctype html><body><iframe id=n></iframe></body>".to_string()),
@@ -45,7 +49,7 @@ impl Page {
             routes.push((path, "text/html", format!("<!doctype html><body><iframe src=/chain/{}></iframe></body>", i + 1)));
         }
         let server = serve_routes(routes);
-        let config = EngineConfig { nested_contexts, post_load_requests_live: true, ..EngineConfig::default() };
+        let config = EngineConfig { nested_contexts, frame_spares, post_load_requests_live: true, ..EngineConfig::default() };
         let mut engine = Engine::new(config).expect("engine");
         let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
         let url = Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap();
@@ -367,4 +371,23 @@ fn a_sandboxed_frame_gets_no_frames_of_its_own() {
     page.turns("false", 20);
     assert_eq!(page.served("/leaf.html"), 0);
     assert_eq!(page.js("String(document.querySelector('iframe').contentWindow)"), r#"String("null")"#);
+}
+
+/// The switch (`HIWAVE_FRAME_SPARES=0`, the cost gate's spares-off arm and a
+/// way back): with spares off, a frame inserted by script has no window and
+/// no document inside the insertion (frames on: the getters answer the
+/// attached window's, and there is none yet) and gets them at the next
+/// drain, exactly as before phase 2b.
+#[test]
+fn with_spares_off_an_inserted_frame_attaches_at_the_drain() {
+    let mut page = Page::load_spares(true, false, WITH_MAGIC);
+    assert_eq!(
+        page.js(
+            "var a = document.createElement('iframe'); document.body.appendChild(a); window.aFrame = a; \
+             [a.contentWindow === null, a.contentDocument === null].join('|')"
+        ),
+        r#"String("true|true")"#
+    );
+    page.turns("!!window.aFrame.contentWindow", 10);
+    assert_eq!(page.js("String(!!aFrame.contentWindow && aFrame.contentWindow.document.URL)"), r#"String("about:blank")"#);
 }
