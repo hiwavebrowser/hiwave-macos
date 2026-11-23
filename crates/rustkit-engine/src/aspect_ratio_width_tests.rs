@@ -77,15 +77,19 @@ fn an_auto_width_follows_a_definite_height_across_the_ratio() {
 
 /// A percentage height against an indefinite containing block is not
 /// definite: the width fills the parent and the height follows it (Chrome:
-/// 600x600).
-///
-/// LIMIT: the width side holds (600), but the height does not follow it:
-/// RustKit derives a height from the ratio only for `height: auto`, and a
-/// percentage of an indefinite height behaves as auto everywhere except
-/// there (20, the line). A height-side follow-up, outside the width fix.
+/// 600x600). The percentage computes to `auto`, so the ratio gives the
+/// height, as it does for `height: auto` (RustKit had 20, the line).
 #[test]
-#[ignore = "a percentage height of an indefinite parent takes no height from the ratio (height-side follow-up)"]
 fn a_percentage_height_of_an_auto_height_parent_does_not_drive_the_width() {
-    let got = sizes(r#"<div id="pct" style="height:50%;aspect-ratio:1">x</div>"#, &["pct"]);
-    assert_eq!(got, vec![("pct".to_string(), 600.0, 600.0)]);
+    let got = sizes(
+        r#"<div id="pct" style="height:50%;aspect-ratio:1">x</div>
+<div id="pct2" style="height:50%;aspect-ratio:2">x</div>
+<div id="calc" style="height:calc(50% + 10px);aspect-ratio:2">x</div>
+<div id="bb" style="height:50%;aspect-ratio:2;padding:10px;box-sizing:border-box">x</div>"#,
+        &["pct", "pct2", "calc", "bb"],
+    );
+    // A percentage inside calc() is indefinite too; under border-box the ratio is the border box's.
+    let want = [("pct", 600.0, 600.0), ("pct2", 600.0, 300.0), ("calc", 600.0, 300.0), ("bb", 600.0, 300.0)];
+    let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
+    assert_eq!(got, want);
 }
