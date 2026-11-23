@@ -462,7 +462,10 @@ jobs:
   pr-aggregate:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'batch/'))  # batch-level CI
     needs: pr-swarm
-    runs-on: macos-15
+    # Plain Python over uploaded shard artifacts: no Mac needed. On macos-15 it
+    # sat unacquired three times on 2026-11-23 (batch 122, #1429) while every
+    # test shard passed.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
