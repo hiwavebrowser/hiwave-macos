@@ -156,3 +156,44 @@ fn a_math_function_height_over_a_percentage_of_a_definite_parent() {
     let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
     assert_eq!(got, want);
 }
+
+/// FLOAT-ASPECT-RATIO: a box whose auto width would shrink to fit (float,
+/// inline-block, absolutely positioned, table) still takes its width from a
+/// definite height across the ratio. RustKit shrank every one to its content
+/// (8px for "x"). Chrome for Testing 148 linux64, aspect-ratio 2 unless noted:
+/// - float, height 100px: 200x100; 50% of a 200px parent: 200x100;
+///   border-box with padding 10: 200x100; ratio 10: 1000x100 (not clamped);
+///   with max-width 150: 150x100; ratio 1 with min-width 300: 300x100;
+/// - inline-block, 100px and 50% of 200px: 200x100;
+/// - absolutely positioned (left only, right only, and left+right), 100px and
+///   50% of a 200px positioned parent: 200x100 (the ratio wins over the
+///   insets' stretch);
+/// - table, height 100px: 200x100.
+#[test]
+fn a_shrink_to_fit_box_takes_its_width_from_a_definite_height() {
+    let got = sizes(
+        r#"<div style="height:120px"><div id="fl_len" style="float:left;height:100px;aspect-ratio:2">x</div></div>
+<div style="height:200px"><div id="fl_pct" style="float:left;height:50%;aspect-ratio:2">x</div></div>
+<div style="height:120px"><div id="fl_bb" style="float:left;height:100px;aspect-ratio:2;padding:10px;box-sizing:border-box">x</div></div>
+<div style="height:120px"><div id="fl_wide" style="float:left;height:100px;aspect-ratio:10">x</div></div>
+<div style="height:120px"><div id="fl_maxw" style="float:left;height:100px;aspect-ratio:2;max-width:150px">x</div></div>
+<div style="height:120px"><div id="fl_minw" style="float:left;height:100px;aspect-ratio:1;min-width:300px">x</div></div>
+<div style="height:120px"><div id="ib_len" style="display:inline-block;height:100px;aspect-ratio:2">x</div></div>
+<div style="height:200px"><div id="ib_pct" style="display:inline-block;height:50%;aspect-ratio:2">x</div></div>
+<div style="position:relative;height:120px"><div id="ab_len" style="position:absolute;top:0;left:0;height:100px;aspect-ratio:2">x</div></div>
+<div style="position:relative;height:200px"><div id="ab_pct" style="position:absolute;top:0;left:0;height:50%;aspect-ratio:2">x</div></div>
+<div style="position:relative;height:120px"><div id="ab_both" style="position:absolute;top:0;left:0;right:0;height:100px;aspect-ratio:2">x</div></div>
+<div style="position:relative;height:120px"><div id="ab_right" style="position:absolute;top:0;right:0;height:100px;aspect-ratio:2">x</div></div>
+<div style="height:120px"><table id="tb" style="height:100px;aspect-ratio:2;border-spacing:0"><tr><td>x</td></tr></table></div>"#,
+        &["fl_len", "fl_pct", "fl_bb", "fl_wide", "fl_maxw", "fl_minw", "ib_len", "ib_pct", "ab_len", "ab_pct", "ab_both", "ab_right", "tb"],
+    );
+    let want = [
+        ("fl_len", 200.0, 100.0), ("fl_pct", 200.0, 100.0), ("fl_bb", 200.0, 100.0),
+        ("fl_wide", 1000.0, 100.0), ("fl_maxw", 150.0, 100.0), ("fl_minw", 300.0, 100.0),
+        ("ib_len", 200.0, 100.0), ("ib_pct", 200.0, 100.0),
+        ("ab_len", 200.0, 100.0), ("ab_pct", 200.0, 100.0), ("ab_both", 200.0, 100.0), ("ab_right", 200.0, 100.0),
+        ("tb", 200.0, 100.0),
+    ];
+    let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
+    assert_eq!(got, want);
+}
