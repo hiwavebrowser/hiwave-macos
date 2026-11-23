@@ -59,6 +59,12 @@ Today, with nested contexts on (`HIWAVE_NESTED_CONTEXTS`):
 
 It's cheap, but `document.write`'s scripts would then run in the **parent's** realm. JetStream relies on one iframe per benchmark to keep each benchmark's globals apart. A placeholder makes them collide, and the child's `window.onerror` / `top` relationships break.
 
+**A second gap, found while writing the tests: frames inside frames don't exist.**
+- `DomBindings::enable_frames` is called only for **top-level** page bindings (rustkit-engine `lib.rs`, the two bindings set-ups). The frame drain's `new_child()` never gets it.
+- So a frame made inside a frame has no `web_frames.js`: its request is never queued, and it never gets a window, late or otherwise. JetStream's `magicframe` lives inside `magic`.
+- **Fix (phase 2a):** with nested contexts on, the drain gives the child `enable_frames()` too. Nothing else is needed: the live loop already drives each frame view's requests recursively (`pump_live_on` → `drive_frames`, then `pump_frames` per frame view).
+- **Test:** `frames_sync_blank_tests::a_frame_inside_a_frame_becomes_a_browsing_context`. Chrome gives a window whose document is the frame's `contentDocument`, whose `parent` is the outer frame's window and whose `top` is the page.
+
 ## Option A: build the child realm inside the call, by splitting `JsRuntime`
 
 Split `JsRuntime` into:
@@ -147,6 +153,19 @@ There is no child realm, and that doesn't change.
 - So JetStream still has no score with the flag off; with it on, it should run its 59 non-wasm tests.
 - **[R6] This changes what real-site scripts see.** Ad and embed code often checks `iframe.contentDocument` and then writes into it; it would now find a document where it found `null`. The code PR runs the **19-site A/B** (develop vs the branch, frames off). Any mover is judged against Chrome by hand, and the PR calls this out.
 
+## Phases (the code PR's commits, each red then green)
+
+1. **The inert blank document** for a frame with no browsing context ([R6]); its parse-only `open` / `write` / `close`. Only on that document: a page's own document gains no `open`/`write` (a guard test). Tests 3 and 7.
+2. **Spares:**
+   - **2a:** frames inside frames, as above.
+   - **2b:** lazy spares, the in-call attach, adoption at the drain, and the per-document rules ([R1], [R2]). Tests 1, 2 and 9.
+3. **`write` with scripts:**
+   - the `&mut Context` host function;
+   - classic scripts in the document's realm;
+   - `blob:` scripts;
+   - errors ([R3]) and no microtask checkpoint ([R4]);
+   - tests 4–6 and 8.
+
 ## Red tests (before code; Chrome 148 numbers from the receipt)
 
 rustkit-engine, `--features headless`:
@@ -162,6 +181,7 @@ rustkit-engine, `--features headless`:
 6. **`…::two_frames_keep_their_globals_apart`** (flag on): each benchmark's isolation.
 7. **`…::frames_off_write_runs_no_script`** (flag off).
 8. **[R4] `…::no_microtask_checkpoint_between_written_scripts`** (flag on): written script 1 queues a promise reaction that sets a flag; written script 2 records the flag as unset. After the outer script, the flag is set.
+10. **Phase 2a** `frames_sync_blank_tests::a_frame_inside_a_frame_becomes_a_browsing_context` (flag on): as above.
 9. **[R2] `frames_sync_blank_tests::a_spare_taken_after_the_parent_navigated_is_never_used`** (flag on): build a spare, navigate the parent, insert a frame. The frame is never the old document's spare (its document is fresh, of the new document's origin, with a new time origin).
 
 Plus the stress check: JetStream with frames on runs past its first test. That's a receipt in the code PR, not a unit test.
