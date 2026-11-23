@@ -245,3 +245,26 @@ fn the_pages_own_document_gains_no_open_or_write() {
         );
     }
 }
+
+/// Phase 2a, the ground the spares stand on: a frame made inside a frame is
+/// a browsing context at all (late is fine here). Before, only top-level
+/// pages had frames enabled (`enable_frames`), so a frame inside a frame
+/// never got a window. Chrome: a window whose document is the frame's
+/// contentDocument, whose parent is the outer frame's window.
+#[test]
+fn a_frame_inside_a_frame_becomes_a_browsing_context() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    page.js(
+        "var magic = document.getElementById('magic'); \
+         magic.contentDocument.body.innerHTML = '<iframe id=\"inner\">'; \
+         window.inner = magic.contentDocument.getElementById('inner'); 0",
+    );
+    page.turns("!!window.inner.contentWindow", 20);
+    assert_eq!(
+        page.js(
+            "var w = inner.contentWindow, m = document.getElementById('magic').contentWindow; \
+             [!!w, !!w && w.document === inner.contentDocument, !!w && w.parent === m, !!w && w.top === window].join('|')"
+        ),
+        r#"String("true|true|true|true")"#
+    );
+}
