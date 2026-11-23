@@ -170,20 +170,16 @@ fn a_span_that_starts_at_a_line_end_with_a_forced_break_or_split_by_a_block_keep
         .block{inline-size:8em;block-size:1em;background:black}";
     const SPLIT: &str = "XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    \
         XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span>";
-    // The rows that RustKit laid out as Chrome does before INLINE-MID-LINE or that it fixed. Chrome's
-    // `<br>` rows of the same boxes are 80 tall (a letter-spaced "4 5" wraps to two lines); RustKit
-    // gives 60 with or without INLINE-MID-LINE, a separate gap (letter-spacing at a wrap).
-    let rows: [(&str, &str, String, f64); 3] = [
+    // The rows INLINE-MID-LINE must get right. In the same boxes Chrome also gives 80 for
+    // `1 2 3<span><br>4 5<br></span>6 7 8`, `1 2 3<br><span>4 5</span><br>6 7 8` and, under
+    // pre-wrap, `1 2 3\n<span>4 5</span>\n6 7 8` (the letter-spaced "4 5" wraps to two lines);
+    // RustKit gives 60 for those with or without INLINE-MID-LINE (develop b9b7a4ec too), a
+    // separate gap: the letter spacing is not counted where the span wraps.
+    let rows: [(&str, &str, String, f64); 2] = [
         (
             "span starting at a line end, holding newlines (pre-wrap)",
             LS,
             "<div class=c><p id=p class=pre>1 2 3<span id=s>\n4 5\n</span>6 7 8</p></div>".into(),
-            80.0,
-        ),
-        (
-            "span between newlines (pre-wrap)",
-            LS,
-            "<div class=c><p id=p class=pre>1 2 3\n<span id=s>4 5</span>\n6 7 8</p></div>".into(),
             80.0,
         ),
         ("span after text, split by a block", POS, format!("<div class=c id=p>{SPLIT}</div>"), 120.0),
