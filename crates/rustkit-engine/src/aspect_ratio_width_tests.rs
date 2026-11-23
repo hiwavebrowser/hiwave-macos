@@ -93,3 +93,22 @@ fn a_percentage_height_of_an_auto_height_parent_does_not_drive_the_width() {
     let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
     assert_eq!(got, want);
 }
+
+/// Against a definite containing block the percentage is definite, so it
+/// drives the width across the ratio like a length (Chrome, each in a
+/// `height:200px` parent inside the 600px one): 50%/2 200x100;
+/// calc(50% + 10px)/2 220x110; 100%/10 2000x200 (not clamped to the
+/// parent); border-box with padding 200x100.
+#[test]
+fn a_percentage_height_of_a_definite_parent_drives_the_width() {
+    let got = sizes(
+        r#"<div style="height:200px"><div id="d1" style="height:50%;aspect-ratio:2">x</div></div>
+<div style="height:200px"><div id="d2" style="height:calc(50% + 10px);aspect-ratio:2">x</div></div>
+<div style="height:200px"><div id="d3" style="height:100%;aspect-ratio:10">x</div></div>
+<div style="height:200px"><div id="d4" style="height:50%;aspect-ratio:2;padding:10px;box-sizing:border-box">x</div></div>"#,
+        &["d1", "d2", "d3", "d4"],
+    );
+    let want = [("d1", 200.0, 100.0), ("d2", 220.0, 110.0), ("d3", 2000.0, 200.0), ("d4", 200.0, 100.0)];
+    let want: Vec<(String, f32, f32)> = want.iter().map(|(i, w, h)| (i.to_string(), *w, *h)).collect();
+    assert_eq!(got, want);
+}
