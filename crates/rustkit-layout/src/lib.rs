@@ -2794,7 +2794,12 @@ impl LayoutBox {
                 let content = b.dimensions.content;
                 let first_top = top.unwrap_or(content.y);
                 if f.len() > 1 {
-                    let line_height = content.height / f.len() as f32;
+                    // The lines step by the run's pitch where SET2 gave it one (the strut union,
+                    // taller than the run's own line-height); the last line is only the run's
+                    // own, so the average of the content height undercounts the drop
+                    // (WRAPPED-SPAN-STRUT: 58.07 for Chrome's 59.375). A run that starts mid-line
+                    // drops by its offset below the first fragment too (INLINE-MID-LINE).
+                    let line_height = b.text_line_pitch.unwrap_or(content.height / f.len() as f32);
                     let below = (content.y - first_top).max(0.0);
                     *drop = drop.max(below + (f.len() as f32 - 1.0) * line_height);
                     *reach = reach.max(content.y + content.height);
@@ -7321,6 +7326,18 @@ impl LayoutBox {
                     {
                         // SET2 (see the split run): the strut union per line.
                         let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
+                        // WRAPPED-SPAN-STRUT: SET2 steps the lines by the strut union, but each
+                        // line's baseline is also the LARGER ascent below its top, and the span
+                        // was left at its own half-leading. When the strut reaches higher above
+                        // the baseline than the run's box, the run sits that much lower on every
+                        // line (Chrome for Testing 148: a 12.8px span with line-height 1.5 in a
+                        // 16px Segoe UI block sits 17 - 15 = 2 lower; under Arial the two are
+                        // equal). Only an inline that starts its line: one after other content
+                        // shares a baseline the recorded-lines pass seats.
+                        let seat = (strut.0 - own.0).max(0.0);
+                        if wrapped_pitch.is_some() && cursor_x == 0.0 && seat > 0.0 {
+                            crate::flex::translate_subtree(child, 0.0, seat);
+                        }
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,
@@ -8607,6 +8624,18 @@ impl LayoutBox {
                     {
                         // SET2 (see the split run): the strut union per line.
                         let (own, lh, pitch) = wrapped_pitch.unwrap_or(((0.0, 0.0), line_height, line_height));
+                        // WRAPPED-SPAN-STRUT: SET2 steps the lines by the strut union, but each
+                        // line's baseline is also the LARGER ascent below its top, and the span
+                        // was left at its own half-leading. When the strut reaches higher above
+                        // the baseline than the run's box, the run sits that much lower on every
+                        // line (Chrome for Testing 148: a 12.8px span with line-height 1.5 in a
+                        // 16px Segoe UI block sits 17 - 15 = 2 lower; under Arial the two are
+                        // equal). Only an inline that starts its line: one after other content
+                        // shares a baseline the recorded-lines pass seats.
+                        let seat = (strut.0 - own.0).max(0.0);
+                        if wrapped_pitch.is_some() && cursor_x == 0.0 && seat > 0.0 {
+                            crate::flex::translate_subtree(child, 0.0, seat);
+                        }
                         if let Some(start) = line_start_index {
                             lines.push((
                                 start,

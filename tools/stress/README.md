@@ -235,10 +235,12 @@ against earlier runs.
 
 ## Raising the live-turn watchdog (blocker hunts only)
 
-The engine stops one turn's JavaScript after 5000 ms (`EngineConfig::live_turn_budget_ms`). Chrome has
-no such stop, and a suite with a long computation in one turn dies at it: MotionMark 1.3.2's end-of-test
-analysis (2500 bootstrap iterations) takes 3-8 s on a Windows release build, and the stop ends the
-animation loop and every later test. To list everything that stops a suite in one run:
+Since 2026-11-21 (Pete) a running live script is stopped at 30 s (`rustkit_engine::LIVE_SCRIPT_STOP_MS`,
+`EngineConfig::live_script_stop_ms`; the app and parity-capture with `--interrupt-scripts`), apart from
+the turn's 5000 ms allowance of script time (`EngineConfig::live_turn_budget_ms`), which only decides
+whether another callback starts in the turn (frame pacing). Until then the allowance was also the stop:
+MotionMark 1.3.2's end-of-test analysis (2500 bootstrap iterations, 3-8 s) died at it, and the stop ended
+the animation loop and every later test. Chrome has no stop at all. To raise both for a blocker hunt:
 
     HIWAVE_STRESS_TURN_BUDGET_MS=60000 python3 tools/stress/run.py --suite motionmark --engine hiwave-headless --binary <parity-capture>
 
@@ -248,12 +250,13 @@ animation loop and every later test. To list everything that stops a suite in on
   without a raised budget starts the app with the variable removed, whatever the shell had. The app
   honours it only beside `HIWAVE_CONSOLE_LOG` (which this harness always sets and a normal launch does
   not have) and only up to 300000 ms; run.py refuses more for the app, and refuses the variable in
-  `--env` (it would not be recorded). An app started any other way is unchanged: 5000 ms.
+  `--env` (it would not be recorded). An app started any other way is unchanged: 5000 ms allowance,
+  30 s stop.
 - Off unless set; the engine's default does not change. Whole milliseconds, 1 to 3600000; above the run's
   wall limit it is clamped to that limit.
-- It raises more than the stop: the same number is the turn's whole allowance of script time
-  (`lib.rs`, the live turn's `install_script_js`), so a raised run paces frames differently even when no
-  single callback runs long. Fine for finding blockers; not a measurement of the default engine.
+- It raises the allowance, and the stop with it (the stop is never below the allowance), so a raised run
+  paces frames differently even when no single callback runs long. Fine for finding blockers; not a
+  measurement of the default engine.
 - Said loudly at the start and in the closing line (run.py and parity-capture both print it), and recorded
   as `live_turn_budget_ms` in the run record (`null` for a normal run). `report.py` leaves such runs out,
   and never mixes them with default runs; `report.py --raised-budget` reports them on their own.
