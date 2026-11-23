@@ -21,12 +21,30 @@ struct Page {
     _server: crate::script_net_tests::Server,
 }
 
+/// /chain/0 .. /chain/39, each framing the next (`Page::load`'s routes).
+const CHAIN: [&str; 40] = [
+    "/chain/0", "/chain/1", "/chain/2", "/chain/3", "/chain/4", "/chain/5", "/chain/6", "/chain/7", "/chain/8", "/chain/9",
+    "/chain/10", "/chain/11", "/chain/12", "/chain/13", "/chain/14", "/chain/15", "/chain/16", "/chain/17", "/chain/18", "/chain/19",
+    "/chain/20", "/chain/21", "/chain/22", "/chain/23", "/chain/24", "/chain/25", "/chain/26", "/chain/27", "/chain/28", "/chain/29",
+    "/chain/30", "/chain/31", "/chain/32", "/chain/33", "/chain/34", "/chain/35", "/chain/36", "/chain/37", "/chain/38", "/chain/39",
+];
+
 impl Page {
     fn load(nested_contexts: bool, page: &str) -> Self {
-        let server = serve_routes(vec![
+        let mut routes = vec![
             ("/", "text/html", page.to_string()),
             ("/next.html", "text/html", "<!doctype html><body><iframe id=n></iframe></body>".to_string()),
-        ]);
+            // A page that frames itself (Chrome nests it once).
+            ("/self", "text/html", "<!doctype html><body><iframe src=/self></iframe></body>".to_string()),
+            // A frame whose document has a frame of its own.
+            ("/nests.html", "text/html", "<!doctype html><body><iframe src=/leaf.html></iframe></body>".to_string()),
+            ("/leaf.html", "text/html", "<!doctype html><body>leaf</body>".to_string()),
+        ];
+        // A chain of distinct URLs, each framing the next.
+        for (i, path) in CHAIN.iter().enumerate() {
+            routes.push((path, "text/html", format!("<!doctype html><body><iframe src=/chain/{}></iframe></body>", i + 1)));
+        }
+        let server = serve_routes(routes);
         let config = EngineConfig { nested_contexts, post_load_requests_live: true, ..EngineConfig::default() };
         let mut engine = Engine::new(config).expect("engine");
         let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view");
@@ -41,6 +59,10 @@ impl Page {
 
     fn js(&mut self, script: &str) -> String {
         self.engine.execute_script(self.view, script).unwrap()
+    }
+
+    fn served(&self, path: &str) -> usize {
+        self._server.served(path).len()
     }
 
     fn turns(&mut self, done: &str, max: usize) -> bool {
@@ -267,4 +289,46 @@ fn a_frame_inside_a_frame_becomes_a_browsing_context() {
         ),
         r#"String("true|true|true|true")"#
     );
+}
+
+/// How many frames down, through each level's first iframe, have a window
+/// and a body (Chrome's probe in docs/diagnostics/2026-11-23, same walk).
+const DEPTH: &str = "(function () { var d = 0, w = window; while (d < 100) { var f = w.document.querySelector('iframe'); \
+    if (!f || !f.contentWindow || !f.contentDocument || !f.contentDocument.body) break; d++; w = f.contentWindow; } return d; })()";
+
+/// Atlas's condition on phase 2a: a page that frames itself does not recurse.
+/// Chrome 148 (a top page that is /self) nests it exactly once: its
+/// self-frame loads, that frame's self-frame is left blank. Blink allows one
+/// level of self-reference: a frame is not loaded when its URL is already the
+/// URL of two of its ancestors. Here the top page is `/`, so /self loads in
+/// the first frame and once inside it (the one self-reference); the third is
+/// left blank: depth 3 by the walk (a blank frame has a body), /self fetched
+/// twice.
+#[test]
+fn a_page_that_frames_itself_nests_once() {
+    let mut page = Page::load(true, "<!doctype html><body><iframe src=/self></iframe></body>");
+    page.turns("false", 30);
+    assert_eq!(page.js(DEPTH), "Number(3.0)");
+    assert_eq!(page.served("/self"), 2, "the page's own frame and one self-frame inside it");
+}
+
+/// A chain of distinct URLs stops at the nesting cap (16 levels). A stated
+/// deviation: Chrome caps the frame count, not the depth, and was 149 deep
+/// after 3 s on the same chain; JetStream needs 2.
+#[test]
+fn a_chain_of_frames_stops_at_the_depth_cap() {
+    let mut page = Page::load(true, "<!doctype html><body><iframe src=/chain/0></iframe></body>");
+    page.turns("false", 80);
+    assert_eq!(page.js(DEPTH), "Number(16.0)");
+    assert_eq!(page.served("/chain/16"), 0, "nothing below the cap is fetched");
+}
+
+/// A sandboxed frame (no allow-scripts) gets no browsing context, so no
+/// frames of its own: its document's frame is never requested.
+#[test]
+fn a_sandboxed_frame_gets_no_frames_of_its_own() {
+    let mut page = Page::load(true, "<!doctype html><body><iframe sandbox src=/nests.html></iframe></body>");
+    page.turns("false", 20);
+    assert_eq!(page.served("/leaf.html"), 0);
+    assert_eq!(page.js("String(document.querySelector('iframe').contentWindow)"), r#"String("null")"#);
 }
