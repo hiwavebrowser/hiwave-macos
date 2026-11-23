@@ -1,6 +1,6 @@
 # JETSTREAM-IFRAME-SYNC: a frame's about:blank document at insertion, and document.open/write
 
-Status: design for review (Atlas, as the frames author), 2026-11-23. No code yet.
+Status: Option B approved by Atlas (frames author) on #1434 with six changes, folded in below (marked **[R1]**…**[R6]**), 2026-11-23. No code yet.
 Plan row: JETSTREAM-IFRAME-SYNC (stress suites rank first).
 
 ## Why
@@ -75,12 +75,22 @@ Give the realm-building operations a context-level form, `fn …(state: &RefCell
 Build each child **before** it's needed, at a drain, where nothing is running. Inside the call, *attaching* it needs only JS calls on objects the parent already holds.
 
 1. **The spare.**
-   - When a page's bindings get `enable_frames` (nested contexts on), and again after each drain that used one, the engine builds a **spare child**:
+   - **[R1] Built lazily, never at page load.** A document's spare is built:
+     - at the **first frame drain of that document** (its first iframe actually drained); and
+     - when a document is **attached as a frame**. The frame's own spare is built at its adoption, so that a script inside it can make a frame synchronously.
+   - Pages with nested contexts on but no iframes pay nothing.
+   - **JetStream 2.2's driver** (browserbench.org/JetStream2.2/JetStreamDriver.js) only looks the outer frame up (`document.getElementById("magic")`); script never creates it. So `magic` comes from the page's markup and is drained at load, before any benchmark runs. Its adoption builds the spare **in `magic`'s document**, and that spare is what `magic.contentDocument.body.innerHTML = "<iframe id=\"magicframe\">"` takes, synchronously. (The fetched index.html text lost its tags, so the `<iframe id="magic">` tag itself is inferred, not quoted.)
+   - After a spare is used, the drain builds the next one, as the bullets below say.
+   - **The spare's contents:** the engine builds it with:
      - `new_child()`;
      - `set_document` of a fresh `about:blank` document (`<html><head></head><body></body></html>`);
      - `set_location(about:blank)`.
    - It is stored on the parent (`DomBindings`), with its global and its `__rk.becomeFrame` reachable as JS objects from the parent's `__rk.frames`.
-   - **Depth 2:** the spare has its own spare, because JetStream nests one frame inside another within a single statement. A spare taken from depth 1 brings its own spare; the drain refills both.
+   - **Depth:** with the lazy rule above, JetStream needs one level in a single statement (`magicframe` inside the already-adopted `magic`). A spare taken from one level still brings its own spare, built with it, so a frame made inside a just-attached frame in the same statement works too. The drain refills both. Deeper synchronous nesting falls back (point 4).
+   - **[R2] A spare belongs to one document.**
+     - Both are discarded when that document navigates (a new `nav_id`, the same test that already drops a navigated document's frames) or its origin changes.
+     - A spare is never handed across origins: the take checks the spare's owner document is the inserting document, and its origin is the same.
+     - Its clocks (`performance.timeOrigin`, `document.timeline`) are set **at adoption**, not at build, so a spare built 10 s earlier doesn't report a 10 s-old clock. Adoption re-runs the time-origin setup (`clock_origin`) that `build_in` does today.
 2. **At insertion** (`web_frames.js` `navigate`, for an initial `about:blank`, same-origin by definition, and with no `sandbox` attribute):
    - take the parent's spare in JS: the same handoff as `attach_frame`, as plain calls (`__rk.frames.attach(node, spareGlobal)`, then the spare's `__rk.becomeFrame(up, top, el)`);
    - mark the request **prebuilt** with the spare's id.
@@ -91,11 +101,15 @@ Build each child **before** it's needed, at a drain, where nothing is running. I
    - the frame record;
    - then it builds the next spare.
    - `attach_frame` is not called again: the attach already happened. A guard checks the frame still holds that window. If not (the frame left in the same script), the child is dropped as today.
-4. **No spare:** depth > 2, a spare still being built, or one taken already this script. Fall back to today's path: `null` until the drain, with the stated limit kept. JetStream needs depth 2.
+4. **No spare:** deeper than the spare chain, a document whose first frame drain hasn't happened yet, or a spare already taken this script. Fall back to today's path: `null` until the drain, with the stated limit kept.
 5. **#1421's module map:** maps are keyed by (realm index, URL) (`ModuleHost::entries`). A spare is a realm with an index like any child, so it gets its own map. Taking it changes nothing; dropping it drops its map entries as `drop_child` does today.
 
-- **Cost:** two extra realms per page **with nested contexts on**, at page load and after a frame-using drain. `build_in` installs the whole page environment, so this is measurable. I'll measure the time and memory and report them.
-- **Flag off: no cost.**
+- **Cost:** one spare (plus its own) per document that has frames, built off the inserting script's path (at drains). `build_in` installs the whole page environment, so this is measurable.
+- **[R5] The cost gate, decided now:**
+  - The code PR measures build time and memory per spare pair.
+  - It also measures frames-on page load on the parity campaign and the chrome board: median of 3 runs, spares on vs off.
+  - If page load regresses by **more than 5%**, the spare build moves off the load path, or we revisit Option A.
+- **Flag off: no spares, no cost.**
 
 Recommendation: **B.** It's contained to rustkit-bindings (`web_frames.js`, `DomBindings`) and the engine's frame drain, and it needs no rustkit-js core change. A can come later if another synchronous host operation needs the same thing.
 
@@ -114,7 +128,13 @@ These are needed under either option. Today they don't exist on `Document.protot
   - At a completed inline `<script>`, the write host function enters the document's realm, runs the script, and restores the realm.
   - A `<script src>` with a `blob:` URL is read synchronously from the runtime's blob store and run the same way. That's what JetStream needs: parser-blocking, and blobs are local.
   - Any other `src` is out of scope for this row: stated as a limit, skipped with a console note, not faked.
+  - Each written script runs as a **classic script**: Boa `Script` parse and evaluate, with the document's realm entered. Not an indirect `eval`: that would scope top-level `let`/`class` to the call and break scripts that share declarations, as JetStream's do.
   - The written scripts run under the running script's deadline. They are part of the same task, so the 30 s live stop still applies.
+  - **[R3] Errors.** An uncaught exception in a written script is reported to the **frame's** `window.onerror` / `error` event, as Chrome does (JetStream sets `window.onerror = top.currentReject` there).
+    - The write host function catches it. It calls the frame realm's own `__rk.reportError(e)` as a plain JS function, reached through the frame's global, which the parent already holds. That's the path callbacks use today (web_components.js, web_mutation_observer.js, …), and it needs no `RuntimeState`.
+    - The error then goes on to the next written script, as in Chrome.
+    - **Our logs carry shapes, not source:** the frame's node id, the script's ordinal in the write, its length, and the error's class and message, through `tracing`. The runtime's source registry (`ScriptSources`) isn't reachable from the call, so written scripts don't appear in its stack-trace source map. That's stated as a limit.
+  - **[R4] Microtasks.** Inside `write` the JS stack isn't empty, so, as in Chrome, **no microtask checkpoint runs between written scripts.** A promise reaction queued by written script 1 has not run when written script 2 starts. It runs at the outer script's checkpoint. The write host function never drains jobs; a test pins it.
 - **`close()`:** ends the input, flushes the parser, and sets `readyState` to `complete`.
 - **The write parser:** rustkit-html's tree builder fed incrementally, or, if it can't be fed incrementally, a buffer that parses whole fragments up to each `</script>`. I'll check rustkit-html before coding and say which in the code PR. The order guarantees must match Chrome's receipt either way.
 
@@ -125,6 +145,7 @@ There is no child realm, and that doesn't change.
 - `contentDocument` will answer an **inert** `about:blank` document at insertion: `createHTMLDocument('')`-like, URL `about:blank`, `readyState` `complete`, in the parent realm. So `contentDocument` is never `null` after insertion, as Atlas asked.
 - `open` / `write` / `close` parse into it, but **run no scripts**: flag off, frames have no browsing context to run them in. This is stated as a limit.
 - So JetStream still has no score with the flag off; with it on, it should run its 59 non-wasm tests.
+- **[R6] This changes what real-site scripts see.** Ad and embed code often checks `iframe.contentDocument` and then writes into it; it would now find a document where it found `null`. The code PR runs the **19-site A/B** (develop vs the branch, frames off). Any mover is judged against Chrome by hand, and the PR calls this out.
 
 ## Red tests (before code; Chrome 148 numbers from the receipt)
 
@@ -140,12 +161,15 @@ rustkit-engine, `--features headless`:
 5. **`…::a_written_blob_script_runs_before_the_markup_after_it`** (flag on).
 6. **`…::two_frames_keep_their_globals_apart`** (flag on): each benchmark's isolation.
 7. **`…::frames_off_write_runs_no_script`** (flag off).
+8. **[R4] `…::no_microtask_checkpoint_between_written_scripts`** (flag on): written script 1 queues a promise reaction that sets a flag; written script 2 records the flag as unset. After the outer script, the flag is set.
+9. **[R2] `frames_sync_blank_tests::a_spare_taken_after_the_parent_navigated_is_never_used`** (flag on): build a spare, navigate the parent, insert a frame. The frame is never the old document's spare (its document is fresh, of the new document's origin, with a new time origin).
 
 Plus the stress check: JetStream with frames on runs past its first test. That's a receipt in the code PR, not a unit test.
 
 ## Limits, stated
 
-- Spare depth is 2; deeper synchronous nesting falls back to today's late attach.
+- Synchronous frames go one spare chain deep (enough for JetStream); deeper nesting in one statement falls back to today's late attach.
+- Written scripts don't appear in the runtime's source registry (their logs carry shapes).
 - `write` runs inline and `blob:` scripts only.
 - No top-document `open()` navigation.
 - Flag off runs no written script.
