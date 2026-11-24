@@ -5989,6 +5989,9 @@ impl LayoutBox {
         //
         // Only the lengths that actually depend on the base are recomputed:
         // a `Px` height is already right, and an `auto` one is its content.
+        // Set when the ratio below gives this box another width than the one
+        // its children were laid out at: they are laid out again at it.
+        let mut ratio_rewidth = false;
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
             // With an aspect-ratio the width follows that height: the flow
             // pass had no base and shrank it to its content (Chrome 148:
@@ -5997,6 +6000,7 @@ impl LayoutBox {
             if self.style.aspect_ratio.is_some() && matches!(self.box_type, BoxType::Block) {
                 self.percent_height_is_auto = false;
                 self.calculate_block_width_based(containing_block, Some(containing_block.content.height));
+                ratio_rewidth = (self.dimensions.content.width - origin_w).abs() > 0.01;
             }
             self.calculate_block_height(Some(containing_block.content.height));
         }
@@ -6065,7 +6069,10 @@ impl LayoutBox {
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
-        } else if self.needs_percent_relayout_after_reanchor(containing_block) {
+        } else if ratio_rewidth || self.needs_percent_relayout_after_reanchor(containing_block) {
+            // (Also when the ratio re-derived the width: the children were
+            // laid out at the flow pass's width, so a centred line stayed at
+            // x=0 and text did not wrap to the new width; #1443 R1 nit 1.)
             // The block path has the same hole for percentages: the children
             // resolved `height: 100%` before this box had a height, so they
             // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
