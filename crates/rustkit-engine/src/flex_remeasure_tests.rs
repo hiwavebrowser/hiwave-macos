@@ -150,3 +150,41 @@ fn nested_flex_pages_lay_out_identically_with_the_memo_off_and_on_and_as_chrome(
     }
     assert!(wrong.is_empty(), "nested flex pages:\n{}", wrong.join("\n"));
 }
+
+/// FLEX-MEMO: NewsSite's shape: a column flex page whose navbar and article list are rows of small
+/// flex containers (an icon and a label each), nested in flex at every level. With the memo on, each
+/// flex container is laid out about once per pass: NewsSite-Nuxt made ~3,800 flex-container layouts
+/// per forced layout for at most ~330 containers, and the memo, which wrapped only block children,
+/// saw almost none of them (each container's subtree is small, and the flex algorithm's own
+/// recursion bypassed it).
+#[test]
+fn with_the_memo_on_nested_small_flex_rows_are_laid_out_about_once_each() {
+    let rows: String = (0..24)
+        .map(|i| format!("<li class=r><span class=i>*</span><span class=l>Item {i}</span></li>"))
+        .collect();
+    let css = "body{margin:0;font:13px/1.5 Arial} #page{display:flex;flex-direction:column} \
+               #nav{display:flex;flex-wrap:wrap;gap:4px} ul{display:flex;flex-direction:column;margin:0;padding:0} \
+               .r{display:flex;align-items:center;gap:6px} .i{display:flex;width:16px} .l{display:flex;flex:1}";
+    let body = format!(
+        "<div id=page><div id=nav><ul id=u1>{rows}</ul><ul id=u2>{rows}</ul></div><main id=m><ul id=u3>{rows}</ul></main></div>"
+    );
+    let page = format!("<!doctype html><style>{css}</style>{body}");
+    let containers = 3 + 3 + 3 * 24 * 3;
+    for (mode, want) in [(MemoMode::On, true), (MemoMode::Off, false)] {
+        set_memo_mode(Some(mode));
+        set_memo_min_subtree(None);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 800 }).expect("view");
+        rustkit_layout::take_flex_layouts();
+        engine.load_html(view, &page).expect("load_html");
+        let layouts = rustkit_layout::take_flex_layouts();
+        set_memo_mode(None);
+        eprintln!("memo {mode:?}: {layouts} flex-container layouts for {containers} flex containers");
+        if want {
+            assert!(
+                layouts * 2 <= containers * 3,
+                "memo on: {layouts} flex-container layouts for {containers} flex containers (want at most 1.5 each)"
+            );
+        }
+    }
+}

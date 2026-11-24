@@ -460,6 +460,7 @@ fn layout_flex_container_at(
     used_inner_height: Option<f32>,
     resolved_percent_inner_height: Option<f32>,
 ) {
+    crate::count_flex_layout();
     // A flex item is a formatting root (css-flexbox-1 §3): it encloses its
     // floats. Marked before anything lays an item out.
     for child in &mut container.children {
