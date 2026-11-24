@@ -7257,12 +7257,32 @@ const WRAPPERS_JS: &str = r#"
     //      global document, attached to it or not (`createElement('body')`
     //      forwards too; the spec never asks whether it is THE body element).
     function isBodyOrFrameset(t) {
-        if (t.nodeType !== 1) return false;
+        // The Window is not a node: asking it for `nodeType` would be named access on the
+        // Window, a walk of the whole document per event (STRESS-SPEED).
+        if (t === g || t.nodeType !== 1) return false;
         var n = t.localName;
         return n === 'body' || n === 'frameset';
     }
     function windowHandlerTarget(t) {
         return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
+    // `name` on the Window, its prototypes and EventTarget's, but never named access on the
+    // Window (web_named_access.js's WindowProperties, which walks the whole document): an
+    // element an id or name picks out is not an event handler. Every event that reaches the
+    // Window asks for its `on<type>` (STRESS-SPEED: `ontodo-add` and friends on Speedometer).
+    // The helpers of install time: a page that replaces them (or `Function.prototype.call`)
+    // does not change what dispatch reads.
+    var winProtoOf = Object.getPrototypeOf, winOwnDesc = Object.getOwnPropertyDescriptor;
+    var winTag = Function.prototype.bind.bind(Function.prototype.call)(Object.prototype.toString);
+    var winBindCall = Function.prototype.bind.bind(Function.prototype.call);
+    function windowProperty(name) {
+        var W = g.Window, named = W && winProtoOf(W.prototype);
+        for (var o = g; o; o = winProtoOf(o)) {
+            if (o === named && winTag(o) === '[object WindowProperties]') continue;
+            var d = winOwnDesc(o, name);
+            if (d) return d.get ? winBindCall(d.get)(g) : d.value;
+        }
+        return undefined;
     }
     function handlerOf(t, type) {
         if (PLAIN.has(t)) return undefined;
@@ -7272,6 +7292,7 @@ const WRAPPERS_JS: &str = r#"
         if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
         var a = ASSIGNED.get(t);
         if (a && type in a) return a[type];
+        if (t === g) return windowProperty('on' + type);
         if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
         // A type with no accessor (a custom event) is still a data property.
         if (!HANDLER_TYPES[type]) {
