@@ -150,6 +150,9 @@ pub(crate) struct MemoKey {
     edges: u64,
     margin: MarginCollapseContext,
     inputs: u64,
+    /// FLEX-REMEASURE: the box shares its parent's float context, which is empty (a box whose shared
+    /// context holds floats is not memoised): a restore writes the empty context back.
+    shares_floats: bool,
 }
 
 /// The fields layout writes on a descendant, positions relative to the memoised box's content
@@ -259,18 +262,29 @@ fn hash_edges(e: &EdgeSizes, h: &mut impl std::hash::Hasher) {
 /// purpose: they differ between the calls the memo is meant to match.
 fn input_fingerprint(b: &LayoutBox) -> u64 {
     use std::hash::{Hash, Hasher};
-    fn walk(b: &LayoutBox, h: &mut impl Hasher) {
+    // FLEX-REMEASURE: `formatting_root` changes a box's child layout only when floats are left in
+    // its children's float context at the end (`layout_block_children_with_collapse_run` then
+    // grows the box to contain them), so it is part of the key only for a subtree that holds a
+    // float. A flex item is not a formatting root in the block pre-pass and is one in the flex
+    // pass: keyed on it unconditionally, the two passes never shared a result.
+    fn walk(b: &LayoutBox, h: &mut impl Hasher, roots: &mut Vec<bool>, floats: &mut bool) {
         b.children.len().hash(h);
         for c in &b.children {
             c.percent_height_is_auto.hash(h);
             c.context_floats.is_some().hash(h);
-            c.formatting_root.hash(h);
-            walk(c, h);
+            roots.push(c.formatting_root);
+            *floats |= c.float != Float::None;
+            walk(c, h, roots, floats);
         }
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    b.formatting_root.hash(&mut h);
-    walk(b, &mut h);
+    let (mut roots, mut floats) = (Vec::new(), false);
+    walk(b, &mut h, &mut roots, &mut floats);
+    floats.hash(&mut h);
+    if floats {
+        b.formatting_root.hash(&mut h);
+        roots.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -289,6 +303,7 @@ fn key_for(b: &LayoutBox, definite_height: Option<f32>, margin: &MarginCollapseC
         edges: h.finish(),
         margin: margin.clone(),
         inputs: input_fingerprint(b),
+        shares_floats: b.context_floats.is_some(),
     }
 }
 
@@ -553,7 +568,10 @@ impl LayoutBox {
         if mode == MemoMode::Off
             || self.style.display.is_table()
             || !float_context.is_empty()
-            || self.context_floats.is_some()
+            // FLEX-REMEASURE: a shared float context that holds floats places the subtree beside
+            // them; an empty one is memoised (`shares_floats` in the key; a result that adds floats
+            // to it is not recorded).
+            || self.context_floats.as_ref().is_some_and(|f| !f.is_empty())
             || !descendants_at_least(self, memo_min_subtree())
         {
             return self.layout_block_children_with_collapse_run(margin_context, float_context, definite_height);
@@ -582,6 +600,10 @@ impl LayoutBox {
                         });
                         self.dimensions.content.height = entry.end_height;
                         *margin_context = entry.end_margin.clone();
+                        if entry.key.shares_floats {
+                            // The recorded run left the shared context empty (see the store below).
+                            self.context_floats = Some(FloatContext::new());
+                        }
                         memo.entries.insert(0, entry);
                         self.layout_memo = Some(memo);
                         return;
@@ -627,6 +649,11 @@ impl LayoutBox {
             count(|c| c.misses += 1);
         }
 
+        // FLEX-REMEASURE: the key is taken again after the run, from the tree the run leaves: a first
+        // layout prepares the tree (anonymous boxes and the like), so the next call, which sees the
+        // prepared tree, could never match a result recorded under the key taken before it.
+        let margin_in = margin_context.clone();
+        let shares_in = key.shares_floats;
         self.layout_block_children_with_collapse_run(margin_context, float_context, definite_height);
 
         if verifying {
@@ -656,10 +683,16 @@ impl LayoutBox {
                 );
             }
         }
-        if hit.is_none() {
+        // FLEX-REMEASURE: a run that added floats to a shared context cannot be replayed by a
+        // restore (the floats are not in the snapshot), so it is not recorded.
+        let added_floats = self.context_floats.as_ref().is_some_and(|f| !f.is_empty());
+        if hit.is_none() && added_floats {
+            count(|c| c.refused += 1);
+        } else if hit.is_none() {
             match snapshot(self) {
                 Some(outputs) => {
                     count(|c| c.stored += 1);
+                    let key = MemoKey { shares_floats: shares_in, ..key_for(self, definite_height, &margin_in) };
                     memo.entries.insert(
                         0,
                         MemoEntry::new(key, outputs, self.dimensions.content.height, margin_context.clone()),

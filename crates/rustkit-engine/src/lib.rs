@@ -528,6 +528,8 @@ mod svg_shape_visual_rect_tests;
 mod logical_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod window_event_path_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_remeasure_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod emoji_presentation_fallback_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]

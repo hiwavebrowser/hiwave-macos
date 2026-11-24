@@ -1,0 +1,142 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "label": "editor",
+      "css": "html,body{margin:0;height:100%} body{display:flex;padding:5px;box-sizing:border-box;font:13px/1.5 Arial} #app{flex:1;display:flex;flex-direction:column} #controls{display:flex;padding-bottom:5px} #editor{flex:1;overflow:auto;padding:2px 5px} p{margin:0 0 8px}",
+      "body": "<div id=app><div id=controls><button id=b>Create</button></div><div id=editor><div id=pm><p id=p0>Paragraph 0: word word word word word word word word word word word word word word word word word word word word </p><p id=p1>Paragraph 1: word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p2>Paragraph 2: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p3>Paragraph 3: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p4>Paragraph 4: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p5>Paragraph 5: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p6>Paragraph 6: word word word word word word word word word word word word word word word word word word word word word word </p><p id=p7>Paragraph 7: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p8>Paragraph 8: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p9>Paragraph 9: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p10>Paragraph 10: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p11>Paragraph 11: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p12>Paragraph 12: word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p13>Paragraph 13: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p14>Paragraph 14: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p15>Paragraph 15: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p16>Paragraph 16: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p17>Paragraph 17: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p18>Paragraph 18: word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p19>Paragraph 19: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p20>Paragraph 20: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p21>Paragraph 21: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p22>Paragraph 22: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p23>Paragraph 23: word word word word word word word word word word word word word word word word word word word word word </p><p id=p24>Paragraph 24: word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p25>Paragraph 25: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p26>Paragraph 26: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p27>Paragraph 27: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p28>Paragraph 28: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p29>Paragraph 29: word word word word word word word word word word word word word word word word word word word word word word word </p></div></div></div>",
+      "rects": {
+        "app": [
+          5,
+          5,
+          1270,
+          790
+        ],
+        "controls": [
+          5,
+          5,
+          1270,
+          26
+        ],
+        "b": [
+          5,
+          5,
+          56.015625,
+          21
+        ],
+        "editor": [
+          5,
+          31,
+          1270,
+          764
+        ],
+        "pm": [
+          10,
+          33,
+          1260,
+          1129
+        ]
+      }
+    },
+    {
+      "label": "row stretch, percent child",
+      "css": "body{margin:0;font:13px/1.5 Arial} #row{display:flex;height:200px} #a{flex:1;padding:4px} #b{flex:2;display:flex;flex-direction:column} #b1{height:50%} #b2{flex:1;padding:3px}",
+      "body": "<div id=row><div id=a><p id=p0>Paragraph 0: word word word word word word word word word word word word word word word word word word word word </p><p id=p1>Paragraph 1: word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p2>Paragraph 2: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p></div><div id=b><div id=b1>half</div><div id=b2><p id=p0>Paragraph 0: word word word word word word word word word word word word word word word word word word word word </p><p id=p1>Paragraph 1: word word word word word word word word word word word word word word word word word word word word word word word word word word word </p></div></div></div>",
+      "rects": {
+        "row": [
+          0,
+          0,
+          1280,
+          200
+        ],
+        "a": [
+          0,
+          0,
+          432,
+          200
+        ],
+        "b": [
+          432,
+          0,
+          848,
+          200
+        ],
+        "b1": [
+          432,
+          0,
+          848,
+          96.5
+        ],
+        "b2": [
+          432,
+          96.5,
+          848,
+          103.5
+        ]
+      }
+    },
+    {
+      "label": "column flex, basis 0, nested row",
+      "css": "body{margin:0;font:13px/1.5 Arial} #col{display:flex;flex-direction:column;height:400px} #top{flex:0 0 auto;padding:6px} #mid{flex:1 1 0;display:flex;min-height:0} #m1{flex:1;overflow:auto;padding:2px} #m2{width:120px}",
+      "body": "<div id=col><div id=top>Top bar</div><div id=mid><div id=m1><p id=p0>Paragraph 0: word word word word word word word word word word word word word word word word word word word word </p><p id=p1>Paragraph 1: word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p2>Paragraph 2: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p3>Paragraph 3: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p4>Paragraph 4: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p5>Paragraph 5: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p6>Paragraph 6: word word word word word word word word word word word word word word word word word word word word word word </p><p id=p7>Paragraph 7: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p8>Paragraph 8: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p9>Paragraph 9: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p10>Paragraph 10: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p11>Paragraph 11: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p></div><div id=m2>side</div></div></div>",
+      "rects": {
+        "col": [
+          0,
+          0,
+          1280,
+          400
+        ],
+        "top": [
+          0,
+          0,
+          1280,
+          31.5
+        ],
+        "mid": [
+          0,
+          31.5,
+          1280,
+          368.5
+        ],
+        "m1": [
+          0,
+          31.5,
+          1160,
+          368.5
+        ],
+        "m2": [
+          1160,
+          31.5,
+          120,
+          368.5
+        ]
+      }
+    },
+    {
+      "label": "nested flex with a margin chain",
+      "css": "body{margin:0;font:13px/1.5 Arial} #o{display:flex} #i{flex:1;display:flex;flex-direction:column} #k{margin:10px 0} #k p{margin:12px 0}",
+      "body": "<div id=o><div id=i><div id=k><p id=p0>Paragraph 0: word word word word word word word word word word word word word word word word word word word word </p><p id=p1>Paragraph 1: word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p2>Paragraph 2: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p><p id=p3>Paragraph 3: word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word </p></div></div></div>",
+      "rects": {
+        "o": [
+          0,
+          0,
+          1280,
+          177.5
+        ],
+        "i": [
+          0,
+          0,
+          1280,
+          177.5
+        ],
+        "k": [
+          0,
+          10,
+          1280,
+          157.5
+        ]
+      }
+    }
+  ]
+}
