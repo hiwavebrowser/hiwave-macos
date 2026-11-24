@@ -531,3 +531,81 @@ fn a_written_script_keeps_its_attributes() {
         r#"String("7/true")"#
     );
 }
+
+/// R1 nits on #1440, each against Chrome's behaviour as Prometheus measured it.
+const NESTED_FRAME: &str = "var magic = document.getElementById('magic'); \
+    magic.contentDocument.body.innerHTML = '<iframe id=\"mf\">'; \
+    var mfEl = magic.contentDocument.getElementById('mf'); var mw = mfEl.contentWindow; window.mw = mw; \
+    var md = mw.document; mw.errors = []; mw.runs = {}; \
+    mw.addEventListener('error', function (e) { mw.errors.push(String(e.message)); }); ";
+
+/// Nit 1: a written script's exception is reported inside write, before the
+/// next written script runs.
+#[test]
+fn a_written_scripts_error_is_reported_inside_write() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(&format!(
+            "{NESTED_FRAME} md.open(); md.write('<script>throw new Error(\"boom\")</script><script>runs.seen = errors.length</script>'); \
+             var now = mw.errors.length; md.close(); [now, mw.runs.seen].join()"
+        )),
+        r#"String("1,1")"#
+    );
+}
+
+/// Nit 2: markup a written script writes goes in where the parser is, before
+/// the rest of the outer chunk (Chrome: `<i>` then `<b>`).
+#[test]
+fn a_nested_write_lands_where_the_parser_is() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(&format!(
+            "{NESTED_FRAME} md.open(); md.write('<body><script>document.write(\"<i id=a></i>\")</script><b id=b></b></body>'); md.close(); \
+             Array.prototype.filter.call(md.body.children, function (c) {{ return c.localName !== 'script'; }}).map(function (c) {{ return c.id; }}).join()"
+        )),
+        r#"String("a,b")"#
+    );
+}
+
+/// Nit 3: a written module script is not run at once as a classic script.
+#[test]
+fn a_written_module_script_does_not_run_as_classic() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    page.js(&format!("{NESTED_FRAME} md.open(); md.write('<script type=module>runs.m = 1;</script>'); md.close(); 0"));
+    assert_eq!(page.js("String(mw.runs.m)"), r#"String("undefined")"#);
+}
+
+/// Nit 4: after the frame is removed, write on the document the page kept
+/// runs no script (Chrome runs none).
+#[test]
+fn write_on_a_removed_frames_document_runs_no_script() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(&format!(
+            "{NESTED_FRAME} window.__ran = 0; mfEl.remove(); md.open(); md.write('<script>top.__ran = 1;</script>'); md.close(); String(window.__ran)"
+        )),
+        r#"String("0")"#
+    );
+}
+
+/// Nit 5: a request the engine refuses (its bound of 256 parked requests is
+/// full) does not take the spare: the document keeps it, and a frame
+/// inserted after the drain still has its window at once.
+#[test]
+fn a_refused_request_does_not_take_the_spare() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(
+            "for (var i = 0; i < 256; i++) { var x = document.createElement('iframe'); x.src = 'http://other.invalid/'; document.body.appendChild(x); } \
+             var r = document.createElement('iframe'); document.body.appendChild(r); String(r.contentWindow === null)"
+        ),
+        r#"String("true")"#,
+        "refused: no window"
+    );
+    page.turns("false", 4);
+    assert_eq!(
+        page.js("var later = document.createElement('iframe'); document.body.appendChild(later); String(later.contentWindow !== null)"),
+        r#"String("true")"#,
+        "the spare stayed with the document"
+    );
+}
