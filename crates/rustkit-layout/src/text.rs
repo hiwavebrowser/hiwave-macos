@@ -2884,11 +2884,12 @@ impl TextShaper {
                 max_width
             };
 
-            // Shape the remaining text to find where we need to break
+            // Shape the remaining text to find where we need to break: a window of it that is
+            // sure to overflow the line (WRAP-WINDOW), or all of it when it is shorter.
             let remaining = &text[line_start..];
-            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+            let (window, shaped) = self.overflowing_window(remaining, font_chain, weight, style, stretch, size, cur_max)?;
 
-            if shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
+            if window.len() == remaining.len() && shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2900,10 +2901,10 @@ impl TextShaper {
                 break;
             }
 
-            // Need to find a break point
-            // Binary search for the right break point
+            // Need to find a break point. Within the window: a break past it cannot fit, since
+            // the window alone overflows the line.
             let break_offset = self.find_line_break(
-                remaining,
+                window,
                 font_chain,
                 weight,
                 style,
@@ -2942,7 +2943,7 @@ impl TextShaper {
                     // does not break after the first character). Minimum one
                     // grapheme so the loop always advances.
                     let boundaries =
-                        rustkit_text::segmentation::grapheme_boundaries(remaining);
+                        rustkit_text::segmentation::grapheme_boundaries(window);
                     let mut fitted = 0usize;
                     for &offset in boundaries.iter().skip(1) {
                         let shaped_prefix = self.shape(
@@ -3018,6 +3019,37 @@ impl TextShaper {
     }
 
     /// Find the best line break point within max_width.
+    /// WRAP-WINDOW: the start of `remaining` that a line of `max_width` cannot hold, shaped:
+    /// grown (512 characters, doubling) until its width passes twice the line plus four ems, or
+    /// all of `remaining` when that is shorter. Shaping the whole rest of a paragraph for every
+    /// line made wrapping it cost the square of its length (Speedometer Editor-TipTap's 270 KB
+    /// document: ~2.6 s a layout). The margin keeps the answers the whole text would give: a
+    /// break opportunity past the window cannot fit, and the line-break rules and the shaping
+    /// around the cut look only a few characters ahead, well inside it.
+    #[allow(clippy::too_many_arguments)]
+    fn overflowing_window<'t>(
+        &self,
+        remaining: &'t str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+    ) -> Result<(&'t str, ShapedRun), TextError> {
+        let enough = 2.0 * max_width.max(0.0) + 4.0 * size.max(1.0);
+        let mut chars = 512usize;
+        loop {
+            let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
+            let window = &remaining[..end];
+            let shaped = self.shape(window, font_chain, weight, style, stretch, size)?;
+            if end == remaining.len() || shaped.metrics.width > enough {
+                return Ok((window, shaped));
+            }
+            chars *= 2;
+        }
+    }
+
     fn find_line_break(
         &self,
         text: &str,
