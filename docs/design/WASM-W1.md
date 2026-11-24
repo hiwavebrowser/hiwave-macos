@@ -145,7 +145,13 @@ storage must never move while the store lives.
 
 - **byteLength** is `initial × 64 KiB`, as in Chrome, whatever the maximum.
 - **No grow in W1.** `memory.grow(n)` with `n > 0` throws `RangeError` from JS and returns −1 to
-  wasm. That's legal: a grow may fail. It's a stated limit, and JetStream's memories have
+  wasm. **Found while building phase 2:** wasmi 2.0.0 does *not* return −1 when wasm's
+  `memory.grow` asks a static buffer for more than it holds: it **panics** ("tried to use too
+  small static buffer"). So the store has a `ResourceLimiter` that refuses any growth past the
+  current size *before* the buffer is asked, which wasm sees as −1. A memory's first allocation
+  is allowed within the per-realm cap, so the limiter also bounds the memories wasmi allocates
+  for module-defined memories. `LimiterError` is public only in `wasmi_core`, a direct dependency
+  at wasmi's pinned version. That's legal: a grow may fail. It's a stated limit, and JetStream's memories have
   `initial == maximum`. `grow(0)` answers the current size. W2 is a Boa patch for an `ArrayBuffer`
   viewing external bytes, so a grow can detach the old buffer and hand out a new one at the new
   size, as the spec says.
