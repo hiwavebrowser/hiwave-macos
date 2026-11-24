@@ -2020,6 +2020,13 @@ impl DomBindings {
     /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
     /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
     /// Off, nothing of it exists (`EngineConfig::nested_contexts`).
+    /// Install `WebAssembly` in this realm (WASM W1; the engine's
+    /// `webassembly` flag, docs/design/WASM-W1.md).
+    pub fn enable_webassembly(&self) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().enable_webassembly()?;
+        Ok(())
+    }
+
     pub fn enable_frames(&self) -> Result<(), BindingError> {
         let queue = self.frame_requests.clone();
         let host = self.dom_host.clone();

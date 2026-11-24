@@ -503,6 +503,8 @@ mod computed_display_tests;
 #[cfg(test)]
 mod empty_block_box_tests;
 #[cfg(test)]
+mod wasm_engine_tests;
+#[cfg(test)]
 mod aspect_ratio_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
@@ -2171,6 +2173,10 @@ pub struct EngineConfig {
     /// Off by default: an iframe stays an empty box with `contentWindow`
     /// null, as before.
     pub nested_contexts: bool,
+    /// `WebAssembly` in every realm (WASM W1, docs/design/WASM-W1.md). Off
+    /// unless `HIWAVE_WEBASSEMBLY=1`: defining it changes what real pages do
+    /// (they take their wasm path), and W1 has stated gaps (no memory grow).
+    pub webassembly: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -2255,6 +2261,7 @@ impl Default for EngineConfig {
             // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
             // frames in a built app or parity-capture before the flip.
             nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
+            webassembly: std::env::var("HIWAVE_WEBASSEMBLY").ok().as_deref() == Some("1"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -7018,7 +7025,9 @@ impl Engine {
                 .set_document(document.clone())
                 .and_then(|_| child.set_location(&target))
                 .and_then(|_| child.set_dimensions(width, height))
-                .and_then(|_| child.enable_net_bridge());
+                .and_then(|_| child.enable_net_bridge())
+                // A frame's realm has WebAssembly too, with the flag on.
+                .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
             let attached = bound.is_ok()
                 && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
             if !attached {
@@ -10850,6 +10859,11 @@ impl Engine {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
                 }
             }
+            if self.config.webassembly {
+                if let Err(e) = bindings.enable_webassembly() {
+                    warn!(error = %e, "WebAssembly did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -11355,6 +11369,11 @@ impl Engine {
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
+            if self.config.webassembly {
+                if let Err(e) = bindings.enable_webassembly() {
+                    warn!(error = %e, "WebAssembly did not install");
                 }
             }
             if let Some(view) = self.views.get_mut(&id) {
