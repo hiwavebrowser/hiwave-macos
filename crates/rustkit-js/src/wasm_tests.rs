@@ -145,3 +145,78 @@ fn a_start_function_calls_its_js_import() {
         "1|SyntaxError:from start"
     );
 }
+
+// ---- Phase 2: Memory (docs/design/WASM-W1.md). Chrome 148:
+// docs/diagnostics/2026-11-24/wasm_memory_cft148.json (tools/parity_oracle/wasm_memory_probe.mjs;
+// module bytes from tools/parity_oracle/wasm_asm.py).
+
+/// (import "env" "memory" (memory 1 2)); load(p), store(p, v), size(), grow(n).
+const MEMMOD: &str = "new Uint8Array([0,97,115,109,1,0,0,0,1,15,3,96,1,127,1,127,96,2,127,127,0,96,0,1,127,2,16,1,3,101,110,118,6,109,101,109,111,114,121,2,1,1,2,3,5,4,0,1,2,0,7,30,4,4,108,111,97,100,0,0,5,115,116,111,114,101,0,1,4,115,105,122,101,0,2,4,103,114,111,119,0,3,10,31,4,7,0,32,0,40,2,0,11,9,0,32,0,32,1,54,2,0,11,4,0,63,0,11,6,0,32,0,64,0,11])";
+/// A module-defined memory (1 page) exported as "mem"; size().
+const OWNMEM: &str = "new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,5,3,1,0,1,7,14,2,4,115,105,122,101,0,0,3,109,101,109,2,0,10,6,1,4,0,63,0,11])";
+
+/// Chrome: byteLength 65536 (initial, whatever the maximum), the same buffer
+/// each read, an ArrayBuffer script can't detach (transfer() and a
+/// structuredClone transfer are TypeErrors), toStringTag; {initial: 0} is 0.
+#[test]
+fn a_memory_is_an_undetachable_array_buffer_of_its_initial_pages() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, "var m = new WebAssembly.Memory({ initial: 1, maximum: 2 }), r = [m.buffer.byteLength, m.buffer === m.buffer, \
+            m.buffer.constructor.name, Object.prototype.toString.call(m)]; \
+            try { m.buffer.transfer(); r.push('ok'); } catch (e) { r.push(e.constructor.name); } \
+            r.push(new WebAssembly.Memory({ initial: 0 }).buffer.byteLength); r.join('|')"),
+        "65536|true|ArrayBuffer|[object WebAssembly.Memory]|TypeError|0"
+    );
+}
+
+/// Chrome: JS and wasm see each other's writes (no copy); memory.size 1;
+/// grow(0) answers 1 and keeps the buffer.
+#[test]
+fn js_and_wasm_share_the_bytes() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, &format!("var m = new WebAssembly.Memory({{ initial: 1, maximum: 2 }}); \
+            var ex = new WebAssembly.Instance(new WebAssembly.Module({MEMMOD}), {{ env: {{ memory: m }} }}).exports; \
+            new Int32Array(m.buffer)[4] = 1234; var r = [ex.load(16)]; ex.store(32, -7); r.push(new Int32Array(m.buffer)[8]); \
+            var b = m.buffer; r.push(ex.size(), m.grow(0), m.buffer === b, m.buffer.byteLength); r.join('|')")),
+        "1234|-7|1|1|true|65536"
+    );
+}
+
+/// Chrome: no initial is a TypeError, initial > maximum a RangeError; a
+/// non-Memory import or one whose maximum exceeds the module's is a LinkError.
+#[test]
+fn memory_descriptor_and_import_errors() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, &format!("var r = []; \
+            try {{ new WebAssembly.Memory({{}}); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ new WebAssembly.Memory({{ initial: 2, maximum: 1 }}); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ new WebAssembly.Instance(new WebAssembly.Module({MEMMOD}), {{ env: {{ memory: {{}} }} }}); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ new WebAssembly.Instance(new WebAssembly.Module({MEMMOD}), {{ env: {{ memory: new WebAssembly.Memory({{ initial: 1, maximum: 3 }}) }} }}); r.push('ok'); }} \
+            catch (e) {{ r.push(e.constructor.name); }} r.join('|')")),
+        "TypeError|RangeError|LinkError|LinkError"
+    );
+}
+
+/// W1 LIMITS, pinned so they are seen (docs/design/WASM-W1.md; W2 lifts them):
+/// - grow(n > 0) fails: a RangeError from JS and -1 from wasm. Chrome 148
+///   grows (grow(1) answers 1, the old buffer is detached, the new one is
+///   131072 long) and fails only past the maximum (RangeError / -1);
+/// - a module-defined memory's exported buffer is a TypeError naming the
+///   limit; the module itself runs (memory.size 1). Chrome: 65536 bytes.
+#[test]
+fn w1_limits_grow_and_module_defined_memory() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, &format!("var m = new WebAssembly.Memory({{ initial: 1, maximum: 2 }}); \
+            var ex = new WebAssembly.Instance(new WebAssembly.Module({MEMMOD}), {{ env: {{ memory: m }} }}).exports, r = []; \
+            try {{ m.grow(1); r.push('grew'); }} catch (e) {{ r.push(e.constructor.name); }} \
+            r.push(ex.grow(1), m.buffer.byteLength); \
+            var own = new WebAssembly.Instance(new WebAssembly.Module({OWNMEM})).exports; \
+            r.push(Object.prototype.toString.call(own.mem), own.size()); \
+            try {{ own.mem.buffer; r.push('buffer'); }} catch (e) {{ r.push(e.constructor.name); }} r.join('|')")),
+        "RangeError|-1|65536|[object WebAssembly.Memory]|1|TypeError"
+    );
+}
