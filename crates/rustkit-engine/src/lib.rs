@@ -1021,6 +1021,8 @@ mod inline_svg_prepass_tests;
 thread_local! {
     /// Inline svg markups serialized on this thread (LAT4b's tests).
     pub(crate) static INLINE_SVG_MARKUP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Svg elements whose author paint style was computed afresh (SVG-PREPASS-CACHE's tests).
+    pub(crate) static SVG_PAINT_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
@@ -21744,6 +21746,8 @@ impl layout_ctx::LayoutCtx {
         let _state = WalkCheckedScope::enter_for_svg_paint(state);
         let checked = &state.checked;
         let compute = |n: &Rc<Node>| -> Option<SvgPaintStyle> {
+            #[cfg(test)]
+            SVG_PAINT_COMPUTES.with(|c| c.set(c.get() + 1));
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else { return None };
             let keyed = KeyedElement::of(tag_name, attributes);
             // (important, specificity, order, property, value)
