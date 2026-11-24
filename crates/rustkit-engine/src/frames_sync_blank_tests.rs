@@ -491,3 +491,43 @@ fn the_spare_is_rebuilt_on_the_idle_turn_not_in_the_drain() {
     page.turns("false", 1);
     assert!(has_spare(&page), "the next idle turn does");
 }
+
+/// A written script runs exactly once (R1 on #1440): not again on a later
+/// live turn. Inline, a `blob:` src, and a JetStream-shaped blob whose
+/// top-level `class` would throw "duplicate lexical declaration" on a second
+/// run.
+#[test]
+fn a_written_script_runs_once() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    page.js(
+        "var magic = document.getElementById('magic'); \
+         magic.contentDocument.body.innerHTML = '<iframe id=\"mf\">'; \
+         var mw = magic.contentDocument.getElementById('mf').contentWindow; window.mw = mw; var md = mw.document; \
+         mw.runs = { inline: 0, blob: 0, cls: 0 }; mw.errors = []; \
+         mw.addEventListener('error', function (e) { mw.errors.push(String(e.message)); }); \
+         var u1 = URL.createObjectURL(new Blob(['runs.blob++;'], {type: 'text/javascript'})); \
+         var u2 = URL.createObjectURL(new Blob(['class Bench {}; runs.cls++;'], {type: 'text/javascript'})); \
+         md.open(); md.write('<body><script>runs.inline++;</script><script src=\"' + u1 + '\"></script>' + \
+           '<script src=\"' + u2 + '\"></script></body>'); md.close(); 0",
+    );
+    assert_eq!(page.js("[mw.runs.inline, mw.runs.blob, mw.runs.cls].join()"), r#"String("1,1,1")"#, "when write returns");
+    page.turns("false", 6);
+    assert_eq!(page.js("[mw.runs.inline, mw.runs.blob, mw.runs.cls].join()"), r#"String("1,1,1")"#, "after later turns");
+    assert_eq!(page.js("mw.errors.join('|')"), r#"String("")"#, "no duplicate declaration");
+}
+
+/// A written script keeps all of its attributes, as the parser would.
+#[test]
+fn a_written_script_keeps_its_attributes() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    assert_eq!(
+        page.js(
+            "var magic = document.getElementById('magic'); \
+             magic.contentDocument.body.innerHTML = '<iframe id=\"mf\">'; \
+             var md = magic.contentDocument.getElementById('mf').contentDocument; \
+             md.open(); md.write('<script id=s1 data-x=\"7\" nonce=n>0</script>'); md.close(); \
+             var s = md.getElementById('s1'); String(!!s && s.getAttribute('data-x') + '/' + s.hasAttribute('nonce'))"
+        ),
+        r#"String("7/true")"#
+    );
+}
