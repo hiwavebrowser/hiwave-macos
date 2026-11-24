@@ -6356,6 +6356,9 @@ impl LayoutBox {
         })
     }
 
+    /// `calculate_block_width_based` with no definite height handed down:
+    /// the tests' entry point (layout itself passes the parent's base).
+    #[cfg(test)]
     fn calculate_block_width(&mut self, containing_block: &Dimensions) {
         self.calculate_block_width_based(containing_block, None);
     }
