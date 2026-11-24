@@ -5030,9 +5030,32 @@ const WRAPPERS_JS: &str = r#"
         if (inline) {
             var stale = !!info(el, 'stale');
             var slot = inline.length ? slotOf(el) : null;
+            // A flow-relative size and its physical property are one property (LOGICAL-SIZE):
+            // the later of the two declarations is the one that counts, under the physical name.
+            // Only when the inline style holds a flow-relative size does this change anything.
+            var lastOf = null;
+            for (var i = 0; i < inline.length; i++) {
+                if (hasOwn(LOGICAL_SIZES, inline.item(i))) { lastOf = {}; break; }
+            }
+            if (lastOf) {
+                for (var i = 0; i < inline.length; i++) {
+                    var nm = inline.item(i);
+                    if (hasOwn(LOGICAL_SIZES, nm)) lastOf[LOGICAL_SIZES[nm]] = i;
+                    else if (hasOwn(PHYSICAL_SIZES, nm)) lastOf[nm] = i;
+                }
+            }
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
+                if (lastOf) {
+                    // An earlier declaration of the same size is overridden; a flow-relative one
+                    // stands in for its physical property from here on.
+                    var physical = hasOwn(LOGICAL_SIZES, name) ? LOGICAL_SIZES[name] : name;
+                    if (hasOwn(lastOf, physical)) {
+                        if (lastOf[physical] !== i) continue;
+                        name = physical;
+                    }
+                }
                 if (!v) continue;
                 // An animated property (Web Animations' layer, a CSS
                 // animation or transition) reads the engine's row: the
@@ -5089,6 +5112,13 @@ const WRAPPERS_JS: &str = r#"
         if (named) return '::' + named[1];
         return /^::(marker|selection|backdrop|placeholder)$/.test(p) ? p : null;
     }
+    // css-logical-1 §4.1 in horizontal-tb: the flow-relative sizes are the physical ones.
+    var LOGICAL_SIZES = {
+        'inline-size': 'width', 'block-size': 'height',
+        'min-inline-size': 'min-width', 'min-block-size': 'min-height',
+        'max-inline-size': 'max-width', 'max-block-size': 'max-height'
+    };
+    var PHYSICAL_SIZES = { 'width': 1, 'height': 1, 'min-width': 1, 'min-height': 1, 'max-width': 1, 'max-height': 1 };
     function makeComputed(el, pseudo) {
         var m = pseudo === null ? {} : computedMap(el, pseudo);
         // Listed on demand: a read of one property should not pay for the
@@ -5122,7 +5152,8 @@ const WRAPPERS_JS: &str = r#"
         function read(n) {
             var v = cache[n];
             if (v !== undefined) return v;
-            v = computedValue(m, n);
+            // A flow-relative size reads its physical property (horizontal-tb; LOGICAL-SIZE).
+            v = computedValue(m, hasOwn(LOGICAL_SIZES, n) ? LOGICAL_SIZES[n] : n);
             if (v === undefined) return customValue(n);
             return (cache[n] = v);
         }

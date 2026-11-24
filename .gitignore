@@ -40,7 +40,7 @@ nul
 .ai/logs/
 .ai/*
 
-# Tools (ignore all except parity_oracle, real_window, element_diff, inspector, latency, stress and media_fixtures)
+# Tools (ignore all except parity_oracle, real_window, element_diff, inspector, latency, stress, media_fixtures and replay)
 tools/*
 !tools/parity_oracle/
 !tools/real_window/
@@ -49,6 +49,7 @@ tools/*
 !tools/latency/
 !tools/stress/
 !tools/media_fixtures/
+!tools/replay/
 tools/element_diff/out/
 tools/inspector/out/
 tools/real_window/out/
