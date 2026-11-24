@@ -3150,34 +3150,54 @@ impl LayoutBox {
         d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
         d.content.y = containing_block.content.y + containing_block.content.height;
 
+        // `width` / `height` do not apply to a non-replaced inline (CSS 2
+        // §10.3.1, §10.6.1): its box is its content, whatever they say
+        // (Chrome 148; INLINE-SIZE-IGNORED). Only a box whose display IS
+        // `inline` and is not replaced drops them: an atomic inline keeps
+        // them, and so do the replaced elements built as inline boxes here
+        // (`<iframe>` with nested contexts off, `<object>`, `<embed>`; #1444
+        // R1: they kept their CSS size in Chrome and on develop).
+        let replaced = self
+            .identity
+            .as_ref()
+            .is_some_and(|i| matches!(i.tag.as_str(), "iframe" | "object" | "embed"));
+        let sized = self.style.display != rustkit_css::Display::Inline || replaced;
         // Check for explicit CSS width first
-        let explicit_width = match self.style.width {
-            Length::Px(px) if px > 0.0 => Some(px),
-            Length::Percent(pct) if pct > 0.0 => Some(pct / 100.0 * container_width),
-            Length::Em(em) if em > 0.0 => {
-                let font_size = match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                };
-                Some(em * font_size)
+        let explicit_width = if !sized {
+            None
+        } else {
+            match self.style.width {
+                Length::Px(px) if px > 0.0 => Some(px),
+                Length::Percent(pct) if pct > 0.0 => Some(pct / 100.0 * container_width),
+                Length::Em(em) if em > 0.0 => {
+                    let font_size = match self.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    Some(em * font_size)
+                }
+                _ => None,
             }
-            _ => None,
         };
 
         // Check for explicit CSS height
-        let explicit_height = match self.style.height {
-            Length::Px(px) if px > 0.0 => Some(px),
-            Length::Percent(pct) if pct > 0.0 && containing_block.content.height > 0.0 => {
-                Some(pct / 100.0 * containing_block.content.height)
+        let explicit_height = if !sized {
+            None
+        } else {
+            match self.style.height {
+                Length::Px(px) if px > 0.0 => Some(px),
+                Length::Percent(pct) if pct > 0.0 && containing_block.content.height > 0.0 => {
+                    Some(pct / 100.0 * containing_block.content.height)
+                }
+                Length::Em(em) if em > 0.0 => {
+                    let font_size = match self.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    Some(em * font_size)
+                }
+                _ => None,
             }
-            Length::Em(em) if em > 0.0 => {
-                let font_size = match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                };
-                Some(em * font_size)
-            }
-            _ => None,
         };
 
         // Layout inline children sequentially
@@ -18606,17 +18626,39 @@ mod tests {
         );
 
         // Inline span with an explicit 50px width is centered: (200-50)/2 = 75.
+        // An inline-block with `width: 50px` is centred: (200-50)/2 = 75. A
+        // plain inline ignores `width` (INLINE-SIZE-IGNORED): empty, it is a
+        // zero-width box at the centre, 100. Chrome for Testing 148
+        // (docs/diagnostics/2026-11-24/inline_size_ignored_center_cft148.txt):
+        // inline-block x=75 w=50; plain span x=100 w=0.
         let mut span_style = ComputedStyle::new();
         span_style.text_align = TextAlign::Center;
         span_style.width = Length::Px(50.0);
+        span_style.display = rustkit_css::Display::InlineBlock;
         let mut block2 = LayoutBox::new(BoxType::Block, block_style.clone());
         block2
             .children
-            .push(LayoutBox::new(BoxType::Inline, span_style));
+            .push(LayoutBox::new(BoxType::Inline, span_style.clone()));
         block2.layout(&cb);
         assert_eq!(
             block2.children[0].dimensions.content.x, 75.0,
-            "inline box should be centered"
+            "inline-block box should be centered"
+        );
+        span_style.display = rustkit_css::Display::Inline;
+        let mut block2b = LayoutBox::new(BoxType::Block, block_style.clone());
+        block2b
+            .children
+            .push(LayoutBox::new(BoxType::Inline, span_style));
+        block2b.layout(&cb);
+        // It is zero-width, as in Chrome. LIMIT, pinned so it is seen: RustKit
+        // leaves an EMPTY inline at the line's start (x=0) in a centred line,
+        // where Chrome puts it at the centre (100). That is the same box as an
+        // empty span with no width, on develop too: row EMPTY-INLINE-ALIGN,
+        // not this one's.
+        assert_eq!(
+            (block2b.children[0].dimensions.content.x, block2b.children[0].dimensions.content.width),
+            (0.0, 0.0),
+            "a plain inline ignores width (zero-width); its x is the EMPTY-INLINE-ALIGN limit"
         );
 
         // Realistic <div center><span>Hi</span></div>: the span box and its
@@ -20791,10 +20833,10 @@ mod tests {
         a_style.display = rustkit_css::Display::Inline;
         a_style.line_height = rustkit_css::LineHeight::Number(1.5);
         a_style.font_size = Length::Px(16.0);
-        // Width so the line has content and flushes; inline width is not
-        // spec-honored but the advance mechanism under test does not care.
-        a_style.width = Length::Px(50.0);
-        let a = LayoutBox::new(BoxType::Inline, a_style);
+        // A text child so the line has content and flushes (a plain inline's
+        // `width` is not honoured: INLINE-SIZE-IGNORED).
+        let mut a = LayoutBox::new(BoxType::Inline, a_style.clone());
+        a.children.push(LayoutBox::new(BoxType::Text("x".to_string()), a_style));
         let (content, half) = a.inline_content_area();
         assert!(
             content < 24.0 * 0.9,
