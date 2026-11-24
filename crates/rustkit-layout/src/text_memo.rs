@@ -169,6 +169,33 @@ impl<K: Hash + Eq, V: Clone> TextMemo<K, V> {
         Some(value)
     }
 
+    /// [`Self::get`] by a borrowed form of the key (TEXT-MEMO-KEY): a lookup
+    /// that builds no owned key. Same answer, same promotion.
+    pub(crate) fn get_by<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        Q: ?Sized + Hash + Eq,
+        Rc<K>: std::borrow::Borrow<Q>,
+    {
+        if memos_off() {
+            return None;
+        }
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.referenced = true;
+            return Some(entry.value.clone());
+        }
+        let (value, weight) = self.recent.get(key)?;
+        let (value, weight) = (value.clone(), *weight);
+        if self.used + weight <= self.budget || self.slot_under_hand_is_unused() {
+            let (key, (v, w)) = self.recent.remove_entry(key).expect("just found");
+            self.recent_used -= w;
+            if let Err((key, v)) = self.admit(key, v, w, false) {
+                self.recent_used += w;
+                self.recent.insert(key, (v, w));
+            }
+        }
+        Some(value)
+    }
+
     /// Keep `value` for `key` if there is room, or in place of entries not
     /// used since the hand last passed them (see the module documentation);
     /// otherwise in the queue of turned-away strings.
