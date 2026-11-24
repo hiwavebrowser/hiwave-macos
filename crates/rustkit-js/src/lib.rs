@@ -2284,15 +2284,14 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         {
             use boa_engine::{JsString, NativeFunction, Script, Source};
-            let realm = self
-                .realms
-                .get(self.current_realm.0)
-                .and_then(|r| r.clone())
-                .ok_or_else(|| JsError::ExecutionError("no current realm".into()))?;
             let deadline = self.deadline.clone();
-            // SAFETY: the closure captures a `Realm` (a GC handle kept alive by
-            // `self.realms` for as long as the realm exists) and the deadline;
-            // a dropped realm's global, and so this function, are unreachable.
+            // SAFETY: the closure captures only the deadline (no GC-managed
+            // data). It must NOT capture the realm: a `Realm` held by an
+            // untraced closure is a root the collector never releases, which
+            // kept every navigated-away document alive (navigation_release_tests,
+            // #1440). It needs none: Boa calls a native function in the realm it
+            // was created in (`NativeFunctionObject::realm`, swapped in by the
+            // call), so the context's realm here IS this function's realm.
             let native = unsafe {
                 NativeFunction::from_closure(move |_this, args, context| {
                     if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at)
@@ -2304,11 +2303,8 @@ impl JsRuntime {
                         Some(v) => v.to_string(context)?.to_std_string_escaped(),
                         None => return Ok(boa_engine::JsValue::undefined()),
                     };
-                    let outer = context.enter_realm(realm.clone());
-                    let result = Script::parse(Source::from_bytes(source.as_bytes()), None, context)
-                        .and_then(|script| script.evaluate(context));
-                    context.enter_realm(outer);
-                    result
+                    Script::parse(Source::from_bytes(source.as_bytes()), None, context)
+                        .and_then(|script| script.evaluate(context))
                 })
             };
             self.context
