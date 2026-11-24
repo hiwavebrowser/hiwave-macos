@@ -1318,6 +1318,13 @@ pub(crate) fn shaped_chars() -> usize {
     SHAPED_CHARS.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: wrap against the whole rest of a paragraph, as before WRAP-WINDOW (the
+    /// differential test's reference).
+    pub(crate) static WRAP_WINDOW_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Bytes the per-thread shaped-text memo of [`TextShaper::shape`] may hold
 /// (SHAPED-CAP), its queue of turned-away strings included; past it, entries
 /// are evicted one at a time (`text_memo`), never all at once. Each entry is
@@ -2913,6 +2920,7 @@ impl TextShaper {
                 cur_max,
                 breaker,
                 !preserve_spaces,
+                window.len() < remaining.len(),
             )?;
 
             if break_offset == 0 {
@@ -3038,6 +3046,11 @@ impl TextShaper {
         max_width: f32,
     ) -> Result<(&'t str, ShapedRun), TextError> {
         let enough = 2.0 * max_width.max(0.0) + 4.0 * size.max(1.0);
+        #[cfg(test)]
+        if WRAP_WINDOW_OFF.with(|w| w.get()) {
+            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+            return Ok((remaining, shaped));
+        }
         let mut chars = 512usize;
         loop {
             let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
@@ -3061,6 +3074,7 @@ impl TextShaper {
         max_width: f32,
         breaker: &LineBreaker,
         hang_trailing_spaces: bool,
+        truncated: bool,
     ) -> Result<usize, TextError> {
         // Get all break opportunities
         let break_offsets = breaker.break_offsets(text);
@@ -3071,6 +3085,12 @@ impl TextShaper {
         for &offset in &break_offsets {
             if offset == 0 {
                 continue;
+            }
+            // WRAP-WINDOW (Prometheus's R1 nit): the end of a truncated window is not a break
+            // opportunity of the whole text; inside a run of preserved spaces it would close the
+            // line mid-run.
+            if truncated && offset >= text.len() {
+                break;
             }
 
             // css-text-3 §4.1.3: collapsible spaces at the end of a line are
@@ -3446,6 +3466,57 @@ mod tests {
     /// Windows, one paragraph's full layout: 5k chars 26.6 ms, 10k 76.5, 20k 237, 40k 732;
     /// docs/diagnostics/2026-11-24/STRESS-SPEED-editor-tiptap.md). A line needs only a window of
     /// text that is sure to overflow it.
+    /// WRAP-WINDOW (Prometheus's R1 nit 2): the window changes how much is shaped, not where the
+    /// lines break. Each case is wrapped against the window and against the whole rest of the
+    /// paragraph (`WRAP_WINDOW_OFF`, the code before WRAP-WINDOW), and the lines must be the same:
+    /// prose, pre-wrap with long runs of spaces (a window can end inside one), break-spaces, one
+    /// word longer than the window under break-all and under overflow-wrap: anywhere, and a narrow
+    /// first line.
+    #[test]
+    fn wrapping_against_the_window_breaks_where_the_whole_text_does() {
+        let prose: String = (0..2400).map(|i| ["Longtemps,", "je", "me", "suis", "couché", "de", "bonne", "heure."][i % 8]).collect::<Vec<_>>().join(" ");
+        let spaced: String = (0..60).map(|i| format!("word{i}{}", " ".repeat(40 + (i * 37) % 1200))).collect();
+        let long_word = format!("{} b c {} d", "a".repeat(3000), "e".repeat(900));
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        // (label, text, first line width, white-space, word-break, overflow-wrap)
+        let cases: Vec<(&str, &str, f32, WhiteSpace, CssWordBreak, CssOverflowWrap)> = vec![
+            ("prose", &prose, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("pre-wrap space runs", &spaced, 780.0, WhiteSpace::PreWrap, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("break-spaces space runs", &spaced, 780.0, WhiteSpace::BreakSpaces, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("a long word, break-all", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::BreakAll, CssOverflowWrap::Normal),
+            ("a long word, anywhere", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Anywhere),
+            ("a long word, normal", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("a narrow first line", &prose, 90.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+        ];
+        let wrap = |text: &str, first: f32, ws: WhiteSpace, wb: CssWordBreak, ow: CssOverflowWrap, off: bool| {
+            WRAP_WINDOW_OFF.with(|w| w.set(off));
+            let lines = shaper
+                .wrap_text_mid_line_white_space(
+                    text,
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    13.0,
+                    first,
+                    780.0,
+                    wb,
+                    ow,
+                    ws,
+                )
+                .expect("wrap");
+            WRAP_WINDOW_OFF.with(|w| w.set(false));
+            lines.iter().map(|l| (l.start_offset, l.end_offset, (l.width * 64.0).round() as i64)).collect::<Vec<_>>()
+        };
+        for (label, text, first, ws, wb, ow) in cases {
+            let windowed = wrap(text, first, ws, wb, ow, false);
+            let whole = wrap(text, first, ws, wb, ow, true);
+            assert!(windowed.len() > 3, "{label}: {} lines", windowed.len());
+            assert_eq!(windowed, whole, "{label}: the window breaks where the whole text does");
+        }
+    }
+
     #[test]
     fn wrapping_a_long_paragraph_shapes_each_part_of_it_a_bounded_number_of_times() {
         let words = ["Longtemps,", "je", "me", "suis", "couché", "de", "bonne", "heure.", "Parfois,", "à",
