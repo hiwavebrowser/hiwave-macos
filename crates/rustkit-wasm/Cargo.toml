@@ -1,0 +1,13 @@
+[package]
+name = "rustkit-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly for the RustKit browser engine, on wasmi (WASM W1, docs/design/WASM-W1.md)"
+authors = ["HiWave Team"]
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+boa_engine = "0.22"
+# WebAssembly interpreter (MIT OR Apache-2.0), approved 2026-11-14. Pinned: W1's design was
+# checked against 2.0.0's source. Only the features W1 uses.
+wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate"] }

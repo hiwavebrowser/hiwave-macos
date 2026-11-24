@@ -128,3 +128,4 @@ fn js_to_wasm_to_js_re_entry_three_levels_deep_and_its_bound() {
         "101|1,10,100|RangeError:Maximum call stack size exceeded|42"
     );
 }
+
