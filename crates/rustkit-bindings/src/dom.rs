@@ -3268,6 +3268,8 @@ const WRAPPERS_JS: &str = r#"
         own('top', top, false);
         own('frameElement', el, false);
         __rk.realTop = top;
+        // A frame's document has open/write/close (JETSTREAM-IFRAME-SYNC).
+        if (__rk.installFrameWrite) __rk.installFrameWrite(el);
     };
     // An interface's own fields (`[name, default]` pairs), its parent and
     // a finishing step (a direct call; WheelEvent's legacy deltas).

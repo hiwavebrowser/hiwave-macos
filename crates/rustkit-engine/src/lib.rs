@@ -438,6 +438,8 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(test)]
+mod frames_sync_blank_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2181,6 +2183,12 @@ pub struct EngineConfig {
     /// Off by default: an iframe stays an empty box with `contentWindow`
     /// null, as before.
     pub nested_contexts: bool,
+    /// With nested contexts on: pre-built spare frames, so a frame inserted
+    /// by script has its about:blank document at once (JETSTREAM-IFRAME-SYNC).
+    /// On unless `HIWAVE_FRAME_SPARES=0`: the switch for the cost gate's
+    /// spares-on/off comparison, and a way back. Off, a script-inserted
+    /// frame attaches at the next drain, as before.
+    pub frame_spares: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -2265,6 +2273,7 @@ impl Default for EngineConfig {
             // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
             // frames in a built app or parity-capture before the flip.
             nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
+            frame_spares: std::env::var("HIWAVE_FRAME_SPARES").ok().as_deref() != Some("0"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -2773,6 +2782,17 @@ pub struct LivePump {
     /// millisecond, and the content loop aims its wake at that instant.
     pub next_timer_exact_us: Option<u64>,
 }
+
+/// The bindings of view `id`'s document (the drain's `parent_of`, outside it).
+fn parent_of_view(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+    engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+}
+
+/// How many frames deep a page may nest (JETSTREAM-IFRAME-SYNC phase 2a: a
+/// frame's own frames are browsing contexts, so a chain must stop). JetStream
+/// needs 2, Speedometer 1. A stated deviation from Chrome, which caps the
+/// number of frames instead.
+pub(crate) const MAX_FRAME_DEPTH: usize = 16;
 
 /// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
 /// for Testing 148 renders a same-origin frame's response: only HTML types
@@ -6927,6 +6947,26 @@ impl Engine {
     /// layout and paint of the frame, the child's timers and network
     /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
     /// waiting for its frames.
+    /// The URLs of view `id`'s document and of each document above it, from
+    /// `id` up to the top page (frames are found through their parents'
+    /// `frames`). Its length less one is `id`'s nesting depth.
+    fn frame_ancestry_urls(&self, id: EngineViewId) -> Vec<Option<Url>> {
+        let mut out = Vec::new();
+        let mut cur = Some(id);
+        while let Some(at) = cur {
+            out.push(self.views.get(&at).and_then(|v| v.doc.url.clone()));
+            cur = self
+                .views
+                .iter()
+                .find(|(_, v)| v.frames.values().any(|f| f.view == at))
+                .map(|(pid, _)| *pid);
+            if out.len() > MAX_FRAME_DEPTH + 1 {
+                break;
+            }
+        }
+        out
+    }
+
     async fn drive_frames(&mut self, id: EngineViewId) {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
@@ -6950,9 +6990,39 @@ impl Engine {
             out
         };
         let mut changed = false;
+        // What decides whether a frame of this document may load at all: its
+        // nesting depth and the URLs above it (the requesting document first).
+        let ancestry = self.frame_ancestry_urls(id);
+        // An idle frames turn: nothing to drain. Spares are built only on one
+        // (Atlas ruling C): never inside a drain on the load path.
+        let idle = requests.is_empty();
         for request in requests {
             changed |= self.drop_frame(id, request.node);
-            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let Some(mut target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            // A nesting cap, so a chain of frames cannot recurse without end
+            // (a stated deviation: Chrome caps the frame count, not the
+            // depth). Past it, the floor: no document, no window, one `load`.
+            if ancestry.len() > MAX_FRAME_DEPTH {
+                if let Some(parent) = parent_of_view(self, id) {
+                    let _ = parent.frame_loaded(request.node, false);
+                }
+                continue;
+            }
+            // Chrome's recursion check (Blink allows one level of
+            // self-reference): a frame whose URL is already the URL of two of
+            // the documents above it, fragment aside, is left blank.
+            if target.scheme() != "about" {
+                let unfragmented = |u: &Url| {
+                    let mut u = u.clone();
+                    u.set_fragment(None);
+                    u
+                };
+                let wanted = unfragmented(&target);
+                let seen = ancestry.iter().flatten().filter(|u| unfragmented(u) == wanted).count();
+                if seen >= 2 {
+                    target = Url::parse("about:blank").expect("about:blank");
+                }
+            }
             let blank = target.scheme() == "about";
             let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
             fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
@@ -6969,6 +7039,30 @@ impl Engine {
                 }
                 continue;
             }
+            // A spare the page half attached inside the insertion
+            // (JETSTREAM-IFRAME-SYNC): adopt it instead of making a child. It
+            // is already bound to its about:blank document and is the frame's
+            // window; what is left is its size, and the view below.
+            let adopted = if request.prebuilt && blank {
+                parent_of(self, id).and_then(|parent| parent.take_spare().map(|child| (child, parent.frame_size(request.node))))
+            } else {
+                None
+            };
+            // An adopted spare's document was never parsed from a response:
+            // it is the blank document plus what script wrote into it since
+            // the insertion, and `document.write` already ran those scripts.
+            let was_adopted = adopted.is_some();
+            let (child, document, target, width, height) = if let Some((child, (width, height))) = adopted {
+                let document = child.document();
+                let held = parent_of(self, id).is_some_and(|parent| parent.frame_holds_window(request.node));
+                let Some(document) = document.filter(|_| held && child.set_dimensions(width, height).is_ok()) else {
+                    if let Some(parent) = parent_of(self, id) {
+                        parent.drop_child(child);
+                    }
+                    continue;
+                };
+                (child, document, target, width, height)
+            } else {
             // The document's URL is the response's, after redirects; it is
             // same-origin only when every URL of the chain is the page's
             // origin (one that left and came back is not).
@@ -7024,11 +7118,20 @@ impl Engine {
             }) else {
                 continue;
             };
+            // A frame's own frames are browsing contexts too (with nested
+            // contexts on, as the top page's are): a frame made inside a
+            // frame gets a window, as in Chrome (JetStream's `magicframe`).
             let bound = child
                 .set_document(document.clone())
                 .and_then(|_| child.set_location(&target))
                 .and_then(|_| child.set_dimensions(width, height))
-                .and_then(|_| child.enable_net_bridge());
+                .and_then(|_| child.enable_net_bridge())
+                .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) });
+            if bound.is_ok() && blank {
+                if let Some(parent) = parent_of(self, id) {
+                    child.inherit_origin_from(parent);
+                }
+            }
             let attached = bound.is_ok()
                 && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
             if !attached {
@@ -7037,6 +7140,8 @@ impl Engine {
                 }
                 continue;
             }
+            (child, document, target, width, height)
+            };
             // The frame's own page state, offscreen, at its viewport.
             let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
             let Ok(fid) = self.insert_offscreen_view(bounds) else {
@@ -7074,6 +7179,10 @@ impl Engine {
                 frame.doc.document = Some(document.clone());
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
+                // Not yet scanned for its markup frames: the first turn of
+                // this view scans (`drive_frames` scans when the two differ),
+                // so a frame's own `<iframe>` in its markup is requested.
+                frame.frames_nav = frame.nav_id.wrapping_add(1);
             }
             // The frame's linked stylesheets, before its scripts and its
             // `load`, as a page's are before its own: what the parent's
@@ -7096,14 +7205,19 @@ impl Engine {
                 // The live turn's link check asks for them again.
                 Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
             }
-            // The child's classic scripts, in document order.
+            // The child's classic scripts, in document order: none for an
+            // adopted spare (above), whose written scripts ran in `write`.
             // The engine's own question (not a page script: nothing of it
             // is announced to the frame's page).
-            let listed = child.evaluate(
+            let listed = if was_adopted {
+                Ok(rustkit_js::JsValue::String("[]".into()))
+            } else {
+                child.evaluate(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
                    return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
-            );
+                )
+            };
             let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
                 _ => Vec::new(),
@@ -7218,6 +7332,75 @@ impl Engine {
             if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
                 debug!(error = %e, "frames: the parent's layout after a frame change failed");
             }
+        }
+        if idle {
+            self.refill_spare(id);
+        }
+    }
+
+    /// Give view `id`'s document a spare child if it should hold one and does
+    /// not (JETSTREAM-IFRAME-SYNC [R1]): a document that has frames, or is
+    /// itself a frame, within the nesting cap. Built OFF the load path (Atlas
+    /// ruling C, after the [R5] measurement: one spare is ~134 ms and ~13 MB):
+    /// only on an idle frames turn (no request drained in it) after the
+    /// document's window `load`, so never inside a load-path drain. A frame
+    /// inserted by script before then attaches late (pinned by a test); a
+    /// frameless page never pays for one. The spare is a
+    /// child exactly as the drain makes one for an about:blank frame, and it
+    /// belongs to this document: a navigation replaces the document's
+    /// bindings, and the spare goes with them ([R2]).
+    ///
+    /// Every outcome is one `debug!` line on target `frames_spare`
+    /// (`RUST_LOG=frames_spare=debug`), with `outcome` = `built`, or the
+    /// early return's reason: what shows a page's spare work, or that it
+    /// had none.
+    fn refill_spare(&mut self, id: EngineViewId) {
+        if !self.config.frame_spares {
+            debug!(target: "frames_spare", outcome = "off");
+            return;
+        }
+        let Some(view) = self.views.get(&id) else { return };
+        let Some(parent) = view.doc.bindings.as_ref() else { return };
+        if parent.has_spare() {
+            debug!(target: "frames_spare", outcome = "held");
+            return;
+        }
+        if !parent.window_loaded() {
+            debug!(target: "frames_spare", outcome = "before_load");
+            return;
+        }
+        let depth = self.frame_ancestry_urls(id).len();
+        let wanted = !view.frames.is_empty() || depth > 1;
+        if !wanted {
+            debug!(target: "frames_spare", outcome = "not_wanted");
+            return;
+        }
+        if depth >= MAX_FRAME_DEPTH {
+            debug!(target: "frames_spare", outcome = "too_deep");
+            return;
+        }
+        let Ok(child) = parent.new_child() else { return };
+        let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
+            .ok()
+            .zip(Url::parse("about:blank").ok());
+        let Some((document, blank)) = built else {
+            parent.drop_child(child);
+            return;
+        };
+        let bound = child
+            .set_document(Rc::new(document))
+            .and_then(|_| child.set_location(&blank))
+            .and_then(|_| child.enable_net_bridge())
+            .and_then(|_| child.enable_frames());
+        if bound.is_err() {
+            parent.drop_child(child);
+            return;
+        }
+        child.inherit_origin_from(parent);
+        match parent.offer_spare(child) {
+            Ok(true) => debug!(target: "frames_spare", outcome = "built"),
+            Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
+            Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
     }
 

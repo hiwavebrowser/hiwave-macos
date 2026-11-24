@@ -297,7 +297,13 @@
         enm(F, 'referrerPolicy', 'referrerpolicy', ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'], '', '');
         str(F, 'width', 'width'); str(F, 'height', 'height');
         def(F, 'contentWindow', function () { return null; });
-        def(F, 'contentDocument', function () { return null; });
+        // Frames off: no child context, but once the frame is in the document
+        // it has an inert about:blank document, as Chrome has a document at
+        // insertion (JETSTREAM-IFRAME-SYNC [R6]; web_document.js). With
+        // nested contexts on, web_frames.js answers instead.
+        def(F, 'contentDocument', function () {
+            return __rk.inertFrameDocument ? __rk.inertFrameDocument(this) : null;
+        });
     }
     // ---- <form>: the submission attributes (the controls are web_forms.js's)
     var FO = P('HTMLFormElement');

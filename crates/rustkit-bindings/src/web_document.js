@@ -310,4 +310,215 @@
     });
     var impl = Object.create(DIP);
     getter('implementation', function () { return impl; });
+
+    // ---- A frame's inert about:blank document, with nested contexts off
+    // (JETSTREAM-IFRAME-SYNC [R6]). Chrome gives an iframe an about:blank
+    // document the moment it is inserted (URL about:blank, complete, an empty
+    // head and body). Off, there is no browsing context for it, so this is a
+    // detached document in this realm: the same object on every read, `null`
+    // while the frame is not in the document. open/write/close parse into it
+    // and run no script: there is nothing to run it in.
+    var inert = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var inertState = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var BLANK = '<html><head></head><body></body></html>';
+    function setLive(d, name, value) {
+        Object.defineProperty(d, name, { value: value, writable: true, configurable: true, enumerable: true });
+    }
+    __rk.inertFrameDocument = function (frame) {
+        if (!inert || !frame || !frame.isConnected) return null;
+        // A sandbox without allow-same-origin makes even the initial
+        // about:blank an opaque origin: Chrome answers null.
+        var sb = frame.getAttribute('sandbox');
+        if (sb !== null && !/(^|\s)allow-same-origin(\s|$)/i.test(sb)) return null;
+        var d = inert.get(frame);
+        if (!d) {
+            d = new g.DOMParser().parseFromString(BLANK, 'text/html');
+            setLive(d, 'URL', 'about:blank');
+            setLive(d, 'documentURI', 'about:blank');
+            setLive(d, 'readyState', 'complete');
+            inert.set(frame, d);
+            inertState.set(d, { buffer: '', open: false });
+            __rk.inertDocumentMethods(d);
+        }
+        return d;
+    };
+    function inertDoc(d) { return inertState ? inertState.get(d) : undefined; }
+    function emptyDoc(d) { while (d.firstChild) d.removeChild(d.firstChild); }
+    // The markup written so far, parsed again into the document: the parse is
+    // whole each time (no script runs, so nothing can observe a partial one).
+    function reparse(d, s) {
+        var parsed = new g.DOMParser().parseFromString(s.buffer, 'text/html');
+        emptyDoc(d);
+        if (parsed.documentElement) d.appendChild(parsed.documentElement);
+    }
+    // On the inert document only, as its own methods: a page's own document
+    // keeps no `open`/`write` (as before this row; real-site script that
+    // feature-detects `document.write` sees what it saw).
+    function method(d, name, fn) {
+        Object.defineProperty(d, name, { configurable: true, writable: true, value: fn });
+    }
+    function openInert() {
+        var s = inertDoc(this);
+        emptyDoc(this);
+        s.buffer = ''; s.open = true;
+        this.readyState = 'loading';
+        return this;
+    }
+    function writeInert() {
+        var s = inertDoc(this);
+        if (!s.open) this.open();
+        for (var i = 0; i < arguments.length; i++) s.buffer += String(arguments[i]);
+        reparse(this, s);
+    }
+    function writelnInert() {
+        var a = Array.prototype.slice.call(arguments); a.push('\n');
+        return this.write.apply(this, a);
+    }
+    function closeInert() {
+        var s = inertDoc(this);
+        s.open = false;
+        this.readyState = 'complete';
+    }
+    // ---- A frame's own document: open / write / close that run the written
+    // scripts (JETSTREAM-IFRAME-SYNC phase 3). Installed when this realm
+    // becomes a frame's window (`__rk.becomeFrame`), so a page's own document
+    // gains nothing. Chrome 148 (docs/diagnostics/2026-11-23/
+    // chrome148_iframe_write.json): open() empties the document; write()
+    // parses as it goes and runs each inline script when the parser reaches
+    // it, synchronously, in this realm; close() finishes, `complete`.
+    //
+    // The parser here is a splitter: the markup between scripts goes in
+    // through insertAdjacentHTML (no script in it, so nothing is queued to
+    // run later), each script element in as it is reached, its source run at
+    // once as a classic script of this realm (`__rustkit_run_written`; no
+    // microtask checkpoint between them), a `blob:` src read from the blob
+    // store first (parser-blocking: it runs before the markup after it). Any
+    // other src is not fetched (a stated limit). A written script's exception
+    // goes to this window's `error` handling, then the next script runs.
+    var runWritten = g.__rustkit_run_written;
+    try { delete g.__rustkit_run_written; } catch (_) {}
+    var realmIndex = typeof __realm === 'number' ? __realm : 0;
+    var HEAD_TAGS = /^(title|meta|link|style|base|script|noscript|template)$/i;
+    function skeleton(d) {
+        if (d.documentElement) return;
+        var html = d.createElement('html');
+        html.appendChild(d.createElement('head'));
+        html.appendChild(d.createElement('body'));
+        d.appendChild(html);
+    }
+    function headOf(d) { return d.head || d.documentElement.firstChild; }
+    function bodyOf(d) { return d.body || d.documentElement.lastChild; }
+    // Markup with no script in it, into the head or the body.
+    function insertMarkup(d, st, html) {
+        if (!html) return;
+        if (/<body[\s>]/i.test(html) || /<\/head\s*>/i.test(html)) st.inBody = true;
+        html = html.replace(/<!doctype[^>]*>/ig, '')
+            .replace(/<\/?(html|head|body)(\s[^>]*)?>/ig, '');
+        if (!/\S/.test(html)) return;
+        skeleton(d);
+        if (!st.inBody) {
+            var first = /<\s*([a-zA-Z][a-zA-Z0-9-]*)/.exec(html);
+            if (first && !HEAD_TAGS.test(first[1])) st.inBody = true;
+            else if (!first && /\S/.test(html.replace(/<[^>]*>/g, ''))) st.inBody = true;
+        }
+        var target = st.inBody ? bodyOf(d) : headOf(d);
+        target.insertAdjacentHTML('beforeend', html);
+    }
+    function runScript(d, st, markup, text) {
+        skeleton(d);
+        // The written script goes in as the parser's own (its markup, every
+        // attribute kept), through insertAdjacentHTML: a script made that way
+        // is "already started" (HTML), so the engine never prepares it on a
+        // later insertion or attribute change. It runs here, once.
+        var target = st.inBody ? bodyOf(d) : headOf(d);
+        target.insertAdjacentHTML('beforeend', markup);
+        var el = target.lastElementChild;
+        if (!el || el.localName !== 'script') return;
+        var type = el.getAttribute('type'), src = el.getAttribute('src');
+        // A frame removed from its document runs nothing written (Chrome).
+        if (!st.frame || !st.frame.isConnected) return;
+        // A module is deferred in Chrome; not run here (the stated limit is
+        // classic inline and blob: scripts).
+        if (type !== null && /^\s*module\s*$/i.test(type)) {
+            if (__rk.unsupported) __rk.unsupported('document.write', 'a written module script');
+            return;
+        }
+        var source = text;
+        if (src !== null) {
+            var url = String(src).split('#')[0];
+            var found = /^blob:/i.test(url) && __rk.blobGet ? __rk.blobGet(realmIndex, url) : null;
+            if (!found) { if (__rk.unsupported) __rk.unsupported('document.write', 'a written script src other than blob:'); return; }
+            try { source = new g.TextDecoder().decode(new Uint8Array(found[0])); } catch (e) { return; }
+        }
+        if (type !== null && !/^(text|application)\/(java|ecma)script$/i.test(type) && type !== '') return;
+        // What the outer write still holds waits while this script runs:
+        // markup the script writes goes in first, where the parser is
+        // (Chrome: `<i>` then `<b>`).
+        var rest = st.buffer;
+        st.buffer = '';
+        try {
+            runWritten(source);
+        } catch (e) {
+            // Reported now, inside write, before the next written script
+            // (Chrome): the engine's own trusted ErrorEvent at this window,
+            // dispatched synchronously (reportError's event comes on a
+            // later turn here).
+            try {
+                var msg = 'Uncaught ' + (e && typeof e === 'object' && e.name !== undefined ? e.name + ': ' + e.message : String(e));
+                if (st.fire) st.fire(e, msg, '', 0, 0); else __rk.reportError(e);
+            } catch (_) {}
+        } finally {
+            st.buffer += rest;
+        }
+    }
+    // Parse what has been written so far; `final` (close): everything.
+    function pump(d, st, final) {
+        var re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/i, m;
+        while ((m = re.exec(st.buffer))) {
+            insertMarkup(d, st, st.buffer.slice(0, m.index));
+            st.buffer = st.buffer.slice(m.index + m[0].length);
+            runScript(d, st, m[0], m[2]);
+        }
+        if (final) { insertMarkup(d, st, st.buffer); st.buffer = ''; return; }
+        // A script not yet closed, or a tag cut off at the end, waits for the
+        // next write.
+        var open = st.buffer.search(/<script\b/i), cut = st.buffer.lastIndexOf('<');
+        var keepFrom = open >= 0 ? open : (cut > st.buffer.lastIndexOf('>') ? cut : st.buffer.length);
+        insertMarkup(d, st, st.buffer.slice(0, keepFrom));
+        st.buffer = st.buffer.slice(keepFrom);
+    }
+    var writeInstalled = null;
+    __rk.installFrameWrite = function (frameEl) {
+        var d = g.document;
+        if (!d || !runWritten || writeInstalled === d) return;
+        writeInstalled = d;
+        // Taken now, before any of the frame's page script runs.
+        var st = { buffer: '', open: false, inBody: false, frame: frameEl || null,
+                   fire: typeof __rk.fireError === 'function' ? __rk.fireError : null };
+        method(d, 'open', function open() {
+            while (d.firstChild) d.removeChild(d.firstChild);
+            st.buffer = ''; st.open = true; st.inBody = false;
+            d.readyState = 'loading';
+            return d;
+        });
+        method(d, 'write', function write() {
+            if (!st.open) d.open();
+            for (var i = 0; i < arguments.length; i++) st.buffer += String(arguments[i]);
+            pump(d, st, false);
+        });
+        method(d, 'writeln', function writeln() {
+            var a = Array.prototype.slice.call(arguments); a.push('\n');
+            return d.write.apply(d, a);
+        });
+        method(d, 'close', function close() {
+            if (!st.open) return;
+            pump(d, st, true);
+            st.open = false;
+            d.readyState = 'complete';
+        });
+    };
+    __rk.inertDocumentMethods = function (d) {
+        method(d, 'open', openInert); method(d, 'write', writeInert);
+        method(d, 'writeln', writelnInert); method(d, 'close', closeInert);
+    };
 })(typeof globalThis === 'object' ? globalThis : this);
