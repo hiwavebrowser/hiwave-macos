@@ -48,6 +48,7 @@
         }
         return e;
     }
+    N.setConvert(convert);
     function guard(f) {
         try { return f(); } catch (e) { throw convert(e); }
     }
@@ -103,12 +104,9 @@
     function makeExport(funcId, arity, index) {
         // An arrow function: no prototype and not a constructor, as an
         // exported function is in Chrome.
-        var f = (...args) => {
-            try { return N.call(funcId, args); } catch (e) { throw convert(e); }
-        };
-        Object.defineProperty(f, 'name', { value: String(index), configurable: true });
-        Object.defineProperty(f, 'length', { value: arity, configurable: true });
-        return f;
+        // A native function object (lib.rs makeExport): one frame per call,
+        // not a JS wrapper around a native.
+        return N.makeExport(funcId, arity, String(index));
     }
 
     // length 1, as in Chrome: the import object is read from arguments.

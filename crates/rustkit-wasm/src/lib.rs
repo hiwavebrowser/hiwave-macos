@@ -147,6 +147,11 @@ pub struct WasmRealm {
     /// read from a table) always answers the same id, and so the same JS
     /// function object (Chrome: `table.get(i) === exports.f`).
     func_ids: RefCell<HashMap<String, usize>>,
+    /// The prelude's `convert` (setConvert): turns a native error string
+    /// into its WebAssembly error class. Called only on an exported
+    /// function's error path; held here, not in the export closures, so no
+    /// closure holds a GC root (#1440), and released with the realm.
+    convert: RefCell<Option<boa_engine::JsObject>>,
 }
 
 impl WasmRealm {
@@ -186,6 +191,7 @@ impl WasmRealm {
             tables: RefCell::default(),
             globals: RefCell::default(),
             func_ids: RefCell::default(),
+            convert: RefCell::default(),
         })
     }
 
@@ -815,6 +821,52 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
         })
     };
     let w = weak.clone();
+    // setConvert(fn): the prelude's error conversion, for makeExport's functions.
+    let set_convert = unsafe {
+        NativeFunction::from_closure(move |_, args, _| {
+            let realm = realm_of(&w)?;
+            *realm.convert.borrow_mut() = args.first().and_then(JsValue::as_object);
+            Ok(JsValue::undefined())
+        })
+    };
+    let w = weak.clone();
+    // makeExport(funcId, arity, name): an exported function as a native
+    // function object (no prototype, not a constructor, as in Chrome). A JS
+    // wrapper frame per call cost about as much as the call itself in Boa
+    // (JetStream's richards-wasm makes 42.7M of them).
+    let make_export = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let arity = args.get(1).cloned().unwrap_or_default().to_u32(context)? as usize;
+            let name = args.get(2).cloned().unwrap_or_default().to_string(context)?;
+            let weak = w.clone();
+            let function = NativeFunction::from_closure(move |_, args, context| {
+                let realm = realm_of(&weak)?;
+                let func = realm.funcs.borrow().get(id).copied().ok_or_else(|| JsNativeError::typ().with_message("no such function"))?;
+                call_func(&realm, func, args, context).or_else(|e| {
+                    // Only this crate's error strings (wasm_error) are
+                    // converted; a JS import's exception and the turn's
+                    // uncatchable stop pass through as they are.
+                    let marked = e.as_opaque().filter(|v| v.is_string()).cloned();
+                    let convert = realm.convert.borrow().clone();
+                    match (marked, convert) {
+                        (Some(thrown), Some(convert)) => {
+                            Err(JsError::from_opaque(convert.call(&JsValue::undefined(), &[thrown], context)?))
+                        }
+                        _ => Err(e),
+                    }
+                })
+            });
+            let realm = context.realm().clone();
+            Ok(boa_engine::object::FunctionObjectBuilder::new(&realm, function)
+                .name(name)
+                .length(arity)
+                .constructor(false)
+                .build()
+                .into())
+        })
+    };
+    let w = weak.clone();
     // call(funcId, argsArray)
     let call = unsafe {
         NativeFunction::from_closure(move |_, args, context| {
@@ -1004,6 +1056,8 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
         .function(reflect, js_string!("reflect"), 2)
         .function(instantiate, js_string!("instantiate"), 2)
         .function(call, js_string!("call"), 2)
+        .function(set_convert, js_string!("setConvert"), 1)
+        .function(make_export, js_string!("makeExport"), 3)
         .build())
 }
 
