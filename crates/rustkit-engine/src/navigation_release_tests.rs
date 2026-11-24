@@ -74,3 +74,29 @@ fn navigation_releases_every_replaced_document() {
     let live = replaced.iter().filter(|d| d.strong_count() > 0).count();
     assert_eq!(live, 0, "{live} of 10 replaced documents are still held");
 }
+
+/// With nested contexts on, a page whose frame used `document.write` with
+/// scripts (the frame's realm, its spare, the written-script runner) still
+/// releases its document when navigated away from (#1440: a realm captured
+/// by the runner's native closure kept every document alive).
+#[test]
+fn navigation_releases_a_document_whose_frame_wrote_scripts() {
+    let config = EngineConfig { nested_contexts: true, ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
+    engine
+        .load_html(
+            view,
+            "<html><body><iframe id=f></iframe><script>\
+             var d = document.getElementById('f').contentDocument; \
+             if (d) { d.open(); d.write('<script>window.ran = 1<\\/script><p>w</p>'); d.close(); }\
+             </script></body></html>",
+        )
+        .expect("first load");
+    let first = current_document(&engine, view);
+    for _ in 0..3 {
+        engine.load_html(view, NEXT).expect("next load");
+    }
+    boa_gc::force_collect();
+    assert_eq!(first.strong_count(), 0, "the replaced document is still held after a collection");
+}
