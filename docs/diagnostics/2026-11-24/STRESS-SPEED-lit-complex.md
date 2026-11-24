@@ -128,3 +128,29 @@ not the cost; the named lookups are.
   score.
 - The caller of `window.parentNode` / `nodeType` is not identified.
 - Nothing was changed.
+
+## After the first fix (WINDOW-PATH-WALK)
+
+The probe found where the reads come from: our own event dispatch. Every event that reaches the
+Window asked it for `parentNode` / `nodeType` (shadow retargeting in `web_shadow.js` `rootNode` /
+`hostOf` / `includes`; the body/frameset handler check in `dom.rs` `isBodyOrFrameset`) and for
+`on<type>` (`dom.rs` `handlerOf`: `onclick`, `ontodo-add`, ...). The Window has none of those, so each
+read fell to named access. The fix stops those helpers at the Window and reads the Window's own
+`on<type>` without named access (head `2dbfd2b3`). WINDOW-NAMED-INDEX (a named-access miss that
+does not walk the document) is still to do; with this fix the workload no longer exercises it.
+
+A/B on this machine, same build settings, arms alternating, `run.py` made portable (STRESS-WINDOWS,
+#1445), every record `status: ok` with the socket watch answering (0 failed samples):
+
+| arm | TodoMVC-Lit-Complex-DOM ms (3 runs) | median |
+|---|---|---:|
+| develop `b3329bff` | 4,295.3 / 4,276.3 / 4,304.9 | 4,295.3 |
+| this fix `2dbfd2b3` | 2,924.8 / 2,920.7 / 2,931.2 | **2,924.8** |
+
+**-1,370 ms (-32%).** That is more than the 1.21 s of `parentNode` / `nodeType` walks: the
+`on<type>` reads (`onclick`, `ontodo-*`) walked the document too. The first develop run started at
+load 6.1 (just after the builds), so its record is marked not valid for load; its time matches
+the other two. Records: `P:\repos\hiwave-wt\_stress_runs\ab\speedometer_hiwave-headless_lit-{base,fix}_*`.
+
+The full Speedometer score for both arms is not measured yet: the run was stopped when the machine
+ran low on memory (the develop arm's full run was in progress).
