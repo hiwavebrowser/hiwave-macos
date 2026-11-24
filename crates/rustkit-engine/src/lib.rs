@@ -7330,18 +7330,34 @@ impl Engine {
     /// child exactly as the drain makes one for an about:blank frame, and it
     /// belongs to this document: a navigation replaces the document's
     /// bindings, and the spare goes with them ([R2]).
+    ///
+    /// Every outcome is one `debug!` line on target `frames_spare`
+    /// (`RUST_LOG=frames_spare=debug`), with `outcome` = `built`, or the
+    /// early return's reason: what shows a page's spare work, or that it
+    /// had none.
     fn refill_spare(&mut self, id: EngineViewId) {
         if !self.config.frame_spares {
+            debug!(target: "frames_spare", outcome = "off");
             return;
         }
         let Some(view) = self.views.get(&id) else { return };
         let Some(parent) = view.doc.bindings.as_ref() else { return };
-        if parent.has_spare() || !parent.window_loaded() {
+        if parent.has_spare() {
+            debug!(target: "frames_spare", outcome = "held");
+            return;
+        }
+        if !parent.window_loaded() {
+            debug!(target: "frames_spare", outcome = "before_load");
             return;
         }
         let depth = self.frame_ancestry_urls(id).len();
         let wanted = !view.frames.is_empty() || depth > 1;
-        if !wanted || depth >= MAX_FRAME_DEPTH {
+        if !wanted {
+            debug!(target: "frames_spare", outcome = "not_wanted");
+            return;
+        }
+        if depth >= MAX_FRAME_DEPTH {
+            debug!(target: "frames_spare", outcome = "too_deep");
             return;
         }
         let Ok(child) = parent.new_child() else { return };
@@ -7362,8 +7378,10 @@ impl Engine {
             return;
         }
         child.inherit_origin_from(parent);
-        if let Err(e) = parent.offer_spare(child) {
-            debug!(error = %e, "frames: the spare child was not taken");
+        match parent.offer_spare(child) {
+            Ok(true) => debug!(target: "frames_spare", outcome = "built"),
+            Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
+            Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
     }
 
