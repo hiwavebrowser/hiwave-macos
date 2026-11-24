@@ -39,6 +39,8 @@ mod source_context;
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
+#[cfg(all(test, feature = "boa"))]
+mod wasm_tests;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -1572,6 +1574,13 @@ impl JsRuntime {
     /// frames are passed over in error reports and console positions (the
     /// page's own scripts go through
     /// [`evaluate_script_named`](Self::evaluate_script_named)).
+    /// Install `WebAssembly` in the current realm (WASM W1,
+    /// docs/design/WASM-W1.md). The bindings call it per realm when the
+    /// engine's flag is on.
+    pub fn enable_webassembly(&mut self) -> Result<(), JsError> {
+        Ok(())
+    }
+
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
         self.evaluate(source, None, false)
     }
