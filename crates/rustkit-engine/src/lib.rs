@@ -522,6 +522,8 @@ mod ua_control_margin_tests;
 mod wrapped_span_strut_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_remeasure_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod emoji_presentation_fallback_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
