@@ -2309,6 +2309,7 @@ pub(crate) fn install(
                     return JsValue::String(String::new());
                 }
                 let (mut all, mut frame) = (Vec::new(), false);
+                NAMED_WALKS.with(|w| w.set(w.get() + 1));
                 document.traverse(|n| {
                     let Some(tag) = n.tag_name() else { return };
                     let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
@@ -8396,4 +8397,15 @@ fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
         };
     }
     Some(reads)
+}
+
+thread_local! {
+    /// How many times named access on the Window walked a whole document (WINDOW-NAMED-INDEX).
+    static NAMED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's count of named-access document walks (a test's count).
+#[cfg(test)]
+pub(crate) fn named_walks() -> u64 {
+    NAMED_WALKS.with(|w| w.get())
 }
