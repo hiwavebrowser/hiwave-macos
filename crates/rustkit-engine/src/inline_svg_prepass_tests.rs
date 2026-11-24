@@ -267,3 +267,39 @@ fn paint_rules_on_an_ancestor_and_on_a_sibling_follow_changes() {
     run(&mut engine, view, "document.getElementById('m').className = 'mark'");
     assert!(fills(&engine, view).contains(&(0, 255, 0)), "sibling class: {:?}", fills(&engine, view));
 }
+
+fn paint_computes() -> usize {
+    SVG_PAINT_COMPUTES.with(std::cell::Cell::get)
+}
+
+/// SVG-PREPASS-CACHE: two documents laid out in turn (a page and its frame, Speedometer's runner
+/// and a Complex-DOM workload) each keep their svg paint rules, so a DOM change in one that
+/// touches no svg recomputes no svg element's paint style. The rules were kept in one slot: each
+/// document's layout replaced the other's, the rules were read again as a new set, and every
+/// element's kept style was dropped (Lit-Complex: 3,637 elements recomputed, ~385 ms, on every
+/// relayout after a change; docs/diagnostics/2026-11-24/STRESS-SPEED-lit-complex.md).
+#[test]
+fn two_documents_laid_out_in_turn_each_keep_their_svg_paint_styles() {
+    let page = reduced_page().replace("<body>", "<body><p id=\"t\">0</p>");
+    let other = "<!DOCTYPE html><html><head><style>.o path{fill:#123456}</style></head><body>\
+                 <svg class=\"o\" width=\"10\" height=\"10\"><path d=\"M0 0h10v10H0z\"/></svg></body></html>";
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let a = engine.create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 }).expect("view a");
+    let b = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view b");
+    engine.load_html(a, &page).expect("load a");
+    engine.load_html(b, other).expect("load b");
+    engine.relayout(a).expect("relayout a");
+    engine.relayout(b).expect("relayout b");
+    let before = paint_computes();
+    for i in 1..4 {
+        engine
+            .execute_script(a, &format!("document.getElementById('t').textContent = '{i}'"))
+            .expect("script");
+        engine.relayout(b).expect("relayout b");
+    }
+    let computes = paint_computes() - before;
+    assert_eq!(
+        computes, 0,
+        "a text change in one document, the other laid out between: {computes} svg paint styles computed again"
+    );
+}
