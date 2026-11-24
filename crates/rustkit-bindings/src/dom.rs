@@ -2308,19 +2308,7 @@ pub(crate) fn install(
                 if arg.is_empty() {
                     return JsValue::String(String::new());
                 }
-                let (mut all, mut frame) = (Vec::new(), false);
-                NAMED_WALKS.with(|w| w.set(w.get() + 1));
-                document.traverse(|n| {
-                    let Some(tag) = n.tag_name() else { return };
-                    let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
-                    if n.get_attribute("id") == Some(arg)
-                        || (n.get_attribute("name") == Some(arg) && is(&["embed", "form", "img", "object"]))
-                    {
-                        all.push(n.clone());
-                    } else if n.get_attribute("name") == Some(arg) && is(&["iframe", "frame"]) {
-                        frame = true;
-                    }
-                });
+                let (all, frame) = named_lookup(document, arg);
                 if all.is_empty() && frame {
                     return JsValue::String("frame".into());
                 }
@@ -8399,9 +8387,53 @@ fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
     Some(reads)
 }
 
+/// A document's named-access index: each id, and each name on an embed/form/img/object, to its
+/// elements in tree order; `true` where an iframe/frame carries the name (and no id says it).
+type NamedIndex = HashMap<String, (Vec<std::rc::Weak<Node>>, bool)>;
+
 thread_local! {
     /// How many times named access on the Window walked a whole document (WINDOW-NAMED-INDEX).
     static NAMED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The last index built: for which document, at which DOM mutation generation. Weak nodes, so
+    /// it keeps no node (and no document) alive.
+    static NAMED_INDEX: RefCell<Option<(usize, u64, NamedIndex)>> = const { RefCell::new(None) };
+}
+
+/// Named access on the Window object (HTML §7.2.2.3): the elements whose id is `name`, or whose
+/// name is `name` on an embed, form, img or object, in tree order, and whether an iframe/frame
+/// carries the name. WINDOW-NAMED-INDEX: answered from an index of the whole document built in
+/// one walk and kept until any DOM tree on this thread changes (`mutation_generation`), so a page
+/// that reads missing globals (or the engine's own dispatch, before STRESS-SPEED's fix) no longer
+/// walks the document per read. The answers are the walk's: same matches, same order.
+fn named_lookup(document: &Document, name: &str) -> (Vec<Rc<Node>>, bool) {
+    let key = (document as *const Document as usize, rustkit_dom::mutation_generation());
+    NAMED_INDEX.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if !matches!(&*slot, Some((p, g, _)) if (*p, *g) == key) {
+            NAMED_WALKS.with(|w| w.set(w.get() + 1));
+            let mut index = NamedIndex::new();
+            document.traverse(|n| {
+                let Some(tag) = n.tag_name() else { return };
+                let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
+                let id = n.get_attribute("id").filter(|v| !v.is_empty());
+                if let Some(id) = id {
+                    index.entry(id.to_string()).or_default().0.push(Rc::downgrade(n));
+                }
+                if let Some(nm) = n.get_attribute("name").filter(|v| !v.is_empty() && Some(*v) != id) {
+                    if is(&["embed", "form", "img", "object"]) {
+                        index.entry(nm.to_string()).or_default().0.push(Rc::downgrade(n));
+                    } else if is(&["iframe", "frame"]) {
+                        index.entry(nm.to_string()).or_default().1 = true;
+                    }
+                }
+            });
+            *slot = Some((key.0, key.1, index));
+        }
+        match slot.as_ref().and_then(|(_, _, index)| index.get(name)) {
+            Some((nodes, frame)) => (nodes.iter().filter_map(std::rc::Weak::upgrade).collect(), *frame),
+            None => (Vec::new(), false),
+        }
+    })
 }
 
 /// This thread's count of named-access document walks (a test's count).
