@@ -77,10 +77,36 @@ def test_a_run_started_under_load_keeps_its_record_but_not_its_score(tmp_path):
 
 
 def test_nothing_starts_at_or_above_the_load_limit(monkeypatch):
-    monkeypatch.setattr(run.os, "getloadavg", lambda: (6.5, 6.0, 6.0))
+    monkeypatch.setattr(run, "load_avg", lambda: (6.5, 6.0, 6.0))
     assert run.wait_for_load(run.START_LOAD, 0) is False
-    monkeypatch.setattr(run.os, "getloadavg", lambda: (2.9, 6.0, 6.0))
+    monkeypatch.setattr(run, "load_avg", lambda: (2.9, 6.0, 6.0))
     assert run.wait_for_load(run.SCORE_LOAD, 0) is True
+
+
+def test_the_load_is_read_on_every_platform():
+    # STRESS-WINDOWS: macOS / Linux read the load average; Windows has none and reads the
+    # processors' use times the CPU count. Either way three finite numbers.
+    load = run.load_avg()
+    assert len(load) == 3 and all(0 <= x < float("inf") for x in load), load
+
+
+def test_windows_netstat_lines_read_as_lsof_names():
+    # STRESS-WINDOWS: `netstat -ano` stands in for `lsof -i`: this process's TCP connections,
+    # listening sockets and other processes left out.
+    text = "\n".join([
+        "Active Connections",
+        "  Proto  Local Address          Foreign Address        State           PID",
+        "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       123",
+        "  TCP    127.0.0.1:5000         127.0.0.1:6000         ESTABLISHED     123",
+        "  TCP    192.168.1.5:50000      203.0.113.7:443        ESTABLISHED     123",
+        "  TCP    192.168.1.5:50001      198.51.100.9:443       ESTABLISHED     999",
+        "  TCP    [::1]:7000             [::1]:7001             ESTABLISHED     123",
+        "  UDP    0.0.0.0:5353           *:*                                    123",
+    ])
+    names = run.parse_netstat(text, 123)
+    assert names.splitlines() == ["n127.0.0.1:5000->127.0.0.1:6000", "n192.168.1.5:50000->203.0.113.7:443",
+                                  "n[::1]:7000->[::1]:7001"], names
+    assert run.off_machine_peers(names) == {"203.0.113.7:443"}
 
 
 def test_the_server_adds_the_reporter_and_takes_the_result(tmp_path):
