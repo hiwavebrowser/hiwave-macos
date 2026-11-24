@@ -129,3 +129,19 @@ fn js_to_wasm_to_js_re_entry_three_levels_deep_and_its_bound() {
     );
 }
 
+
+/// #1453 R1 nit 1: a start function that calls a JS import runs it during
+/// instantiation, and an exception it throws comes out unchanged. Chrome 148
+/// (docs/diagnostics/2026-11-24/wasm_start_cft148.json): called once;
+/// "SyntaxError:from start".
+#[test]
+fn a_start_function_calls_its_js_import() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, "var bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,2,7,1,1,101,1,102,0,0,3,2,1,0,8,1,1,10,6,1,4,0,16,0,11]), calls = 0, r = []; \
+            new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f: () => { calls++; } } }); r.push(calls); \
+            try { new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f: () => { throw new SyntaxError('from start'); } } }); r.push('none'); } \
+            catch (e) { r.push(e.constructor.name + ':' + e.message); } r.join('|')"),
+        "1|SyntaxError:from start"
+    );
+}
