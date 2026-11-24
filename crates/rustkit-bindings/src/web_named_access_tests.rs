@@ -155,3 +155,49 @@ fn shadow_and_template_ids_are_not_named_properties() {
         "undefined,undefined,undefined,false"
     );
 }
+
+// WINDOW-NAMED-INDEX: a lookup is answered from an index of the document's ids and names, kept
+// until the DOM changes, instead of a walk of the whole document per lookup (Speedometer's
+// Complex-DOM pages: ~0.12 ms a walk, docs/diagnostics/2026-11-24/STRESS-SPEED-lit-complex.md).
+// The answers around every kind of change are Chrome for Testing 148.0.7778.216's (win64):
+// docs/diagnostics/2026-11-24/window_named_index_cft148.json
+// (tools/parity_oracle/window_named_index_log.mjs, this PAGE and this script).
+
+const AROUND_CHANGES: &str = "
+function d(v) { return v === undefined ? 'undefined' : v instanceof HTMLCollection ? 'C' + v.length : v.localName + (v.id ? '#' + v.id : ''); }
+var out = [];
+out.push(d(window.target), d(window.signup), d(window.notexposed), d(window.dup), d(window.both), d(window.missing));
+var e = document.createElement('div'); e.id = 'late'; document.body.appendChild(e);
+out.push(d(window.late));
+e.id = 'renamed'; out.push(d(window.late), d(window.renamed));
+e.remove(); out.push(d(window.renamed));
+document.getElementById('target').setAttribute('id', 'moved'); out.push(d(window.target), d(window.moved));
+var f = document.createElement('form'); f.setAttribute('name', 'late2'); document.body.appendChild(f); out.push(d(window.late2));
+f.setAttribute('name', 'late3'); out.push(d(window.late2), d(window.late3));
+var s = document.createElement('span'); s.setAttribute('name', 'late4'); document.body.appendChild(s); out.push(d(window.late4));
+document.body.insertAdjacentHTML('beforeend', '<p id=dup>c</p>'); out.push(d(window.dup));
+var t = document.createElement('div'); t.id = 'kid'; var p = document.createElement('section'); p.appendChild(t); out.push(d(window.kid)); document.body.appendChild(p); out.push(d(window.kid));
+out.join(' ');
+";
+
+#[test]
+fn named_access_answers_as_chrome_around_every_kind_of_change() {
+    let b = bound();
+    assert_eq!(
+        ev(&b, AROUND_CHANGES),
+        "div#target form undefined C2 C2 undefined div#late undefined div#renamed undefined undefined div#moved \
+         form undefined form undefined C3 undefined div#kid"
+    );
+}
+
+#[test]
+fn a_thousand_reads_of_missing_names_walk_the_document_at_most_once() {
+    let b = bound();
+    let before = crate::dom::named_walks();
+    assert_eq!(
+        ev(&b, "var u = 0; for (var i = 0; i < 1000; i++) { if (window['missing' + (i % 10)] === undefined) u++; } u"),
+        "1000"
+    );
+    let walks = crate::dom::named_walks() - before;
+    assert!(walks <= 1, "1000 named-access misses with no change to the document walked it {walks} times");
+}

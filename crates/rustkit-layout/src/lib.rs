@@ -3150,34 +3150,54 @@ impl LayoutBox {
         d.content.x = containing_block.content.x + d.margin.left + d.border.left + d.padding.left;
         d.content.y = containing_block.content.y + containing_block.content.height;
 
+        // `width` / `height` do not apply to a non-replaced inline (CSS 2
+        // §10.3.1, §10.6.1): its box is its content, whatever they say
+        // (Chrome 148; INLINE-SIZE-IGNORED). Only a box whose display IS
+        // `inline` and is not replaced drops them: an atomic inline keeps
+        // them, and so do the replaced elements built as inline boxes here
+        // (`<iframe>` with nested contexts off, `<object>`, `<embed>`; #1444
+        // R1: they kept their CSS size in Chrome and on develop).
+        let replaced = self
+            .identity
+            .as_ref()
+            .is_some_and(|i| matches!(i.tag.as_str(), "iframe" | "object" | "embed"));
+        let sized = self.style.display != rustkit_css::Display::Inline || replaced;
         // Check for explicit CSS width first
-        let explicit_width = match self.style.width {
-            Length::Px(px) if px > 0.0 => Some(px),
-            Length::Percent(pct) if pct > 0.0 => Some(pct / 100.0 * container_width),
-            Length::Em(em) if em > 0.0 => {
-                let font_size = match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                };
-                Some(em * font_size)
+        let explicit_width = if !sized {
+            None
+        } else {
+            match self.style.width {
+                Length::Px(px) if px > 0.0 => Some(px),
+                Length::Percent(pct) if pct > 0.0 => Some(pct / 100.0 * container_width),
+                Length::Em(em) if em > 0.0 => {
+                    let font_size = match self.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    Some(em * font_size)
+                }
+                _ => None,
             }
-            _ => None,
         };
 
         // Check for explicit CSS height
-        let explicit_height = match self.style.height {
-            Length::Px(px) if px > 0.0 => Some(px),
-            Length::Percent(pct) if pct > 0.0 && containing_block.content.height > 0.0 => {
-                Some(pct / 100.0 * containing_block.content.height)
+        let explicit_height = if !sized {
+            None
+        } else {
+            match self.style.height {
+                Length::Px(px) if px > 0.0 => Some(px),
+                Length::Percent(pct) if pct > 0.0 && containing_block.content.height > 0.0 => {
+                    Some(pct / 100.0 * containing_block.content.height)
+                }
+                Length::Em(em) if em > 0.0 => {
+                    let font_size = match self.style.font_size {
+                        Length::Px(px) => px,
+                        _ => 16.0,
+                    };
+                    Some(em * font_size)
+                }
+                _ => None,
             }
-            Length::Em(em) if em > 0.0 => {
-                let font_size = match self.style.font_size {
-                    Length::Px(px) => px,
-                    _ => 16.0,
-                };
-                Some(em * font_size)
-            }
-            _ => None,
         };
 
         // Layout inline children sequentially
@@ -5600,8 +5620,8 @@ impl LayoutBox {
         percent_height_base: Option<f32>,
     ) {
         let laid_out_at = (self.dimensions.content.x, self.dimensions.content.y);
-        // Calculate dimensions
-        self.calculate_block_width(containing_block);
+        // Calculate dimensions (the base gives a percentage-height aspect-ratio width)
+        self.calculate_block_width_based(containing_block, percent_height_base);
         self.calculate_block_vertical_box_model(containing_block);
 
         // Find position based on float type
@@ -5989,7 +6009,19 @@ impl LayoutBox {
         //
         // Only the lengths that actually depend on the base are recomputed:
         // a `Px` height is already right, and an `auto` one is its content.
+        // Set when the ratio below gives this box another width than the one
+        // its children were laid out at: they are laid out again at it.
+        let mut ratio_rewidth = false;
         if matches!(self.style.height, Length::Percent(_) | Length::Calc(_)) {
+            // With an aspect-ratio the width follows that height: the flow
+            // pass had no base and shrank it to its content (Chrome 148:
+            // `height:50%; aspect-ratio:2` in a 200px positioned parent is
+            // 200x100). The width goes first; the height is resolved after.
+            if self.style.aspect_ratio.is_some() && matches!(self.box_type, BoxType::Block) {
+                self.percent_height_is_auto = false;
+                self.calculate_block_width_based(containing_block, Some(containing_block.content.height));
+                ratio_rewidth = (self.dimensions.content.width - origin_w).abs() > 0.01;
+            }
             self.calculate_block_height(Some(containing_block.content.height));
         }
         // A replaced box is sized by `layout_image_in`, not by
@@ -6049,15 +6081,25 @@ impl LayoutBox {
         // edge. Passing the containing block as well keeps step 11d's
         // re-derivation on the same number.
         let mut relaid = false;
+        // A flex or grid container whose width the ratio re-derived is laid
+        // out again as itself (#1443 delta R1: through the block path its
+        // flex row stacked); a plain block below.
+        let plain_block = matches!(self.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !(self.style.display.is_flex() || self.style.display.is_grid() || self.style.display.is_table());
         if self.style.display.is_flex()
-            && self.inset_definite_content_height(containing_block).is_some()
+            && (ratio_rewidth || self.inset_definite_content_height(containing_block).is_some())
         {
             crate::flex::layout_flex_container_in(
                 self,
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
-        } else if self.needs_percent_relayout_after_reanchor(containing_block) {
+        } else if self.style.display.is_grid() && ratio_rewidth {
+            grid::layout_grid_container(self, self.dimensions.content.width, self.dimensions.content.height);
+        } else if (ratio_rewidth && plain_block) || self.needs_percent_relayout_after_reanchor(containing_block) {
+            // (Also when the ratio re-derived a plain block's width: the
+            // children were laid out at the flow pass's width, so a centred
+            // line stayed at x=0 and text did not wrap; #1443 R1 nit 1.)
             // The block path has the same hole for percentages: the children
             // resolved `height: 100%` before this box had a height, so they
             // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
@@ -6219,8 +6261,18 @@ impl LayoutBox {
             let left = offsets.left.unwrap();
             let right = offsets.right.unwrap();
 
-            // Calculate stretched width if width is auto
-            if matches!(self.style.width, Length::Auto) && !replaced_image {
+            // Calculate stretched width if width is auto. A definite height
+            // and an aspect-ratio give the width instead (Chrome 148:
+            // `left:0; right:0; height:100px; aspect-ratio:2` is 200 wide, not
+            // the 600 between the insets); that width was set with the box.
+            let pb_w = self.dimensions.border.left
+                + self.dimensions.border_with_gutter().right
+                + self.dimensions.padding.left
+                + self.dimensions.padding.right;
+            let ratio_width = self
+                .aspect_ratio_width_from_height(containing_block, Some(containing_block.content.height), pb_w)
+                .is_some();
+            if matches!(self.style.width, Length::Auto) && !replaced_image && !ratio_width {
                 let available_width = containing_block.content.width
                     - left
                     - right
@@ -6338,6 +6390,9 @@ impl LayoutBox {
         })
     }
 
+    /// `calculate_block_width_based` with no definite height handed down:
+    /// the tests' entry point (layout itself passes the parent's base).
+    #[cfg(test)]
     fn calculate_block_width(&mut self, containing_block: &Dimensions) {
         self.calculate_block_width_based(containing_block, None);
     }
@@ -6372,6 +6427,18 @@ impl LayoutBox {
                     // border-box width, so strip this box's padding and border.
                     let pb = border_left + border_right + padding_left + padding_right;
                     (crate::grid::estimate_max_content_width(self) - pb).max(0.0)
+                } else if let Some(width) = self.aspect_ratio_width_from_height(
+                    containing_block,
+                    percent_base,
+                    border_left + border_right + padding_left + padding_right,
+                ) {
+                    // css-sizing-4 §5.1: with a definite height, the ratio
+                    // gives the auto width, ahead of fill AND of shrink-to-fit:
+                    // a float, inline-block, absolutely positioned box (even
+                    // with left and right) or table with `height:100px;
+                    // aspect-ratio:2` is 200 wide in Chrome 148, and a ratio
+                    // of 10 is 1000 wide in a 600px parent (not clamped).
+                    width
                 } else if style.display.is_atomic_inline() {
                     // CSS2 §10.3.9: an atomic inline (inline-block/-flex/
                     // -grid) with width:auto shrinks to fit —
@@ -6411,16 +6478,6 @@ impl LayoutBox {
                     // An auto-width table does too (§17.5.2.2: its max-content
                     // width, clamped to the containing block).
                     shrink_to_fit_content_width(self, available)
-                } else if let Some(width) = self.aspect_ratio_width_from_height(
-                    containing_block,
-                    percent_base,
-                    border_left + border_right + padding_left + padding_right,
-                ) {
-                    // css-sizing-4 §5.1: with a definite height, the ratio
-                    // gives the auto width instead of the fill (Chrome 148:
-                    // `height:100px; aspect-ratio:1` is 100 wide, and a ratio
-                    // of 10 is 1000 wide in a 600px parent: not clamped to it).
-                    width
                 } else {
                     // Fill available space (CSS 2.1 §10.3.3)
                     available
@@ -15173,6 +15230,64 @@ pub fn measure_text_advanced(
 /// strings.
 pub(crate) const TEXT_MEASURE_MEMO_CAP: usize = 16384;
 
+/// The text-measure memo's key (TEXT-MEMO-KEY): the text, the family name
+/// and the numbers that select a measurement. Owned only when stored; a
+/// lookup borrows the strings ([`MeasureKeyLike`]).
+#[derive(PartialEq, Eq)]
+struct MeasureKey {
+    text: String,
+    family: String,
+    nums: MeasureNums,
+}
+
+/// Size, weight, style, letter and word spacing, as bits.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MeasureNums(u32, u16, u8, u32, u32);
+
+/// One view of a measure key, owned or borrowed: both hash and compare
+/// through `parts`, so a borrowed probe finds the owned entry.
+trait MeasureKeyLike {
+    fn parts(&self) -> (&str, &str, MeasureNums);
+}
+
+impl MeasureKeyLike for MeasureKey {
+    fn parts(&self) -> (&str, &str, MeasureNums) {
+        (&self.text, &self.family, self.nums)
+    }
+}
+
+impl MeasureKeyLike for (&str, &str, MeasureNums) {
+    fn parts(&self) -> (&str, &str, MeasureNums) {
+        *self
+    }
+}
+
+impl std::hash::Hash for MeasureKey {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.parts().hash(h)
+    }
+}
+
+impl std::hash::Hash for dyn MeasureKeyLike + '_ {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.parts().hash(h)
+    }
+}
+
+impl PartialEq for dyn MeasureKeyLike + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for dyn MeasureKeyLike + '_ {}
+
+impl<'a> std::borrow::Borrow<dyn MeasureKeyLike + 'a> for std::rc::Rc<MeasureKey> {
+    fn borrow(&self) -> &(dyn MeasureKeyLike + 'a) {
+        &**self
+    }
+}
+
 /// Measure text using the text shaper with letter-spacing and word-spacing.
 ///
 /// This provides accurate text measurement using DirectWrite on Windows,
@@ -15196,30 +15311,33 @@ pub fn measure_text_with_spacing(
 ) -> TextMetrics {
     use std::cell::RefCell;
 
-    type Key = (String, String, u32, u16, u8, u32, u32);
     thread_local! {
-        static MEMO: RefCell<text_memo::TextMemo<Key, TextMetrics>> =
+        static MEMO: RefCell<text_memo::TextMemo<MeasureKey, TextMetrics>> =
             RefCell::new(text_memo::TextMemo::new(TEXT_MEASURE_MEMO_CAP));
     }
 
     let generation = rustkit_text::webfonts::generation();
-    let key: Key = (
-        text.to_string(),
-        font_family.to_string(),
+    let nums = MeasureNums(
         font_size.to_bits(),
         font_weight.0,
         font_style as u8,
         letter_spacing.to_bits(),
         word_spacing.to_bits(),
     );
+    // Looked up by the borrowed text and family name: only a miss builds the
+    // owned key it stores (TEXT-MEMO-KEY).
+    let probe = (text, font_family, nums);
     let cached = MEMO.with(|m| {
         let mut m = m.borrow_mut();
         m.sync_generation(generation);
-        m.get(&key)
+        m.get_by(&probe as &dyn MeasureKeyLike)
     });
     if let Some(metrics) = cached {
         return metrics;
     }
+    #[cfg(test)]
+    TEXT_MEASURE_KEYS.with(|n| n.set(n.get() + 1));
+    let key = MeasureKey { text: text.to_string(), family: font_family.to_string(), nums };
     let metrics = shape_text_metrics(
         text,
         font_family,
@@ -15238,6 +15356,13 @@ thread_local! {
     /// Uncached text measurements on this thread (see
     /// `measure_text_with_spacing`).
     static TEXT_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Owned memo keys `measure_text_with_spacing` built on this thread (a
+    /// copy of the text and of the family name each): TEXT-MEMO-KEY.
+    pub(crate) static TEXT_MEASURE_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Shape `text` and return its metrics (uncached; see
@@ -18569,17 +18694,39 @@ mod tests {
         );
 
         // Inline span with an explicit 50px width is centered: (200-50)/2 = 75.
+        // An inline-block with `width: 50px` is centred: (200-50)/2 = 75. A
+        // plain inline ignores `width` (INLINE-SIZE-IGNORED): empty, it is a
+        // zero-width box at the centre, 100. Chrome for Testing 148
+        // (docs/diagnostics/2026-11-24/inline_size_ignored_center_cft148.txt):
+        // inline-block x=75 w=50; plain span x=100 w=0.
         let mut span_style = ComputedStyle::new();
         span_style.text_align = TextAlign::Center;
         span_style.width = Length::Px(50.0);
+        span_style.display = rustkit_css::Display::InlineBlock;
         let mut block2 = LayoutBox::new(BoxType::Block, block_style.clone());
         block2
             .children
-            .push(LayoutBox::new(BoxType::Inline, span_style));
+            .push(LayoutBox::new(BoxType::Inline, span_style.clone()));
         block2.layout(&cb);
         assert_eq!(
             block2.children[0].dimensions.content.x, 75.0,
-            "inline box should be centered"
+            "inline-block box should be centered"
+        );
+        span_style.display = rustkit_css::Display::Inline;
+        let mut block2b = LayoutBox::new(BoxType::Block, block_style.clone());
+        block2b
+            .children
+            .push(LayoutBox::new(BoxType::Inline, span_style));
+        block2b.layout(&cb);
+        // It is zero-width, as in Chrome. LIMIT, pinned so it is seen: RustKit
+        // leaves an EMPTY inline at the line's start (x=0) in a centred line,
+        // where Chrome puts it at the centre (100). That is the same box as an
+        // empty span with no width, on develop too: row EMPTY-INLINE-ALIGN,
+        // not this one's.
+        assert_eq!(
+            (block2b.children[0].dimensions.content.x, block2b.children[0].dimensions.content.width),
+            (0.0, 0.0),
+            "a plain inline ignores width (zero-width); its x is the EMPTY-INLINE-ALIGN limit"
         );
 
         // Realistic <div center><span>Hi</span></div>: the span box and its
@@ -20754,10 +20901,10 @@ mod tests {
         a_style.display = rustkit_css::Display::Inline;
         a_style.line_height = rustkit_css::LineHeight::Number(1.5);
         a_style.font_size = Length::Px(16.0);
-        // Width so the line has content and flushes; inline width is not
-        // spec-honored but the advance mechanism under test does not care.
-        a_style.width = Length::Px(50.0);
-        let a = LayoutBox::new(BoxType::Inline, a_style);
+        // A text child so the line has content and flushes (a plain inline's
+        // `width` is not honoured: INLINE-SIZE-IGNORED).
+        let mut a = LayoutBox::new(BoxType::Inline, a_style.clone());
+        a.children.push(LayoutBox::new(BoxType::Text("x".to_string()), a_style));
         let (content, half) = a.inline_content_area();
         assert!(
             content < 24.0 * 0.9,

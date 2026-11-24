@@ -15,7 +15,7 @@
 use crate::text::{
     shape_memo_misses, shaped_memo_bytes, FontFamilyChain, TextShaper, SHAPED_TEXT_MEMO_BYTES,
 };
-use crate::{measure_text_with_spacing, TEXT_MEASURE_MEMO_CAP, TEXT_SHAPES};
+use crate::{measure_text_with_spacing, TEXT_MEASURE_KEYS, TEXT_MEASURE_MEMO_CAP, TEXT_SHAPES};
 use rustkit_css::{FontStretch, FontStyle, FontWeight};
 
 /// Distinct strings beyond the cap.
@@ -237,5 +237,25 @@ fn geometry_is_the_same_with_the_text_memos_bypassed_cold_and_warm() {
     }
     for (i, (u, w)) in uncached.iter().zip(&warm).enumerate() {
         assert_eq!(u, w, "box {i}: uncached vs second cached pass");
+    }
+}
+
+/// TEXT-MEMO-KEY: a measurement the memo already holds is answered without
+/// building an owned key (two `String` copies). NewsSite-Nuxt makes 8.7
+/// million such lookups in one Speedometer run, all hits
+/// (docs/diagnostics/2026-11-24/STRESS-SPEED-newssite.md). Only a miss builds
+/// the key it stores; the answer is the same either way.
+#[test]
+fn a_measure_memo_hit_builds_no_key() {
+    let measure = || {
+        measure_text_with_spacing("key copy probe", "sans-serif", 15.0, FontWeight(400), FontStyle::Normal, 0.0, 0.0)
+    };
+    let first = measure();
+    let before = TEXT_MEASURE_KEYS.with(std::cell::Cell::get);
+    let again: Vec<_> = (0..3).map(|_| measure()).collect();
+    assert_eq!(TEXT_MEASURE_KEYS.with(std::cell::Cell::get) - before, 0, "a hit builds no owned key");
+    for m in again {
+        assert_eq!(m.width, first.width);
+        assert_eq!(m.height, first.height);
     }
 }
