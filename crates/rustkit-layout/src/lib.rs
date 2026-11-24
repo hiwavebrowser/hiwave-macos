@@ -6061,18 +6061,25 @@ impl LayoutBox {
         // edge. Passing the containing block as well keeps step 11d's
         // re-derivation on the same number.
         let mut relaid = false;
+        // A flex or grid container whose width the ratio re-derived is laid
+        // out again as itself (#1443 delta R1: through the block path its
+        // flex row stacked); a plain block below.
+        let plain_block = matches!(self.box_type, BoxType::Block | BoxType::AnonymousBlock)
+            && !(self.style.display.is_flex() || self.style.display.is_grid() || self.style.display.is_table());
         if self.style.display.is_flex()
-            && self.inset_definite_content_height(containing_block).is_some()
+            && (ratio_rewidth || self.inset_definite_content_height(containing_block).is_some())
         {
             crate::flex::layout_flex_container_in(
                 self,
                 &self.dimensions.clone(),
                 Some(containing_block),
             );
-        } else if ratio_rewidth || self.needs_percent_relayout_after_reanchor(containing_block) {
-            // (Also when the ratio re-derived the width: the children were
-            // laid out at the flow pass's width, so a centred line stayed at
-            // x=0 and text did not wrap to the new width; #1443 R1 nit 1.)
+        } else if self.style.display.is_grid() && ratio_rewidth {
+            grid::layout_grid_container(self, self.dimensions.content.width, self.dimensions.content.height);
+        } else if (ratio_rewidth && plain_block) || self.needs_percent_relayout_after_reanchor(containing_block) {
+            // (Also when the ratio re-derived a plain block's width: the
+            // children were laid out at the flow pass's width, so a centred
+            // line stayed at x=0 and text did not wrap; #1443 R1 nit 1.)
             // The block path has the same hole for percentages: the children
             // resolved `height: 100%` before this box had a height, so they
             // took the no-base fallback. `inset: 0` > `h-full` > `h-full`
