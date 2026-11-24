@@ -503,6 +503,8 @@ mod computed_display_tests;
 #[cfg(test)]
 mod empty_block_box_tests;
 #[cfg(test)]
+mod inline_size_ignored_tests;
+#[cfg(test)]
 mod aspect_ratio_width_tests;
 #[cfg(all(test, feature = "headless"))]
 mod attr_write_style_tests;
