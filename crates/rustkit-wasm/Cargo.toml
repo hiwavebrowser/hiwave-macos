@@ -10,7 +10,15 @@ license = "AGPL-3.0-or-later"
 boa_engine = "0.22"
 # WebAssembly interpreter (MIT OR Apache-2.0), approved 2026-11-14. Pinned: W1's design was
 # checked against 2.0.0's source. Only the features W1 uses.
-wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate"] }
+# `portable-dispatch` (wasmi's loop dispatch) is required. wasmi's default
+# dispatch is tail calls, flat on the native stack only when LLVM turns them
+# into jumps; `auto-dispatch` still picks them for any optimized build (this
+# workspace's dev profile builds dependencies at opt-level 2), and there they
+# grew the stack per executed instruction: a 100,000-iteration loop
+# overflowed a 16 MiB thread and aborted the process. Loop dispatch never
+# relies on the optimizer, at some speed cost (wasmi's docs); measuring
+# tail-call dispatch in release behind a guard test is a follow-up row.
+wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch"] }
 # wasmi's own core crate, at wasmi's pinned version: its ResourceLimiter's error type
 # (LimiterError) is public only here (wasmi re-exports it from a private module).
 wasmi_core = { version = "=2.0.0", default-features = false, features = ["std"] }

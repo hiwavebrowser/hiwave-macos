@@ -273,3 +273,25 @@ fn globals_and_global_imports() {
         "41|41|[object WebAssembly.Global]|41|5|NaN|TypeError|bigint|1.100000023841858|LinkError|LinkError|LinkError"
     );
 }
+
+/// (import "env" "cb" (func)); spin(); count(n) loops n times and returns 0; nest() calls env.cb.
+const LOOPS: &str = "new Uint8Array([0,97,115,109,1,0,0,0,1,9,2,96,0,0,96,1,127,1,127,2,10,1,3,101,110,118,2,99,98,0,0,3,4,3,0,1,0,7,23,3,4,115,112,105,110,0,1,5,99,111,117,110,116,0,2,4,110,101,115,116,0,3,10,31,3,7,0,3,64,12,0,11,11,16,0,3,64,32,0,65,1,107,34,0,13,0,11,32,0,11,4,0,16,0,11])";
+
+/// A long wasm loop runs on a script thread without growing the native
+/// stack. Built without wasmi's loop dispatch, wasmi used tail-call dispatch,
+/// which grew the stack per executed instruction when the optimizer did not
+/// turn the calls into jumps: count(100000) overflowed a 16 MiB thread and
+/// aborted the process.
+#[test]
+fn a_long_wasm_loop_does_not_grow_the_native_stack() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let mut rt = rt();
+            let _ = tx.send(eval(&mut rt, &format!("var ex = new WebAssembly.Instance(new WebAssembly.Module({LOOPS}), \
+                {{ env: {{ cb: () => 0 }} }}).exports; String(ex.count(20000000))")));
+        })
+        .expect("thread");
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(120)).expect("finished"), "0");
+}
