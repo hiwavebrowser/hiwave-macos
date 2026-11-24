@@ -539,8 +539,8 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
-    "imageFailed", "imageFailedFor", "joinTimers", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "inertDocumentMethods", "inertFrameDocument", "inlineStyleParses", "installFrameWrite", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
+    "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
+    "implicitSubmit", "inertDocumentMethods", "inertFrameDocument", "inlineStyleParses", "installFrameWrite", "isDispatching", "joinTimers", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "pendingFrameRound", "perfNow", "pickOption", "realTop", "registerProperty", "resizeHeld", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
@@ -2086,6 +2086,9 @@ impl DomBindings {
                     let prebuilt = mode & 4 != 0;
                     let mode = mode & 3;
                     queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1, prebuilt });
+                    // Kept: the page half may attach the spare (a refused
+                    // request, past the bound, gets none).
+                    return JsValue::Boolean(true);
                 }
                 JsValue::Null
             }),

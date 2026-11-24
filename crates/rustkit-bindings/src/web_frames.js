@@ -99,14 +99,19 @@
         }
         // The spare, for the insertion's blank document. Not for a sandboxed
         // frame (the engine leaves it blank: the floor).
+        var s = null;
         if ((inserted || parsed) && url === 'about:blank' && spare && getAttr(el, 'sandbox') === null) {
-            var s = spare;
+            s = spare;
+            mode |= PREBUILT;
+        }
+        // Attached only once the engine kept the request: a refused one
+        // (past the bound) leaves the spare with the document.
+        var kept = request(id, url, mode) === true;
+        if (s && kept) {
             spare = null;
             frames[id].win = s.win;
             s.become(g, __rk.realTop, el);
-            mode |= PREBUILT;
         }
-        request(id, url, mode);
     }
     function gone(el) {
         var id = HOOKS.nodeId(el);

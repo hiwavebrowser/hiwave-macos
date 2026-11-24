@@ -435,6 +435,14 @@
         var el = target.lastElementChild;
         if (!el || el.localName !== 'script') return;
         var type = el.getAttribute('type'), src = el.getAttribute('src');
+        // A frame removed from its document runs nothing written (Chrome).
+        if (!st.frame || !st.frame.isConnected) return;
+        // A module is deferred in Chrome; not run here (the stated limit is
+        // classic inline and blob: scripts).
+        if (type !== null && /^\s*module\s*$/i.test(type)) {
+            if (__rk.unsupported) __rk.unsupported('document.write', 'a written module script');
+            return;
+        }
         var source = text;
         if (src !== null) {
             var url = String(src).split('#')[0];
@@ -442,8 +450,26 @@
             if (!found) { if (__rk.unsupported) __rk.unsupported('document.write', 'a written script src other than blob:'); return; }
             try { source = new g.TextDecoder().decode(new Uint8Array(found[0])); } catch (e) { return; }
         }
-        if (type !== null && !/^(text|application)\/(java|ecma)script$|^module$/i.test(type) && type !== '') return;
-        try { runWritten(source); } catch (e) { try { __rk.reportError(e); } catch (_) {} }
+        if (type !== null && !/^(text|application)\/(java|ecma)script$/i.test(type) && type !== '') return;
+        // What the outer write still holds waits while this script runs:
+        // markup the script writes goes in first, where the parser is
+        // (Chrome: `<i>` then `<b>`).
+        var rest = st.buffer;
+        st.buffer = '';
+        try {
+            runWritten(source);
+        } catch (e) {
+            // Reported now, inside write, before the next written script
+            // (Chrome): the engine's own trusted ErrorEvent at this window,
+            // dispatched synchronously (reportError's event comes on a
+            // later turn here).
+            try {
+                var msg = 'Uncaught ' + (e && typeof e === 'object' && e.name !== undefined ? e.name + ': ' + e.message : String(e));
+                if (st.fire) st.fire(e, msg, '', 0, 0); else __rk.reportError(e);
+            } catch (_) {}
+        } finally {
+            st.buffer += rest;
+        }
     }
     // Parse what has been written so far; `final` (close): everything.
     function pump(d, st, final) {
@@ -462,11 +488,13 @@
         st.buffer = st.buffer.slice(keepFrom);
     }
     var writeInstalled = null;
-    __rk.installFrameWrite = function () {
+    __rk.installFrameWrite = function (frameEl) {
         var d = g.document;
         if (!d || !runWritten || writeInstalled === d) return;
         writeInstalled = d;
-        var st = { buffer: '', open: false, inBody: false };
+        // Taken now, before any of the frame's page script runs.
+        var st = { buffer: '', open: false, inBody: false, frame: frameEl || null,
+                   fire: typeof __rk.fireError === 'function' ? __rk.fireError : null };
         method(d, 'open', function open() {
             while (d.firstChild) d.removeChild(d.firstChild);
             st.buffer = ''; st.open = true; st.inBody = false;
