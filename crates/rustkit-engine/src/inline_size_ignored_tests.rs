@@ -82,3 +82,21 @@ fn atomic_inlines_replaced_elements_and_flex_and_grid_items_keep_it() {
     assert_eq!(wh("fi"), (120.0, 30.0));
     assert_eq!(wh("gi"), (120.0, 30.0));
 }
+
+/// #1444 R1 HOLD: replaced elements that RustKit builds as inline boxes (an
+/// `<iframe>` with nested contexts off, an `<object>`) keep their CSS size.
+/// Chrome for Testing 148 (inline_size_ignored_replaced_cft148.txt): iframe
+/// 120x30, object 120x30, the iframe centred in a 600px line at x=240. (An
+/// `<embed>` with no src is not rendered in Chrome, 0x0: not pinned.)
+#[test]
+fn replaced_elements_built_as_inline_boxes_keep_their_size() {
+    let root = laid_out(
+        r#"<div><iframe id="ifr" style="width:120px;height:30px;border:0"></iframe></div>
+<div><object id="obj" style="width:120px;height:30px"></object></div>
+<div style="width:600px;text-align:center"><iframe id="ifc" style="width:120px;height:30px;border:0"></iframe></div>"#,
+    );
+    let r = |id: &str| rect(&root, id);
+    assert_eq!((r("ifr").2, r("ifr").3), (120.0, 30.0), "iframe");
+    assert_eq!((r("obj").2, r("obj").3), (120.0, 30.0), "object");
+    assert_eq!((r("ifc").0, r("ifc").2), (240.0, 120.0), "the centred iframe");
+}
