@@ -154,7 +154,11 @@ impl WasmRealm {
         // Stated W1 gaps (docs/design/WASM-W1.md): no memory64, no SIMD. Both
         // are left out at build time (wasmi without its `memory64` and `simd`
         // features), so a module using either fails validation.
-        let config = wasmi::Config::default();
+        // Fuel: every call runs in slices of FUEL_SLICE, and between slices
+        // the JS context's interrupt word is checked (`call_func`), so the
+        // turn's budget stops wasm where it would stop script.
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(true);
         let engine = wasmi::Engine::new(&config);
         let id = NEXT_REALM.with(|n| {
             let id = n.get();
@@ -400,10 +404,14 @@ fn call_func(realm: &WasmRealm, func: wasmi::Func, args: &[JsValue], context: &m
         if ctx.data().contexts.len() >= MAX_NESTING {
             return Err((None, Some(overflow())));
         }
-        ctx.data_mut().contexts.push(context as *mut Context);
-        let r = func.call(&mut ctx, &params, &mut results);
+        let context_ptr = context as *mut Context;
+        ctx.data_mut().contexts.push(context_ptr);
+        let r = run_in_slices(&mut ctx, func, &params, &mut results, context_ptr);
         ctx.data_mut().contexts.pop();
-        r.map_err(|e| (Some(e), ctx.data_mut().pending.take()))
+        r.map_err(|e| match e {
+            Stop::Wasm(e) => (Some(e), ctx.data_mut().pending.take()),
+            Stop::Interrupted(stop) => (None, Some(stop)),
+        })
     });
     match outcome {
         Ok(()) => match results.len() {
@@ -422,6 +430,49 @@ fn call_func(realm: &WasmRealm, func: wasmi::Func, args: &[JsValue], context: &m
             None => Err(wasm_error("RuntimeError", e)),
         },
         Err((None, None)) => Err(wasm_error("RuntimeError", "trap")),
+    }
+}
+
+/// Fuel per slice: between slices the turn's interrupt word is checked. About
+/// a millisecond of wasmi's loop dispatch at a few hundred million
+/// instructions a second, so a stop lands within the watchdog's slack.
+const FUEL_SLICE: u64 = 1_000_000;
+
+/// Why a sliced call ended early.
+enum Stop {
+    /// A trap, or a JS import's error (its exception is in `HostData::pending`).
+    Wasm(wasmi::Error),
+    /// The JS context's interrupt word stopped the turn: Boa's own uncatchable error.
+    Interrupted(JsError),
+}
+
+/// Call `func` in slices of FUEL_SLICE (call_resumable), checking the JS
+/// context's interrupt word whenever a slice runs out. Used at every level,
+/// outermost and nested inside a JS import alike: a plain call that ran out
+/// of fuel would trap instead of being resumed.
+fn run_in_slices(
+    ctx: &mut wasmi::StoreContextMut<'_, HostData>,
+    func: wasmi::Func,
+    params: &[wasmi::Val],
+    results: &mut [wasmi::Val],
+    context: *mut Context,
+) -> Result<(), Stop> {
+    ctx.set_fuel(FUEL_SLICE).map_err(Stop::Wasm)?;
+    let mut call = func.call_resumable(&mut *ctx, params, results).map_err(Stop::Wasm)?;
+    loop {
+        match call {
+            wasmi::ResumableCall::Finished => return Ok(()),
+            wasmi::ResumableCall::HostTrap(trap) => return Err(Stop::Wasm(trap.into_host_error())),
+            wasmi::ResumableCall::OutOfFuel(paused) => {
+                // SAFETY: `context` is the JS context that made this call; it
+                // outlives the call (call_func's caller holds it).
+                if let Err(stop) = unsafe { &*context }.check_interrupt_now() {
+                    return Err(Stop::Interrupted(stop));
+                }
+                ctx.set_fuel(FUEL_SLICE).map_err(Stop::Wasm)?;
+                call = paused.resume(&mut *ctx, results).map_err(Stop::Wasm)?;
+            }
+        }
     }
 }
 
@@ -653,7 +704,14 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                     }
                 }
                 ctx.data_mut().contexts.push(context_ptr);
+                // wasmi runs a start function with a plain call, which can't be
+                // resumed after a slice: it gets unlimited fuel, so a start
+                // function that never ends is not stopped (stated W1 gap; a
+                // wasm call already running around this one gets a fresh slice
+                // back below and is stopped at its next one).
+                let _ = ctx.set_fuel(u64::MAX);
                 let started = linker.instantiate_and_start(&mut ctx, &module);
+                let _ = ctx.set_fuel(FUEL_SLICE);
                 ctx.data_mut().contexts.pop();
                 let instance = started.map_err(|e| match ctx.data_mut().pending.take() {
                     // The start function's JS import threw: that, unchanged.
