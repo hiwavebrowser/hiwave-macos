@@ -15230,6 +15230,64 @@ pub fn measure_text_advanced(
 /// strings.
 pub(crate) const TEXT_MEASURE_MEMO_CAP: usize = 16384;
 
+/// The text-measure memo's key (TEXT-MEMO-KEY): the text, the family name
+/// and the numbers that select a measurement. Owned only when stored; a
+/// lookup borrows the strings ([`MeasureKeyLike`]).
+#[derive(PartialEq, Eq)]
+struct MeasureKey {
+    text: String,
+    family: String,
+    nums: MeasureNums,
+}
+
+/// Size, weight, style, letter and word spacing, as bits.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MeasureNums(u32, u16, u8, u32, u32);
+
+/// One view of a measure key, owned or borrowed: both hash and compare
+/// through `parts`, so a borrowed probe finds the owned entry.
+trait MeasureKeyLike {
+    fn parts(&self) -> (&str, &str, MeasureNums);
+}
+
+impl MeasureKeyLike for MeasureKey {
+    fn parts(&self) -> (&str, &str, MeasureNums) {
+        (&self.text, &self.family, self.nums)
+    }
+}
+
+impl MeasureKeyLike for (&str, &str, MeasureNums) {
+    fn parts(&self) -> (&str, &str, MeasureNums) {
+        *self
+    }
+}
+
+impl std::hash::Hash for MeasureKey {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.parts().hash(h)
+    }
+}
+
+impl std::hash::Hash for dyn MeasureKeyLike + '_ {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.parts().hash(h)
+    }
+}
+
+impl PartialEq for dyn MeasureKeyLike + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl Eq for dyn MeasureKeyLike + '_ {}
+
+impl<'a> std::borrow::Borrow<dyn MeasureKeyLike + 'a> for std::rc::Rc<MeasureKey> {
+    fn borrow(&self) -> &(dyn MeasureKeyLike + 'a) {
+        &**self
+    }
+}
+
 /// Measure text using the text shaper with letter-spacing and word-spacing.
 ///
 /// This provides accurate text measurement using DirectWrite on Windows,
@@ -15253,30 +15311,33 @@ pub fn measure_text_with_spacing(
 ) -> TextMetrics {
     use std::cell::RefCell;
 
-    type Key = (String, String, u32, u16, u8, u32, u32);
     thread_local! {
-        static MEMO: RefCell<text_memo::TextMemo<Key, TextMetrics>> =
+        static MEMO: RefCell<text_memo::TextMemo<MeasureKey, TextMetrics>> =
             RefCell::new(text_memo::TextMemo::new(TEXT_MEASURE_MEMO_CAP));
     }
 
     let generation = rustkit_text::webfonts::generation();
-    let key: Key = (
-        text.to_string(),
-        font_family.to_string(),
+    let nums = MeasureNums(
         font_size.to_bits(),
         font_weight.0,
         font_style as u8,
         letter_spacing.to_bits(),
         word_spacing.to_bits(),
     );
+    // Looked up by the borrowed text and family name: only a miss builds the
+    // owned key it stores (TEXT-MEMO-KEY).
+    let probe = (text, font_family, nums);
     let cached = MEMO.with(|m| {
         let mut m = m.borrow_mut();
         m.sync_generation(generation);
-        m.get(&key)
+        m.get_by(&probe as &dyn MeasureKeyLike)
     });
     if let Some(metrics) = cached {
         return metrics;
     }
+    #[cfg(test)]
+    TEXT_MEASURE_KEYS.with(|n| n.set(n.get() + 1));
+    let key = MeasureKey { text: text.to_string(), family: font_family.to_string(), nums };
     let metrics = shape_text_metrics(
         text,
         font_family,
@@ -15295,6 +15356,13 @@ thread_local! {
     /// Uncached text measurements on this thread (see
     /// `measure_text_with_spacing`).
     static TEXT_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Owned memo keys `measure_text_with_spacing` built on this thread (a
+    /// copy of the text and of the family name each): TEXT-MEMO-KEY.
+    pub(crate) static TEXT_MEASURE_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Shape `text` and return its metrics (uncached; see
