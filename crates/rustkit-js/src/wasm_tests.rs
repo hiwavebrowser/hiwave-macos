@@ -315,26 +315,35 @@ fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) 
 }
 
 /// An infinite wasm loop, called at the top level or from inside a JS import
-/// (richards' shape), is stopped at the deadline; the stop is the turn's
-/// (take_deadline_hit), uncatchable (the script's try/catch doesn't see it),
-/// and the runtime goes on (a later turn runs wasm normally).
+/// (richards' shape), is stopped by the watchdog at the turn's budget, as a
+/// JS spin is (tests/watchdog_turns.rs: budget 300 ms, slack 250 ms); the
+/// stop is the turn's (take_deadline_hit), uncatchable (the script's
+/// try/catch doesn't see it), and the runtime goes on (a later turn runs
+/// wasm normally).
 #[test]
-fn the_deadline_stops_a_wasm_loop_top_level_and_nested() {
+fn the_watchdog_stops_a_wasm_loop_top_level_and_nested() {
     let got = within(20, || {
+        let budget = std::time::Duration::from_millis(300);
+        let watchdog = crate::Watchdog::spawn();
+        let stamp = watchdog.thread_stamp();
         let mut rt = rt();
+        rt.set_view_control(Some(watchdog.view_control()));
         rt.evaluate_script(&format!("var caught = false, ex; ex = new WebAssembly.Instance(new WebAssembly.Module({LOOPS}), \
             {{ env: {{ cb: () => ex.spin() }} }}).exports;")).expect("setup");
         let mut out = Vec::new();
         for call in ["ex.spin()", "ex.nest()"] {
-            rt.set_execution_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(100)));
+            let started = std::time::Instant::now();
+            rt.begin_turn(&stamp, budget);
             let stopped = rt.evaluate_script(&format!("try {{ {call}; }} catch (e) {{ caught = true; }}")).is_err();
-            out.push(format!("{stopped}:{}", rt.take_deadline_hit()));
-            rt.set_execution_deadline(None);
+            let hit = rt.take_deadline_hit();
+            rt.end_turn(&stamp);
+            let took = started.elapsed();
+            out.push(format!("{stopped}:{hit}:{}", took >= budget && took < budget + std::time::Duration::from_millis(250)));
         }
         out.push(eval(&mut rt, "String(caught) + ':' + ex.count(10)"));
         out.join("|")
     });
-    assert_eq!(got, "true:true|true:true|false:0");
+    assert_eq!(got, "true:true:true|true:true:true|false:0");
 }
 
 /// A finite loop longer than one fuel slice, nested inside a JS import,
