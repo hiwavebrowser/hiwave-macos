@@ -30114,8 +30114,9 @@ enum LogicalMapping {
 }
 
 
-/// css-logical-1 flow-relative margin / padding / inset / border names,
-/// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
+/// css-logical-1 flow-relative margin / padding / inset / border / size names,
+/// mapped for horizontal-tb, ltr: inline-start = left, block-start = top,
+/// inline-size = width.
 fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
     use LogicalMapping::{Both, Pair, Side};
     Some(match property {
@@ -30161,6 +30162,14 @@ fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
         "inset-block-end" => Side("bottom"),
         "inset-inline" => Pair("left", "right"),
         "inset-block" => Pair("top", "bottom"),
+        // The flow-relative sizes (LOGICAL-SIZE, css-logical-1 §4.1). One property with the
+        // physical one for the cascade: mapped at the declaration, the later of the two wins.
+        "inline-size" => Side("width"),
+        "block-size" => Side("height"),
+        "min-inline-size" => Side("min-width"),
+        "min-block-size" => Side("min-height"),
+        "max-inline-size" => Side("max-width"),
+        "max-block-size" => Side("max-height"),
         _ => return None,
     })
 }
