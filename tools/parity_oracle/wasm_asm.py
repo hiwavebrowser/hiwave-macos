@@ -97,3 +97,11 @@ TABMOD = module3([([], [I32]), ([I32], [I32]), ([], [F64])],
                  [(0, [], b"\x41\x07"), (1, [], b"\x20\x00\x11\x00\x00"), (0, [], b"\x23\x00"), (2, [], b"\x23\x01")],
                  [("seven", 0, 0), ("dispatch", 0, 1), ("getg", 0, 2), ("nan", 0, 3)],
                  elems=[(1, [0])])
+
+# spin(): loop forever. count(n) -> i32: loop n times decrementing, return 0.
+# nest(): call env.cb (a JS import that calls spin or count).
+SPIN = module3([([], []), ([I32], [I32])], [("env", "cb", ("func", 0))],
+               [(0, [], b"\x03\x40\x0c\x00\x0b"),
+                (1, [], b"\x03\x40\x20\x00\x41\x01\x6b\x22\x00\x0d\x00\x0b\x20\x00"),
+                (0, [], b"\x10\x00")],
+               [("spin", 0, 1), ("count", 0, 2), ("nest", 0, 3)])

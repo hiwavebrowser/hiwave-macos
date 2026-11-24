@@ -295,3 +295,57 @@ fn a_long_wasm_loop_does_not_grow_the_native_stack() {
         .expect("thread");
     assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(120)).expect("finished"), "0");
 }
+
+// ---- Phase 4: the live turn's deadline reaches wasm (docs/design/WASM-W1.md: fuel slices through
+// call_resumable; when a slice runs out, the deadline and the interrupt word are checked, and the
+// call ends with the same uncatchable stop a JS script gets). RustKit's own budget semantics:
+// nothing to measure in Chrome, whose "page unresponsive" is not a script deadline.
+
+/// Run `f` on its own thread with its own runtime: a wasm loop the deadline
+/// doesn't stop would otherwise hang the test binary.
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .expect("thread");
+    rx.recv_timeout(std::time::Duration::from_secs(secs)).expect("the wasm call was not stopped by the deadline")
+}
+
+/// An infinite wasm loop, called at the top level or from inside a JS import
+/// (richards' shape), is stopped at the deadline; the stop is the turn's
+/// (take_deadline_hit), uncatchable (the script's try/catch doesn't see it),
+/// and the runtime goes on (a later turn runs wasm normally).
+#[test]
+fn the_deadline_stops_a_wasm_loop_top_level_and_nested() {
+    let got = within(20, || {
+        let mut rt = rt();
+        rt.evaluate_script(&format!("var caught = false, ex; ex = new WebAssembly.Instance(new WebAssembly.Module({LOOPS}), \
+            {{ env: {{ cb: () => ex.spin() }} }}).exports;")).expect("setup");
+        let mut out = Vec::new();
+        for call in ["ex.spin()", "ex.nest()"] {
+            rt.set_execution_deadline(Some(std::time::Instant::now() + std::time::Duration::from_millis(100)));
+            let stopped = rt.evaluate_script(&format!("try {{ {call}; }} catch (e) {{ caught = true; }}")).is_err();
+            out.push(format!("{stopped}:{}", rt.take_deadline_hit()));
+            rt.set_execution_deadline(None);
+        }
+        out.push(eval(&mut rt, "String(caught) + ':' + ex.count(10)"));
+        out.join("|")
+    });
+    assert_eq!(got, "true:true|true:true|false:0");
+}
+
+/// A finite loop longer than one fuel slice, nested inside a JS import,
+/// completes: an out-of-fuel suspension is resumed, not turned into a trap
+/// (wasmi's plain call would trap; #1451 delta R1).
+#[test]
+fn a_long_nested_wasm_loop_runs_past_its_fuel_slices() {
+    let got = within(60, || {
+        let mut rt = rt();
+        eval(&mut rt, &format!("var result = -1, ex; ex = new WebAssembly.Instance(new WebAssembly.Module({LOOPS}), \
+            {{ env: {{ cb: () => {{ result = ex.count(20000000); }} }} }}).exports; ex.nest(); String(result)"))
+    });
+    assert_eq!(got, "0");
+}
