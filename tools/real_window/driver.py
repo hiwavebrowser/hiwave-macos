@@ -306,6 +306,28 @@ def resize_request_epoch(out):
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def key_request_epoch(out):
+    """hwdrive's own wall-clock time of the key-down (`req_epoch` on the
+    `key` line, Unix seconds, the clock the app log's UTC stamps use), or
+    None (an hwdrive from before T37 printed only the keycode)."""
+    return resize_request_epoch(out)
+
+
+LOG_STAMP = r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z\b.*?"
+
+
+def log_answer_ms(log, pattern, t0):
+    """The first app log line matching `pattern` whose own UTC stamp is at
+    or after `t0` (epoch seconds), as ms after `t0`; None if there is none.
+    A line with no stamp is never an answer: it cannot be timed."""
+    import datetime
+    for m in re.finditer(LOG_STAMP + "(?:%s)" % pattern, log, re.M):
+        when = datetime.datetime.fromisoformat(m.group(1)[:26]).replace(tzinfo=datetime.timezone.utc).timestamp()
+        if when >= t0:
+            return round((when - t0) * 1000, 1)
+    return None
+
+
 def page_view_id(log, base):
     """The engine view the fixture page was loaded into: the first
     `Loading URL id=EngineViewId(N) url=<fixture base>/...` line. The
@@ -1078,15 +1100,35 @@ class Driver:
                 self.not_run(c, "%s: the page is laid out at the new size within %d ms" % (during, self.LIMIT_MS),
                              self.why_not("Accessibility"))
             return
-        pid, limit = self.app.proc.pid, self.LIMIT_MS / 1000
+        pid = self.app.proc.pid
 
         def key(code, pattern, what):
-            log_from, t0 = len(self.app.log_text()), time.time()
-            self.hw("key", pid, code, "cmd")
-            m = self.app.wait_log(pattern, 3, log_from)
-            took = time.time() - t0
+            # The answer is the app's own line, timed by its UTC stamp from
+            # hwdrive's key-down (req_epoch). Until T37 this timed the
+            # subprocess spawn, hwdrive's post sleeps and a 100 ms log poll
+            # as well, so i0a_close flipped 308 -> 157 ms with no change.
+            # Only lines stamped at or after the key-down count, so an
+            # earlier tab's line is never this key's answer.
+            t0 = time.time()
+            code_, out = self.hw("key", pid, code, "cmd")
+            wall = time.time() - t0
+            req = key_request_epoch(out)
+            ms = None
+            if req is not None:
+                end = time.time() + 3
+                while True:
+                    ms = log_answer_ms(self.app.log_text(), pattern, req)
+                    if ms is not None or time.time() >= end or not self.app.alive():
+                        break
+                    time.sleep(0.05)
+            detail = ("no req_epoch from hwdrive (exit %s): the key cannot be timed" % code_ if req is None
+                      else "no log line in 3 s" if ms is None
+                      else "app answered %.0f ms after the key" % ms)
+            post = out.get("post_ms") if isinstance(out, dict) else None
+            detail += "; subprocess wall %.0f ms%s" % (
+                wall * 1000, ", posting %.0f ms" % post if isinstance(post, (int, float)) else "")
             self.expect(c, "%s: %s is answered within %d ms" % (during, what, self.LIMIT_MS),
-                        bool(m) and took < limit, "%.0f ms" % (took * 1000) if m else "no log line in 3 s")
+                        ms is not None and ms < self.LIMIT_MS, detail)
 
         if self.can_resize:
             self.expect_resize(c, during, pid, frame)
