@@ -377,3 +377,20 @@ fn a_function_too_big_to_compile_in_one_fuel_slice_runs() {
     });
     assert_eq!(got, "7");
 }
+
+/// Chrome 148 (docs/diagnostics/2026-11-24/wasm_export_shape_cft148.json,
+/// tools/parity_oracle/wasm_export_shape_probe.mjs): an exported function has
+/// no `prototype`, inherits from Function.prototype, owns exactly `length` and
+/// `name`, is not a constructor, and works through call/apply with extra or
+/// missing arguments. A pin for the native export functions (makeExport).
+#[test]
+fn an_exported_function_has_chromes_shape() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, "var f = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,7,5,1,1,102,0,0,10,6,1,4,0,32,0,11]))).exports.f; \
+            var r = ['prototype' in f, Object.getPrototypeOf(f) === Function.prototype, f.name, f.length, JSON.stringify(Object.getOwnPropertyNames(f).sort())]; \
+            try { new f(1); r.push('constructed'); } catch (e) { r.push(e.constructor.name); } \
+            r.push(f.call(null, 5), f.apply(null, [6]), f(7, 8, 9), f()); r.join('|')"),
+        "false|true|0|1|[\"length\",\"name\"]|TypeError|5|6|7|0"
+    );
+}
