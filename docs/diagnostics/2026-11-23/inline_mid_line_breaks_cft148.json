@@ -313,6 +313,159 @@
           20
         ]
       ]
+    },
+    {
+      "label": "position-absolute-in-inline-007b as written (border, two columns)",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .cols{block-size:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{inline-size:8em;block-size:1em;background:black} .wpt{border:5px solid gold}",
+      "body": "<div class=\"c cols wpt\" id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 70,
+      "span": [
+        5,
+        5,
+        320,
+        60
+      ],
+      "span_fragments": [
+        [
+          65,
+          5,
+          80,
+          20
+        ],
+        [
+          5,
+          25,
+          160,
+          20
+        ],
+        [
+          5,
+          45,
+          100,
+          20
+        ],
+        [
+          165,
+          5,
+          160,
+          20
+        ],
+        [
+          165,
+          25,
+          100,
+          20
+        ],
+        [
+          165,
+          45,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "007b with physical sizes (width/height for inline-size/block-size), two columns",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:16em} .cols{height:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{width:8em;height:1em;background:black} .wpt{border:5px solid gold}",
+      "body": "<div class=\"c cols wpt\" id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 70,
+      "span": [
+        5,
+        5,
+        320,
+        60
+      ],
+      "span_fragments": [
+        [
+          65,
+          5,
+          80,
+          20
+        ],
+        [
+          5,
+          25,
+          160,
+          20
+        ],
+        [
+          5,
+          45,
+          100,
+          20
+        ],
+        [
+          165,
+          5,
+          160,
+          20
+        ],
+        [
+          165,
+          25,
+          100,
+          20
+        ],
+        [
+          165,
+          45,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "007b with physical sizes, no columns",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:16em} .cols{height:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{width:8em;height:1em;background:black}",
+      "body": "<div class=c id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 120,
+      "span": [
+        0,
+        0,
+        320,
+        120
+      ],
+      "span_fragments": [
+        [
+          60,
+          0,
+          80,
+          20
+        ],
+        [
+          0,
+          20,
+          320,
+          20
+        ],
+        [
+          0,
+          40,
+          100,
+          20
+        ],
+        [
+          0,
+          60,
+          160,
+          20
+        ],
+        [
+          0,
+          80,
+          100,
+          20
+        ],
+        [
+          0,
+          100,
+          100,
+          20
+        ]
+      ]
     }
   ]
 }

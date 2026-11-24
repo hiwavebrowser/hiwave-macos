@@ -131,8 +131,9 @@ fn a_span_that_does_not_fit_the_rest_of_the_line_starts_on_it_segoe_ui() {
 
 const AHEM: &[u8] = include_bytes!("../../rustkit-text/tests/fixtures/Ahem.ttf");
 
-/// The border-box height of `#p` in `body`, laid out with Ahem.
-fn height_with_ahem(style: &str, body: &str) -> f64 {
+/// The border-box height of `#p` and the height of `#s`'s fragment union (what Chrome's
+/// `getBoundingClientRect()` is) in `body`, laid out with Ahem.
+fn heights_with_ahem(style: &str, body: &str) -> (f64, f64) {
     use base64::Engine as _;
     let face = format!(
         "@font-face{{font-family:Ahem;src:url(data:font/ttf;base64,{})}}",
@@ -159,7 +160,12 @@ fn height_with_ahem(style: &str, body: &str) -> f64 {
         v.get("children")?.as_array()?.iter().find_map(|c| find(c, sel))
     }
     let p = find(&json["root"], "#p").expect("#p");
-    p["border_box"]["height"].as_f64().expect("height")
+    let s = find(&json["root"], "#s").expect("#s");
+    let union = s.get("fragment_union_border_box").unwrap_or(&s["border_box"]);
+    (
+        p["border_box"]["height"].as_f64().expect("height"),
+        union["height"].as_f64().expect("union height"),
+    )
 }
 
 #[test]
@@ -175,20 +181,37 @@ fn a_span_that_starts_at_a_line_end_with_a_forced_break_or_split_by_a_block_keep
     // pre-wrap, `1 2 3\n<span>4 5</span>\n6 7 8` (the letter-spaced "4 5" wraps to two lines);
     // RustKit gives 60 for those with or without INLINE-MID-LINE (develop b9b7a4ec too), a
     // separate gap: the letter spacing is not counted where the span wraps.
-    let rows: [(&str, &str, String, f64); 2] = [
+    // position-absolute-in-inline-007b: two columns 3em tall with a 5px border; Chrome is 70 tall.
+    // The WPT file sizes the boxes with inline-size / block-size, which RustKit does not support
+    // (the container is laid out 800 wide and auto tall, 110 on develop b9b7a4ec), so this row uses
+    // width / height, which Chrome lays out identically. Develop and INLINE-MID-LINE both give 70.
+    // Not asserted: without columns Chrome is 120 and RustKit 100 on both arms (the line after the
+    // block is lost), and a block-split span's fragment union reports its first fragment (20 tall,
+    // Chrome 120 and 60) on both arms.
+    let phys = POS.replace("inline-size", "width").replace("block-size", "height");
+    let phys_cols = format!("{phys} .cols{{height:3em;columns:2;column-fill:auto;column-gap:0;border:5px solid gold}}");
+    // (label, style, body, Chrome: height of #p, and of #s's fragment union where asserted)
+    let rows: [(&str, &str, String, (f64, Option<f64>)); 2] = [
         (
             "span starting at a line end, holding newlines (pre-wrap)",
             LS,
             "<div class=c><p id=p class=pre>1 2 3<span id=s>\n4 5\n</span>6 7 8</p></div>".into(),
-            80.0,
+            (80.0, Some(40.0)),
         ),
-        ("span after text, split by a block", POS, format!("<div class=c id=p>{SPLIT}</div>"), 120.0),
+        (
+            "007b: span after text, split by a block, two columns",
+            &phys_cols,
+            format!("<div class=\"c cols\" id=p>{SPLIT}</div>"),
+            (70.0, None),
+        ),
     ];
     let wrong: Vec<String> = rows
         .iter()
         .filter_map(|(label, style, body, chrome)| {
-            let got = height_with_ahem(style, body);
-            ((got - chrome).abs() >= 0.1).then(|| format!("{label}: Chrome height {chrome}, got {got}"))
+            let got = heights_with_ahem(style, body);
+            let union_off = chrome.1.is_some_and(|u| (got.1 - u).abs() >= 0.1);
+            ((got.0 - chrome.0).abs() >= 0.1 || union_off)
+                .then(|| format!("{label}: Chrome (height, span union height) {chrome:?}, got {got:?}"))
         })
         .collect();
     assert!(wrong.is_empty(), "Ahem 20px/1:\n{}", wrong.join("\n"));

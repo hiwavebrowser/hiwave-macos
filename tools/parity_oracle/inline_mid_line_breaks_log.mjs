@@ -24,6 +24,8 @@ const LS = 'body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1e
 // position-absolute-in-inline-007b's container, with and without its two columns.
 const POS = 'body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .cols{block-size:3em;columns:2;column-fill:auto;column-gap:0} ' +
   '.rel{position:relative} .block{inline-size:8em;block-size:1em;background:black}';
+// The same with physical properties: RustKit has no inline-size / block-size (11-23).
+const PHYS = POS.replace(/inline-size/g, 'width').replace(/block-size/g, 'height');
 const SPLIT = `XX
   <span id=s class="rel">
     XXXX<br>
@@ -47,6 +49,11 @@ const CASES = [
     '<p class="pre">1 2 3\n<span>4 5</span>\n6 7 8</p></div>'],
   ['span after text, split by a block', POS, `<div class=c id=p>${SPLIT}</div>`],
   ['span after text, split by a block, two columns', POS, `<div class="c cols" id=p>${SPLIT}</div>`],
+  ['position-absolute-in-inline-007b as written (border, two columns)', POS + ' .wpt{border:5px solid gold}',
+    `<div class="c cols wpt" id=p>${SPLIT}</div>`],
+  ['007b with physical sizes (width/height for inline-size/block-size), two columns', PHYS + ' .wpt{border:5px solid gold}',
+    `<div class="c cols wpt" id=p>${SPLIT}</div>`],
+  ['007b with physical sizes, no columns', PHYS, `<div class=c id=p>${SPLIT}</div>`],
 ];
 
 const browser = await chromium.launch({

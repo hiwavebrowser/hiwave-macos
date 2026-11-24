@@ -3267,7 +3267,10 @@ impl LayoutBox {
                     cursor_x = pen - start_pen;
                     continue;
                 }
-                if matches!(child.box_type, BoxType::Inline) && child.style.display == rustkit_css::Display::Inline {
+                if matches!(child.box_type, BoxType::Inline)
+                    && child.style.display == rustkit_css::Display::Inline
+                    && !Self::holds_preserved_newline(child)
+                {
                     child.inline_flow = Some(InlineFlow { left: f.left, width: f.width, line_top, pen });
                 }
                 child.layout_with_definite_height(&cb, 0.0);
@@ -3629,11 +3632,11 @@ impl LayoutBox {
 
     /// Whether `b` is, or holds among its inline content, a preserved newline (text whose
     /// `white-space` keeps newlines). INLINE-MID-LINE's in-flow path does not carry a newline
-    /// across an inline's edge (`1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap lost a line:
-    /// WPT css-text/letter-spacing/letter-spacing-200, batch 124), so a block whose inline
-    /// content holds one keeps moving an inline that does not fit to the next line, as before
-    /// INLINE-MID-LINE. A `<br>` is carried (position-absolute-in-inline-007b's span, split by
-    /// `<br>`s and a block, is laid out as Chrome lays it out without columns).
+    /// across an inline's edge (`1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap lost a line: WPT
+    /// css-text/letter-spacing/letter-spacing-200, batch 124), so an inline that holds one is not
+    /// laid out in flow: if it does not fit the rest of the line it moves to the next line, as
+    /// before INLINE-MID-LINE. Other inlines in the same block still start mid-line. A `<br>` is
+    /// carried.
     fn holds_preserved_newline(b: &LayoutBox) -> bool {
         match &b.box_type {
             BoxType::Text(text) => {
@@ -6968,8 +6971,7 @@ impl LayoutBox {
         // and right-aligned lines, and lines beside floats, keep moving an
         // inline that does not fit to the next line for now.
         let inline_flows = matches!(text_align, TextAlign::Left)
-            && self.style.direction == rustkit_css::Direction::Ltr
-            && !self.children.iter().any(Self::holds_preserved_newline);
+            && self.style.direction == rustkit_css::Direction::Ltr;
         let strut_descent = self.inline_strut_descent();
         let strut = Self::text_line_box_extents(&self.style);
         // A `<br>` on an otherwise empty line still produces a line box of
@@ -7204,6 +7206,7 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
+                    && !Self::holds_preserved_newline(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,
@@ -8214,8 +8217,7 @@ impl LayoutBox {
         // and right-aligned lines, and lines beside floats, keep moving an
         // inline that does not fit to the next line for now.
         let inline_flows = matches!(text_align, TextAlign::Left)
-            && self.style.direction == rustkit_css::Direction::Ltr
-            && !self.children.iter().any(Self::holds_preserved_newline);
+            && self.style.direction == rustkit_css::Direction::Ltr;
         let strut_descent = self.inline_strut_descent();
         let strut = Self::text_line_box_extents(&self.style);
         // See layout_block_children: a `<br>` on an empty line is a line box.
@@ -8503,6 +8505,7 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
+                    && !Self::holds_preserved_newline(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,
