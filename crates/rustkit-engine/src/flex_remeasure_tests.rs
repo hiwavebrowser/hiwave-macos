@@ -191,3 +191,22 @@ fn with_the_memo_on_nested_small_flex_rows_are_laid_out_about_once_each() {
         }
     }
 }
+
+/// FLEX-MEMO: an absolutely positioned descendant whose containing block is outside a memoised flex
+/// container (the RustKit chrome's tab strip: a 1px separator) is placed against a box the memo
+/// does not see, so the container is not memoised. Verify mode lays every would-be hit out again
+/// and panics on any difference; the boxes are the same with the memo off and on.
+#[test]
+fn a_flex_container_with_an_escaping_absolute_descendant_is_not_restored_from_the_memo() {
+    let css = "body{margin:0;font:13px/1.5 Arial} #outer{position:relative;display:flex;flex-direction:column;padding:10px} \
+               #strip{display:flex;gap:4px} .tab{display:flex;align-items:center;padding:2px 6px} \
+               #sep{position:absolute;right:3px;top:1px;width:1px;height:14px;background:#888}";
+    let tabs: String = (0..6).map(|i| format!("<div class=tab><span>Tab {i}</span></div>")).collect();
+    let body = format!("<div id=outer><div id=strip>{tabs}<div class=tab><span id=sep></span>New</div></div><div id=c>content</div></div>");
+    let ids = ["outer", "strip", "sep", "c"];
+    let (off, _) = lay_out(css, &body, &ids, MemoMode::Off);
+    let (verified, _) = lay_out(css, &body, &ids, MemoMode::Verify);
+    let (on, _) = lay_out(css, &body, &ids, MemoMode::On);
+    assert_eq!(off, verified, "memo verify");
+    assert_eq!(off, on, "memo on");
+}

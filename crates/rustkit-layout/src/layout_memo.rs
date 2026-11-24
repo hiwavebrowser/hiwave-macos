@@ -795,6 +795,20 @@ mod restore_tests {
     }
 }
 
+/// FLEX-MEMO: whether an absolutely positioned descendant of `b` has its containing block outside
+/// `b`'s subtree (no positioned box between them, `b` itself included): it is placed against a box
+/// the memo does not see, so a recorded position cannot be restored (the RustKit chrome's tab
+/// strip: a 1px separator, recorded at (167, 1) in the container and laid out at (-27, 38)).
+fn abspos_escapes(b: &LayoutBox) -> bool {
+    fn walk(b: &LayoutBox, contained: bool) -> bool {
+        b.children.iter().any(|c| {
+            let abs = matches!(c.position, Position::Absolute | Position::Fixed);
+            (abs && !contained) || walk(c, contained || c.position != Position::Static)
+        })
+    }
+    walk(b, b.position != Position::Static)
+}
+
 /// FLEX-MEMO: the key of a flex container's layout. Its inputs are the arguments
 /// (`layout_flex_container_at`'s containing box, positioning box, used and resolved inner heights),
 /// the box's own edges and the input state below it (`input_fingerprint`); a tag keeps the entries
@@ -819,6 +833,14 @@ fn flex_key(
     }
     positioning_cb.is_some().hash(&mut h);
     resolved.map(f32::to_bits).hash(&mut h);
+    // The flex algorithm places the items from the containing box's origin, and the outputs are
+    // stored relative to the container's own content origin: where the two differ, the offset is an
+    // input (a positioning box's origin too, for absolutely positioned items).
+    let origin = (b.dimensions.content.x, b.dimensions.content.y);
+    for d in [Some(container_box), positioning_cb].into_iter().flatten() {
+        (d.content.x - origin.0).to_bits().hash(&mut h);
+        (d.content.y - origin.1).to_bits().hash(&mut h);
+    }
     hash_edges(&b.dimensions.padding, &mut h);
     hash_edges(&b.dimensions.border, &mut h);
     hash_edges(&b.dimensions.margin, &mut h);
@@ -853,6 +875,7 @@ impl LayoutBox {
             || self.style.display.is_table()
             || self.context_floats.is_some()
             || !descendants_at_least(self, memo_min_subtree())
+            || abspos_escapes(self)
         {
             return run(self);
         }
