@@ -157,8 +157,15 @@ impl WasmRealm {
         // Fuel: every call runs in slices of FUEL_SLICE, and between slices
         // the JS context's interrupt word is checked (`call_func`), so the
         // turn's budget stops wasm where it would stop script.
+        //
+        // Compilation is eager: wasmi's default compiles each function at its
+        // first call and charges that compile fuel as an error that can't be
+        // resumed, so a big function (or a slice nearly used up) became a bare
+        // trap mid-run. Eager compilation does it all in `WebAssembly.Module`,
+        // where no slice is running.
         let mut config = wasmi::Config::default();
         config.consume_fuel(true);
+        config.compilation_mode(wasmi::CompilationMode::Eager);
         let engine = wasmi::Engine::new(&config);
         let id = NEXT_REALM.with(|n| {
             let id = n.get();
