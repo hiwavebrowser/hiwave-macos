@@ -15203,6 +15203,8 @@ pub fn measure_text_with_spacing(
     }
 
     let generation = rustkit_text::webfonts::generation();
+    #[cfg(test)]
+    TEXT_MEASURE_KEYS.with(|n| n.set(n.get() + 1));
     let key: Key = (
         text.to_string(),
         font_family.to_string(),
@@ -15238,6 +15240,13 @@ thread_local! {
     /// Uncached text measurements on this thread (see
     /// `measure_text_with_spacing`).
     static TEXT_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Owned memo keys `measure_text_with_spacing` built on this thread (a
+    /// copy of the text and of the family name each): TEXT-MEMO-KEY.
+    pub(crate) static TEXT_MEASURE_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Shape `text` and return its metrics (uncached; see
