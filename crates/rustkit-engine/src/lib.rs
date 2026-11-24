@@ -18680,6 +18680,16 @@ impl layout_ctx::LayoutCtx {
         value: &str,
     ) {
         if value.trim().eq_ignore_ascii_case("inherit") {
+            // A flow-relative size inherits as its physical property (LOGICAL-SIZE):
+            // `inline-size: inherit` is `width: inherit`.
+            let property = match (property, logical_to_physical(property)) {
+                (
+                    "inline-size" | "block-size" | "min-inline-size" | "min-block-size" | "max-inline-size"
+                    | "max-block-size",
+                    Some(LogicalMapping::Side(physical)),
+                ) => physical,
+                _ => property,
+            };
             if let Some(parent) = parent_style {
                 if Engine::inherit_property(style, parent, property) {
                     return;
