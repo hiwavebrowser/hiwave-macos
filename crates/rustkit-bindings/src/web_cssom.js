@@ -585,6 +585,9 @@
             ['', '-start', '-end'].forEach(function (side) { PROPS[b + axis + side] = true; });
         });
     });
+    // The flow-relative sizes (LOGICAL-SIZE): inline-size is width, and so on.
+    ['inline-size', 'block-size', 'min-inline-size', 'min-block-size', 'max-inline-size', 'max-block-size']
+        .forEach(function (p) { PROPS[p] = true; });
     // Mirrors rustkit-css parse_display.
     function displayOk(v) {
         if (/^(block|inline|inline-block|flex|inline-flex|grid|inline-grid|none)$/.test(v)) return true;
@@ -598,7 +601,21 @@
         }
         return !item || !inner || inner === 'flow' || inner === 'flow-root';
     }
+    // A size: a non-negative length or percentage, a sizing keyword or a function; `auto` for a size
+    // and a min size, `none` for a max size (Chrome: CSS.supports('inline-size', 'red') is false).
+    var SIZE_FN = /^(calc|min|max|clamp|fit-content|var|env)\(/;
+    var SIZE_LEN = /^(0|\+?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?(px|em|rem|%|ex|ch|lh|rlh|vw|vh|vi|vb|vmin|vmax|[sld]v[whib]|[sld]vmin|[sld]vmax|cq[whib]|cqmin|cqmax|cm|mm|q|in|pt|pc))$/;
+    function sizeOk(kind) {
+        return function (v) {
+            if (SIZE_LEN.test(v) || SIZE_FN.test(v)) return true;
+            if (/^(min-content|max-content|fit-content|stretch|-webkit-fill-available)$/.test(v)) return true;
+            return kind === 'max' ? v === 'none' : v === 'auto';
+        };
+    }
     var VALUES = {
+        'inline-size': sizeOk(''), 'block-size': sizeOk(''),
+        'min-inline-size': sizeOk('min'), 'min-block-size': sizeOk('min'),
+        'max-inline-size': sizeOk('max'), 'max-block-size': sizeOk('max'),
         display: displayOk,
         position: function (v) { return /^(static|relative|absolute|fixed|sticky)$/.test(v); }
     };
