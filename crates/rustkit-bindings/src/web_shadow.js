@@ -54,7 +54,9 @@
     }
     // The Window is not a node: it has no `nodeType` or `parentNode`, and reading either from it
     // would be named access on the Window, a walk of the whole document. An event's path ends
-    // at the Window, so retargeting asks about it on every dispatch (STRESS-SPEED).
+    // at the Window, so retargeting asks about it on every dispatch (STRESS-SPEED). Only this
+    // realm's Window (`g`) is recognised: a dispatch that reaches another realm's Window through
+    // this realm's code (nested contexts) takes the old route, with the same result and the walk.
     function hostOf(n) { return n && n !== g && n.nodeType === 11 ? S.node('host', n) : null; }
 
     // ---- the tree
