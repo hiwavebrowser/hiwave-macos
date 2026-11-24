@@ -301,7 +301,17 @@ jobs:
         # baselines, so nothing has ever launched a browser in CI. Without this
         # the job dies on a missing chrome-headless-shell before it checks a
         # single selector, which is a did-not-run wearing a red X.
-        run: npx playwright install --with-deps chromium
+        # No `--with-deps`: it apt-installs Playwright's system packages, and
+        # that, not the browser, is the cost. In run 45208943736 the browser
+        # download took 3 s and the apt fetch 6 min 26 s (32.1 MB at 83 kB/s),
+        # so script-guards spent 402 s here (attempt 1 hit the 10 min timeout
+        # before a guard ran). ubuntu-24.04 ships Google Chrome and its
+        # libraries; a missing one fails the launch loudly (the pins skip only
+        # on "Executable doesn't exist"), never silently. It also installed
+        # Playwright's fonts (Liberation, Noto Color Emoji, WQY, ...): neither
+        # job compares rendered text today, but one that does would now run on
+        # the image's default fonts, so pin fonts in that job, not here.
+        run: npx playwright install chromium
 
       - name: Verify the join key still reproduces every committed selector
         run: node tools/parity_oracle/verify_selector_key.mjs
@@ -351,8 +361,9 @@ jobs:
         # Playwright (headless: true, so chrome-headless-shell). `npm ci`
         # installs the package, not its browser; without this the pin can only
         # skip here (it skips on a missing executable, for local seats) and is
-        # live on the Mac alone. Same recipe as the selector-key job above.
-        run: npx playwright install --with-deps chromium-headless-shell
+        # live on the Mac alone. Same recipe as the selector-key job above
+        # (no `--with-deps`: see there).
+        run: npx playwright install chromium-headless-shell
 
       - name: Run every instrument guard
         run: |
@@ -451,7 +462,10 @@ jobs:
   pr-aggregate:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && startsWith(github.head_ref, 'batch/'))  # batch-level CI
     needs: pr-swarm
-    runs-on: macos-15
+    # Plain Python over uploaded shard artifacts: no Mac needed. On macos-15 it
+    # sat unacquired three times on 2026-11-23 (batch 122, #1429) while every
+    # test shard passed.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
