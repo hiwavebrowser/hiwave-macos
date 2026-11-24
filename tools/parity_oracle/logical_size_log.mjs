@@ -31,6 +31,17 @@ const CASES = [
   ['box-sizing border-box', 'box-sizing:border-box;padding:10px;border:5px solid;inline-size:200px;block-size:60px'],
   ['inline-size: fit-content', 'inline-size:fit-content'],
 ];
+// Prometheus's R1 nits on #1442: inherit into a box that does not fill its parent (a float), a
+// stylesheet declaration under an inline one, !important, and CSS.supports.
+// [label, #p's style, a stylesheet for #b, #b's inline style]
+const SHEET_CASES = [
+  ['inline-size: inherit on a float', 'width:300px;height:300px', '', 'float:left;inline-size:inherit'],
+  ['block-size: inherit', 'width:400px;height:300px', '', 'block-size:inherit'],
+  ['a sheet inline-size under an inline width', 'width:400px;height:300px', '#b{inline-size:200px}', 'width:100px'],
+  ['a sheet width under an inline inline-size', 'width:400px;height:300px', '#b{width:100px}', 'inline-size:200px'],
+  ['a sheet inline-size !important over an inline width', 'width:400px;height:300px', '#b{inline-size:200px !important}', 'width:100px'],
+  ['a sheet width !important over an inline inline-size', 'width:400px;height:300px', '#b{width:100px !important}', 'inline-size:200px'],
+];
 
 const browser = await chromium.launch({
   ...getDeterministicLaunchOptions(),
@@ -57,6 +68,23 @@ try {
     console.log(label, JSON.stringify(got));
     cases.push({ label, style: own, outer, ...got });
   }
+  for (const [label, outer, sheet, own] of SHEET_CASES) {
+    await page.setContent(`<!doctype html><style>body{margin:0} ${sheet}</style><div id=p style="${outer}"><div id=b style="${own}"><div style="width:50px;height:50px"></div></div></div>`);
+    const got = await page.evaluate(() => {
+      const b = document.getElementById('b');
+      const r = b.getBoundingClientRect();
+      const cs = getComputedStyle(b);
+      return { width: r.width, height: r.height, computed: { 'inline-size': cs.getPropertyValue('inline-size'), 'block-size': cs.getPropertyValue('block-size') } };
+    });
+    console.log(label, JSON.stringify(got));
+    cases.push({ label, style: own, outer, sheet, ...got });
+  }
+  const supports = await page.evaluate(() => Object.fromEntries([
+    ['inline-size', '10px'], ['block-size', '10px'], ['min-inline-size', '10px'], ['max-inline-size', 'none'],
+    ['min-block-size', '10px'], ['max-block-size', 'none'], ['inline-size', 'red'],
+  ].map(([p, v]) => [`${p}: ${v}`, CSS.supports(p, v)])));
+  console.log('CSS.supports', JSON.stringify(supports));
+  cases.push({ label: 'CSS.supports', supports });
 } finally {
   await browser.close();
 }

@@ -295,6 +295,90 @@
         "max-height": "none",
         "max-block-size": "none"
       }
+    },
+    {
+      "label": "inline-size: inherit on a float",
+      "style": "float:left;inline-size:inherit",
+      "outer": "width:300px;height:300px",
+      "sheet": "",
+      "width": 300,
+      "height": 50,
+      "computed": {
+        "inline-size": "300px",
+        "block-size": "50px"
+      }
+    },
+    {
+      "label": "block-size: inherit",
+      "style": "block-size:inherit",
+      "outer": "width:400px;height:300px",
+      "sheet": "",
+      "width": 400,
+      "height": 300,
+      "computed": {
+        "inline-size": "400px",
+        "block-size": "300px"
+      }
+    },
+    {
+      "label": "a sheet inline-size under an inline width",
+      "style": "width:100px",
+      "outer": "width:400px;height:300px",
+      "sheet": "#b{inline-size:200px}",
+      "width": 100,
+      "height": 50,
+      "computed": {
+        "inline-size": "100px",
+        "block-size": "50px"
+      }
+    },
+    {
+      "label": "a sheet width under an inline inline-size",
+      "style": "inline-size:200px",
+      "outer": "width:400px;height:300px",
+      "sheet": "#b{width:100px}",
+      "width": 200,
+      "height": 50,
+      "computed": {
+        "inline-size": "200px",
+        "block-size": "50px"
+      }
+    },
+    {
+      "label": "a sheet inline-size !important over an inline width",
+      "style": "width:100px",
+      "outer": "width:400px;height:300px",
+      "sheet": "#b{inline-size:200px !important}",
+      "width": 200,
+      "height": 50,
+      "computed": {
+        "inline-size": "200px",
+        "block-size": "50px"
+      }
+    },
+    {
+      "label": "a sheet width !important over an inline inline-size",
+      "style": "inline-size:200px",
+      "outer": "width:400px;height:300px",
+      "sheet": "#b{width:100px !important}",
+      "width": 100,
+      "height": 50,
+      "computed": {
+        "inline-size": "100px",
+        "block-size": "50px"
+      }
+    },
+    {
+      "label": "CSS.supports",
+      "supports": {
+        "inline-size: 10px": true,
+        "block-size: 10px": true,
+        "min-inline-size: 10px": true,
+        "max-inline-size: none": true,
+        "min-block-size: 10px": true,
+        "max-block-size: none": true,
+        "inline-size: red": false
+      }
     }
   ]
 }

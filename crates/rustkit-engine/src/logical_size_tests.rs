@@ -24,8 +24,21 @@ fn rt() -> tokio::runtime::Runtime {
 /// `#b`'s border-box `width x height`, then getComputedStyle's `inline-size | block-size |
 /// min-inline-size | max-inline-size | min-block-size | max-block-size`.
 fn read(outer: &str, own: &str) -> String {
+    read_with(
+        outer,
+        "",
+        own,
+        "String(r.width+'x'+r.height+' '+['inline-size','block-size','min-inline-size',\
+         'max-inline-size','min-block-size','max-block-size']\
+         .map(function(p){return c.getPropertyValue(p)}).join(' | '))",
+    )
+}
+
+/// `read` with a stylesheet for `#b`, reading `expr` (with `b`, its rect `r` and its computed style
+/// `c` bound).
+fn read_with(outer: &str, sheet: &str, own: &str, expr: &str) -> String {
     let page = format!(
-        "<!doctype html><style>body{{margin:0}}</style><div id=p style=\"{outer}\">\
+        "<!doctype html><style>body{{margin:0}} {sheet}</style><div id=p style=\"{outer}\">\
          <div id=b style=\"{own}\"><div style=\"width:50px;height:50px\"></div></div></div>"
     );
     let server = serve_routes(vec![("/", "text/html", page)]);
@@ -43,10 +56,7 @@ fn read(outer: &str, own: &str) -> String {
     let value = engine
         .execute_script(
             view,
-            "var b=document.getElementById('b'),r=b.getBoundingClientRect(),c=getComputedStyle(b);\
-             String(r.width+'x'+r.height+' '+['inline-size','block-size','min-inline-size',\
-             'max-inline-size','min-block-size','max-block-size']\
-             .map(function(p){return c.getPropertyValue(p)}).join(' | '))",
+            &format!("var b=document.getElementById('b'),r=b.getBoundingClientRect(),c=getComputedStyle(b);{expr}"),
         )
         .unwrap();
     value
@@ -135,4 +145,52 @@ fn the_logical_size_properties_size_the_box_as_chrome_does() {
         })
         .collect();
     assert!(wrong.is_empty(), "#b in a 400x300 box:\n{}", wrong.join("\n"));
+}
+
+/// Prometheus's R1 nits on #1442: `inherit` into a box that does not fill its parent (a float), a
+/// stylesheet declaration under an inline one and `!important` over it, and `CSS.supports`.
+#[test]
+fn the_logical_size_properties_inherit_cascade_and_are_supported_as_in_chrome() {
+    const SIZES: &str =
+        "String(r.width+'x'+r.height+' '+c.getPropertyValue('inline-size')+' '+c.getPropertyValue('block-size'))";
+    // (label, #p's style, stylesheet, #b's inline style, Chrome)
+    let rows: [(&str, &str, &str, &str, &str); 6] = [
+        ("inline-size: inherit on a float", "width:300px;height:300px", "", "float:left;inline-size:inherit", "300x50 300px 50px"),
+        ("block-size: inherit", OUTER, "", "block-size:inherit", "400x300 400px 300px"),
+        ("a sheet inline-size under an inline width", OUTER, "#b{inline-size:200px}", "width:100px", "100x50 100px 50px"),
+        ("a sheet width under an inline inline-size", OUTER, "#b{width:100px}", "inline-size:200px", "200x50 200px 50px"),
+        (
+            "a sheet inline-size !important over an inline width",
+            OUTER,
+            "#b{inline-size:200px !important}",
+            "width:100px",
+            "200x50 200px 50px",
+        ),
+        (
+            "a sheet width !important over an inline inline-size",
+            OUTER,
+            "#b{width:100px !important}",
+            "inline-size:200px",
+            "100x50 100px 50px",
+        ),
+    ];
+    let mut wrong: Vec<String> = rows
+        .iter()
+        .filter_map(|(label, outer, sheet, own, chrome)| {
+            let got = read_with(outer, sheet, own, SIZES);
+            (got != *chrome).then(|| format!("{label}: Chrome {chrome:?}, got {got:?}"))
+        })
+        .collect();
+    let supports = read_with(
+        OUTER,
+        "",
+        "",
+        "String([['inline-size','10px'],['block-size','10px'],['min-inline-size','10px'],\
+         ['max-inline-size','none'],['min-block-size','10px'],['max-block-size','none'],['inline-size','red']]\
+         .map(function(a){return CSS.supports(a[0],a[1])}).join(' '))",
+    );
+    if supports != "true true true true true true false" {
+        wrong.push(format!("CSS.supports: Chrome \"true true true true true true false\", got {supports:?}"));
+    }
+    assert!(wrong.is_empty(), "#b in its parent:\n{}", wrong.join("\n"));
 }
