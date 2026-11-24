@@ -12,6 +12,9 @@
     'use strict';
     var MARK = '\u0001wasm\u0001';
     var moduleIds = new WeakMap();
+    // WebAssembly.Memory objects: id <-> object (an exported memory that was
+    // imported is the same object, as in Chrome).
+    var memoryIds = new WeakMap(), memoriesById = [];
 
     function defineError(name) {
         var E = function (message) {
@@ -96,6 +99,66 @@
     }
 
     // length 1, as in Chrome: the import object is read from arguments.
+    // ToIndex-style read of a descriptor field: undefined stays undefined.
+    function pages(value, who, field) {
+        if (value === undefined) return undefined;
+        var n = Number(value);
+        if (!isFinite(n) || n < 0 || n > 65536) {
+            throw new TypeError(who + ': Property \'' + field + '\': value ' + value + ' is above the upper bound 65536');
+        }
+        return Math.floor(n);
+    }
+
+    function Memory(descriptor) {
+        requireNew(new.target, 'Memory');
+        if (descriptor === null || typeof descriptor !== 'object') {
+            throw new TypeError('WebAssembly.Memory(): Argument 0 must be a memory descriptor');
+        }
+        if (descriptor.shared) throw new TypeError('WebAssembly.Memory(): shared memory is not supported (WASM W1)');
+        var initial = pages(descriptor.initial, 'WebAssembly.Memory()', 'initial');
+        if (initial === undefined) throw new TypeError("WebAssembly.Memory(): Property 'initial' is required");
+        var maximum = pages(descriptor.maximum, 'WebAssembly.Memory()', 'maximum');
+        if (maximum !== undefined && maximum < initial) {
+            throw new RangeError("WebAssembly.Memory(): Property 'maximum': value " + maximum + ' is below the lower bound ' + initial);
+        }
+        var made = guard(function () { return N.memoryNew(initial, maximum === undefined ? -1 : maximum); });
+        bindMemory(this, made[0], made[1]);
+    }
+    function bindMemory(object, id, buffer) {
+        memoryIds.set(object, id);
+        memoriesById[id] = object;
+        Object.defineProperty(object, '__rkBuffer', { value: buffer });
+    }
+    // A module-defined memory, exported: a Memory whose buffer is a stated W1 limit.
+    function exportedMemory(id) {
+        if (memoriesById[id]) return memoriesById[id];
+        var m = Object.create(Memory.prototype);
+        bindMemory(m, id, null);
+        return m;
+    }
+    function memId(m, who) {
+        if (!memoryIds.has(m)) throw new TypeError(who + ': Receiver is not a WebAssembly.Memory');
+        return memoryIds.get(m);
+    }
+    Object.defineProperty(Memory.prototype, 'buffer', {
+        get: function () {
+            memId(this, 'WebAssembly.Memory.buffer');
+            if (this.__rkBuffer === null) {
+                throw new TypeError('WebAssembly.Memory.buffer: a module-defined memory has no JS buffer in WASM W1 (W2)');
+            }
+            return this.__rkBuffer;
+        },
+        configurable: true
+    });
+    Object.defineProperty(Memory.prototype, 'grow', {
+        value: function grow(delta) {
+            var id = memId(this, 'WebAssembly.Memory.grow()');
+            return guard(function () { return N.memoryGrow(id, delta); });
+        },
+        writable: true, configurable: true
+    });
+    Object.defineProperty(Memory.prototype, Symbol.toStringTag, { value: 'WebAssembly.Memory', configurable: true });
+
     function Instance(module) {
         requireNew(new.target, 'Instance');
         var importObject = arguments[1];
@@ -109,11 +172,15 @@
             if (mod === null || (typeof mod !== 'object' && typeof mod !== 'function')) {
                 throw new TypeError('WebAssembly.Instance(): Import #' + i + ' "' + w[0] + '": module is not an object or function');
             }
-            return [w[0], w[1], mod[w[1]]];
+            var value = mod[w[1]];
+            if (w[2] === 'memory') value = memoryIds.has(value) ? memoryIds.get(value) : -1;
+            return [w[0], w[1], value];
         });
         var rows = guard(function () { return N.instantiate(id, given); });
         var exports = Object.create(null);
-        rows.forEach(function (r) { exports[r[0]] = makeExport(r[1], r[2], r[3]); });
+        rows.forEach(function (r) {
+            exports[r[0]] = r[1] === 'memory' ? exportedMemory(r[2]) : makeExport(r[1], r[2], r[3]);
+        });
         Object.freeze(exports);
         Object.defineProperty(this, 'exports', { value: exports, enumerable: true, configurable: true });
     }
@@ -150,7 +217,7 @@
         },
         Module: Module,
         Instance: Instance,
-        Memory: notYet('Memory', 2),
+        Memory: Memory,
         Table: notYet('Table', 3),
         Global: notYet('Global', 3),
         CompileError: CompileError,

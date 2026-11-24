@@ -27,6 +27,14 @@ use wasmi::{AsContext, AsContextMut};
 /// recursion is a catchable `RangeError: Maximum call stack size exceeded`).
 pub const MAX_NESTING: usize = 256;
 
+/// The most linear memory one realm may allocate (docs/design/WASM-W1.md):
+/// past it, `new Memory` is a `RangeError`, as Chrome's is when its own
+/// reservation fails.
+pub const MAX_REALM_MEMORY: usize = 1 << 30;
+
+/// One page of linear memory.
+const PAGE: usize = 65536;
+
 type Caller = wasmi::Caller<'static, HostData>;
 
 thread_local! {
@@ -48,6 +56,60 @@ pub struct HostData {
     /// An exception a JS import threw, carried out through the wasm frames to
     /// the export call that started them, which rethrows it unchanged.
     pending: Option<JsError>,
+    /// The store's resource limiter (`Limits`).
+    limits: Limits,
+}
+
+/// The store's `ResourceLimiter`. W1 memories do not grow
+/// (docs/design/WASM-W1.md): a JS-made memory runs over a static buffer of its
+/// initial pages, and wasmi 2.0.0 PANICS when `memory.grow` asks a static
+/// buffer for more than it holds ("tried to use too small static buffer").
+/// Denied here instead, before the buffer is asked, which wasm sees as -1:
+/// any growth past the current size is refused; a memory's first allocation
+/// (from 0) is allowed within the realm's cap (`MAX_REALM_MEMORY`), which so
+/// also bounds the memories wasmi allocates for module-defined memories.
+struct Limits {
+    allocated: usize,
+}
+
+impl wasmi::ResourceLimiter for Limits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        if current != 0 || desired <= current {
+            return Ok(desired <= current);
+        }
+        if self.allocated.saturating_add(desired) > MAX_REALM_MEMORY {
+            return Ok(false);
+        }
+        self.allocated += desired;
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        // Tables are phase 3; until then a table keeps its initial size.
+        Ok(current == 0 || desired <= current)
+    }
+
+    fn instances(&self) -> usize {
+        10_000
+    }
+
+    fn tables(&self) -> usize {
+        10_000
+    }
+
+    fn memories(&self) -> usize {
+        10_000
+    }
 }
 
 /// One realm's WebAssembly state.
@@ -65,6 +127,15 @@ pub struct WasmRealm {
     /// them with their owning `Module` / `Instance` objects.
     modules: RefCell<Vec<(wasmi::Module, HashMap<String, u32>)>>,
     funcs: RefCell<Vec<wasmi::Func>>,
+    /// Memories by id: the wasmi memory and, for one made in JS, the
+    /// `ArrayBuffer` whose storage it runs over (`Memory::new_static`). Held
+    /// here so the bytes can never be freed while this store, and so any
+    /// instance using them, lives; dropped with the realm (Rust ownership,
+    /// not a root inside the GC graph). A module-defined memory has no
+    /// buffer in W1 (its exported `buffer` is a TypeError, stated).
+    memories: RefCell<Vec<(wasmi::Memory, Option<boa_engine::JsObject>)>>,
+    /// Bytes of linear memory allocated in this realm (`MAX_REALM_MEMORY`).
+    memory_bytes: Cell<usize>,
 }
 
 impl WasmRealm {
@@ -79,9 +150,18 @@ impl WasmRealm {
             n.set(id + 1);
             id
         });
-        let data = HostData { realm: id, imports: Vec::new(), contexts: Vec::new(), pending: None };
-        let store = wasmi::Store::new(&engine, data);
-        Rc::new(Self { id, engine, store: RefCell::new(store), modules: RefCell::default(), funcs: RefCell::default() })
+        let data = HostData { realm: id, imports: Vec::new(), contexts: Vec::new(), pending: None, limits: Limits { allocated: 0 } };
+        let mut store = wasmi::Store::new(&engine, data);
+        store.limiter(|data| &mut data.limits);
+        Rc::new(Self {
+            id,
+            engine,
+            store: RefCell::new(store),
+            modules: RefCell::default(),
+            funcs: RefCell::default(),
+            memories: RefCell::default(),
+            memory_bytes: Cell::new(0),
+        })
     }
 
     /// The live `Caller` of the innermost host function of this realm
@@ -430,7 +510,8 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
             // A start function may call a JS import: instantiation is a call
             // level of its own, in this native's context.
             let context_ptr = context as *mut Context;
-            let linked: JsResult<Vec<(wasmi::Func, String, usize, u32)>> = realm.with_store(|s| {
+            #[allow(clippy::type_complexity)]
+            let linked: JsResult<(Vec<(wasmi::Func, String, usize, u32)>, Vec<(String, wasmi::Memory)>)> = realm.with_store(|s| {
                 let mut ctx = s.ctx();
                 let mut linker = <wasmi::Linker<HostData>>::new(&realm.engine);
                 for import in module.imports() {
@@ -449,13 +530,21 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                             let func = host_func(ctx.as_context_mut(), ty.clone(), index);
                             linker.define(&key.0, &key.1, func).map_err(|e| wasm_error("LinkError", e))?;
                         }
+                        wasmi::ExternType::Memory(_) => {
+                            // The prelude hands a WebAssembly.Memory over as its id, anything else as -1.
+                            let id = value.as_number().filter(|n| *n >= 0.0).map(|n| n as usize);
+                            let memory = id.and_then(|id| realm.memories.borrow().get(id).map(|m| m.0)).ok_or_else(|| {
+                                wasm_error(
+                                    "LinkError",
+                                    format!("Import \"{}\" \"{}\": memory import must be a WebAssembly.Memory object", key.0, key.1),
+                                )
+                            })?;
+                            linker.define(&key.0, &key.1, memory).map_err(|e| wasm_error("LinkError", e))?;
+                        }
                         _ => {
                             return Err(wasm_error(
                                 "LinkError",
-                                format!(
-                                    "Import \"{}\" \"{}\": memory, table and global imports arrive in W1 phases 2-3",
-                                    key.0, key.1
-                                ),
+                                format!("Import \"{}\" \"{}\": table and global imports arrive in W1 phase 3", key.0, key.1),
                             ))
                         }
                     }
@@ -472,18 +561,46 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                     },
                 })?;
                 let mut out = Vec::new();
+                let mut memories = Vec::new();
                 for export in module.exports() {
                     if let Some(func) = instance.get_func(ctx.as_context(), export.name()) {
                         let arity = func.ty(ctx.as_context()).params().len();
                         let index = indices.get(export.name()).copied().unwrap_or(0);
                         out.push((func, export.name().to_string(), arity, index));
+                    } else if let Some(memory) = instance.get_memory(ctx.as_context(), export.name()) {
+                        memories.push((export.name().to_string(), memory));
                     }
                 }
-                Ok(out)
+                Ok((out, memories))
             });
-            let mut funcs = realm.funcs.borrow_mut();
+            let (linked, exported_memories) = linked?;
             let mut rows = Vec::new();
-            for (func, name, arity, index) in linked? {
+            // A memory export: ["name", "memory", memId]. An imported memory
+            // keeps its id (the prelude answers the same Memory object); a
+            // module-defined one gets an id with no buffer (W1, stated).
+            for (name, memory) in exported_memories {
+                // wasmi's handles have no equality: the same memory is the
+                // same storage, so compare data pointers.
+                let known: Vec<*mut u8> = {
+                    let memories = realm.memories.borrow();
+                    realm.with_store(|s| memories.iter().map(|m| m.0.data_ptr(s.ctx())).collect())
+                };
+                let here = realm.with_store(|s| memory.data_ptr(s.ctx()));
+                let empty = realm.with_store(|s| memory.size(s.ctx())) == 0;
+                let mut memories = realm.memories.borrow_mut();
+                // Zero-page memories share a dangling pointer: never matched.
+                let id = match known.iter().position(|p| *p == here && !empty) {
+                    Some(id) => id,
+                    None => {
+                        memories.push((memory, None));
+                        memories.len() - 1
+                    }
+                };
+                let row: [JsValue; 3] = [js_string!(name).into(), js_string!("memory").into(), JsValue::from(id as u32)];
+                rows.push(JsArray::from_iter(row, context).into());
+            }
+            let mut funcs = realm.funcs.borrow_mut();
+            for (func, name, arity, index) in linked {
                 funcs.push(func);
                 let row: [JsValue; 4] = [
                     js_string!(name).into(),
@@ -513,7 +630,72 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
         })
     };
 
+    let w = weak.clone();
+    // memoryNew(initial, maximum | -1) -> [memId, buffer]
+    let memory_new = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let initial = args.first().cloned().unwrap_or_default().to_u32(context)?;
+            let maximum = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+            let maximum = (maximum >= 0.0).then_some(maximum as u32);
+            let len = (initial as usize).checked_mul(PAGE).ok_or_else(|| JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory"))?;
+            if realm.memory_bytes.get().saturating_add(len) > MAX_REALM_MEMORY {
+                return Err(JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory").into());
+            }
+            let mut block = boa_engine::object::builtins::AlignedVec::<u8>::new(64);
+            block
+                .try_reserve_exact(len)
+                .map_err(|_| JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory"))?;
+            block.resize(len, 0);
+            // A detach key nothing outside this crate has: script cannot
+            // detach the buffer (`transfer()` is a TypeError), and the engine
+            // never does while the store lives.
+            let key = JsValue::from(boa_engine::JsSymbol::new(Some(js_string!("wasm memory"))).ok_or_else(JsNativeError::typ)?);
+            let buffer = JsArrayBuffer::from_byte_block_with_detach_key(block, key, context)?;
+            let (ptr, size) = {
+                let mut data = buffer.data_mut().ok_or_else(JsNativeError::typ)?;
+                (data.as_mut_ptr(), data.len())
+            };
+            // SAFETY (the `&'static mut` invariant, docs/design/WASM-W1.md):
+            // the slice is the `ArrayBuffer`'s storage, which never moves or
+            // frees while this realm's store lives: the realm holds the buffer
+            // object in `memories` (dropped with the store), the detach key
+            // keeps script from taking the storage, and the buffer is not
+            // resizable. Only the store reads or writes through it.
+            let bytes: &'static mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
+            let ty = wasmi::MemoryType::new(initial, maximum);
+            let memory = realm
+                .with_store(|s| wasmi::Memory::new_static(s.ctx(), ty, bytes))
+                .map_err(|e| JsNativeError::range().with_message(format!("WebAssembly.Memory(): {e}")))?;
+            realm.memory_bytes.set(realm.memory_bytes.get() + len);
+            let buffer_object: boa_engine::JsObject = buffer.into();
+            let mut memories = realm.memories.borrow_mut();
+            memories.push((memory, Some(buffer_object.clone())));
+            let row: [JsValue; 2] = [JsValue::from((memories.len() - 1) as u32), buffer_object.into()];
+            Ok(JsArray::from_iter(row, context).into())
+        })
+    };
+    let w = weak.clone();
+    // memoryGrow(memId, delta) -> old pages. W1: only grow(0) (docs/design/WASM-W1.md).
+    let memory_grow = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let delta = args.get(1).cloned().unwrap_or_default().to_u32(context)?;
+            let memory = realm.memories.borrow().get(id).map(|m| m.0).ok_or_else(JsNativeError::typ)?;
+            let pages = realm.with_store(|s| memory.size(s.ctx()));
+            if delta == 0 {
+                return Ok(JsValue::from(pages as u32));
+            }
+            Err(JsNativeError::range()
+                .with_message("WebAssembly.Memory.grow(): Unable to grow instance memory (WASM W1: no grow; W2)")
+                .into())
+        })
+    };
+
     Ok(boa_engine::object::ObjectInitializer::new(context)
+        .function(memory_new, js_string!("memoryNew"), 2)
+        .function(memory_grow, js_string!("memoryGrow"), 2)
         .function(validate, js_string!("validate"), 1)
         .function(compile, js_string!("compile"), 1)
         .function(reflect, js_string!("reflect"), 2)
