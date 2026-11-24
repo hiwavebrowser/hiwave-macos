@@ -273,6 +273,25 @@ fn css_supports_answers_from_the_engine_property_list() {
     );
 }
 
+/// LOGICAL-SIZE R1 (#1442): CSS.supports knows the six flow-relative sizes and
+/// rejects a non-size value. The headless oracle in `logical_size_tests` is the
+/// only prior pin; Linux bindings `--lib` never saw `sizeOk`.
+#[test]
+fn css_supports_knows_the_logical_size_properties() {
+    let b = bound();
+    assert_eq!(
+        ev(
+            &b,
+            "[['inline-size','10px'],['block-size','10px'],['min-inline-size','10px'],\
+             ['max-inline-size','none'],['min-block-size','10px'],['max-block-size','none'],\
+             ['inline-size','red'],['max-inline-size','auto'],['min-inline-size','none'],\
+             ['inline-size','fit-content'],['block-size','50%']]\
+             .map(function(a){return CSS.supports(a[0],a[1])}).join(' ')"
+        ),
+        "true true true true true true false false false true true"
+    );
+}
+
 #[test]
 fn css_escape_follows_cssom_serialize_an_identifier() {
     let b = bound();

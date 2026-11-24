@@ -587,6 +587,8 @@ mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
 #[cfg(test)]
+mod logical_size_apply_tests;
+#[cfg(test)]
 mod color_shorthand_keep_tests;
 #[cfg(test)]
 mod depth_perspective_refuse_tests;

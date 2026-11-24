@@ -92,6 +92,19 @@ class ServerTests(unittest.TestCase):
         self.assertIn("MISS GET https://example.test/missing", logged)
         self.assertNotIn(SECRET, logged)
 
+    def test_a_generate_204_probe_is_answered_without_a_har_entry(self):
+        # Connectivity probes carry a random query that never matches the HAR;
+        # the server must answer 204 and log SHIM204 instead of MISS/404.
+        status, headers, body = self.hiwave(
+            "https://example.test/generate_204?g=1"
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(int(headers["Content-Length"]), 0)
+        logged = self.miss.read_text(encoding="utf-8")
+        self.assertIn("SHIM204 GET https://example.test/generate_204?g=1", logged)
+        self.assertNotIn("MISS GET https://example.test/generate_204", logged)
+
     def test_time_scale_zero_skips_the_recorded_wait(self):
         self.server.time_scale = 0
         started = time.monotonic()
@@ -128,6 +141,87 @@ class ServerTests(unittest.TestCase):
         self.assertIn(b"200", data.split(b"\r\n", 1)[0])
         self.assertIn(b"window.__replay=1;", data)
         wrapped.close()
+
+
+class Base64EncodingTests(unittest.TestCase):
+    """HAR bodies are stored decoded whether or not content.encoding is base64;
+    Content-Encoding must not be forwarded either way (cd2c8077)."""
+
+    def setUp(self):
+        import base64
+
+        plain = b"decoded-bytes"
+        har = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "replay-test", "version": "0"},
+                "entries": [
+                    {
+                        "startedDateTime": "2026-01-01T00:00:00.000Z",
+                        "time": 0,
+                        "request": {
+                            "method": "GET",
+                            "url": "https://example.test/bin",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": [],
+                            "queryString": [],
+                            "cookies": [],
+                            "headersSize": -1,
+                            "bodySize": 0,
+                        },
+                        "response": {
+                            "status": 200,
+                            "statusText": "OK",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": [
+                                {"name": "Content-Type", "value": "application/octet-stream"},
+                                {"name": "Content-Encoding", "value": "gzip"},
+                                {"name": "X-Replay", "value": "b64"},
+                            ],
+                            "cookies": [],
+                            "content": {
+                                "mimeType": "application/octet-stream",
+                                "encoding": "base64",
+                                "text": base64.b64encode(plain).decode("ascii"),
+                                "size": len(plain),
+                            },
+                            "redirectURL": "",
+                            "headersSize": -1,
+                            "bodySize": len(plain),
+                        },
+                        "cache": {},
+                        "timings": {"send": 0, "wait": 0, "receive": 0},
+                    }
+                ],
+            }
+        }
+        self.tmp = Path(tempfile.mkdtemp())
+        self.har_path = self.tmp / "b64.har"
+        self.har_path.write_text(json.dumps(har), encoding="utf-8")
+        self.miss = self.tmp / "miss.log"
+        self.server = serve(self.har_path, miss_log=self.miss, time_scale=0, tls=False)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_base64_bodies_drop_content_encoding_like_plain_ones(self):
+        opener = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/bin",
+            headers={"X-Original-Url": "https://example.test/bin"},
+            method="GET",
+        )
+        with urllib.request.urlopen(opener, timeout=5) as response:
+            headers = dict(response.headers)
+            body = response.read()
+        self.assertEqual(body, b"decoded-bytes")
+        self.assertEqual(headers.get("X-Replay"), "b64")
+        # Case-insensitive: urllib may normalise the name.
+        lowered = {k.lower(): v for k, v in headers.items()}
+        self.assertNotIn("content-encoding", lowered)
 
 
 class DiffTests(unittest.TestCase):
