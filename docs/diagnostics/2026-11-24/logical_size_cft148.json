@@ -1,0 +1,300 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "label": "inline-size and block-size",
+      "style": "inline-size:200px;block-size:50px",
+      "outer": "width:400px;height:300px",
+      "width": 200,
+      "height": 50,
+      "computed": {
+        "width": "200px",
+        "height": "50px",
+        "inline-size": "200px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "percentages",
+      "style": "inline-size:50%;block-size:20%",
+      "outer": "width:400px;height:300px",
+      "width": 200,
+      "height": 60,
+      "computed": {
+        "width": "200px",
+        "height": "60px",
+        "inline-size": "200px",
+        "block-size": "60px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "em",
+      "style": "font-size:10px;inline-size:12em;block-size:3em",
+      "outer": "width:400px;height:300px",
+      "width": 120,
+      "height": 30,
+      "computed": {
+        "width": "120px",
+        "height": "30px",
+        "inline-size": "120px",
+        "block-size": "30px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "min-inline-size over width",
+      "style": "width:100px;min-inline-size:300px",
+      "outer": "width:400px;height:300px",
+      "width": 300,
+      "height": 50,
+      "computed": {
+        "width": "300px",
+        "height": "50px",
+        "inline-size": "300px",
+        "block-size": "50px",
+        "min-width": "300px",
+        "min-inline-size": "300px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "max-inline-size on an auto width",
+      "style": "max-inline-size:150px",
+      "outer": "width:400px;height:300px",
+      "width": 150,
+      "height": 50,
+      "computed": {
+        "width": "150px",
+        "height": "50px",
+        "inline-size": "150px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "150px",
+        "max-inline-size": "150px",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "min-block-size over the content",
+      "style": "min-block-size:80px",
+      "outer": "width:400px;height:300px",
+      "width": 400,
+      "height": 80,
+      "computed": {
+        "width": "400px",
+        "height": "80px",
+        "inline-size": "400px",
+        "block-size": "80px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "80px",
+        "min-block-size": "80px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "max-block-size under height",
+      "style": "height:100px;max-block-size:30px",
+      "outer": "width:400px;height:300px",
+      "width": 400,
+      "height": 30,
+      "computed": {
+        "width": "400px",
+        "height": "30px",
+        "inline-size": "400px",
+        "block-size": "30px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "30px",
+        "max-block-size": "30px"
+      }
+    },
+    {
+      "label": "max-inline-size: none after a limit",
+      "style": "max-width:120px;max-inline-size:none",
+      "outer": "width:400px;height:300px",
+      "width": 400,
+      "height": 50,
+      "computed": {
+        "width": "400px",
+        "height": "50px",
+        "inline-size": "400px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "later inline-size wins over width",
+      "style": "width:100px;inline-size:200px",
+      "outer": "width:400px;height:300px",
+      "width": 200,
+      "height": 50,
+      "computed": {
+        "width": "200px",
+        "height": "50px",
+        "inline-size": "200px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "later width wins over inline-size",
+      "style": "inline-size:200px;width:100px",
+      "outer": "width:400px;height:300px",
+      "width": 100,
+      "height": 50,
+      "computed": {
+        "width": "100px",
+        "height": "50px",
+        "inline-size": "100px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "block-size auto keeps the content height",
+      "style": "height:90px;block-size:auto",
+      "outer": "width:400px;height:300px",
+      "width": 400,
+      "height": 50,
+      "computed": {
+        "width": "400px",
+        "height": "50px",
+        "inline-size": "400px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "inline-size: inherit",
+      "style": "inline-size:inherit",
+      "outer": "width:400px;height:300px;inline-size:250px",
+      "width": 250,
+      "height": 50,
+      "computed": {
+        "width": "250px",
+        "height": "50px",
+        "inline-size": "250px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "box-sizing border-box",
+      "style": "box-sizing:border-box;padding:10px;border:5px solid;inline-size:200px;block-size:60px",
+      "outer": "width:400px;height:300px",
+      "width": 200,
+      "height": 60,
+      "computed": {
+        "width": "200px",
+        "height": "60px",
+        "inline-size": "200px",
+        "block-size": "60px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    },
+    {
+      "label": "inline-size: fit-content",
+      "style": "inline-size:fit-content",
+      "outer": "width:400px;height:300px",
+      "width": 50,
+      "height": 50,
+      "computed": {
+        "width": "50px",
+        "height": "50px",
+        "inline-size": "50px",
+        "block-size": "50px",
+        "min-width": "0px",
+        "min-inline-size": "0px",
+        "max-width": "none",
+        "max-inline-size": "none",
+        "min-height": "0px",
+        "min-block-size": "0px",
+        "max-height": "none",
+        "max-block-size": "none"
+      }
+    }
+  ]
+}
