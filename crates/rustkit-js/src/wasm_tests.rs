@@ -358,3 +358,22 @@ fn a_long_nested_wasm_loop_runs_past_its_fuel_slices() {
     });
     assert_eq!(got, "0");
 }
+
+/// A function whose compilation costs more fuel than one slice (wasmi
+/// compiles lazily by default and charges fuel for it, as an error that can't
+/// be resumed: mid-run it was a bare "RuntimeError: trap", and JetStream's
+/// HashSet, tsf and gcc-loops aborted on it). The module is built in JS: one
+/// export `big() -> i32` whose body is 400,000 `i32.const 0; drop` pairs, then
+/// `i32.const 7`.
+#[test]
+fn a_function_too_big_to_compile_in_one_fuel_slice_runs() {
+    let got = within(120, || {
+        let mut rt = rt();
+        eval(&mut rt, "function leb(n) { var out = []; do { var b = n & 127; n >>>= 7; if (n) b |= 128; out.push(b); } while (n); return out; } \
+            var body = [0]; for (var i = 0; i < 400000; i++) body.push(0x41, 0, 0x1a); body.push(0x41, 7, 0x0b); \
+            var code = leb(body.length).concat(body); code = [1].concat(code); \
+            var bytes = [0,97,115,109,1,0,0,0, 1,5,1,0x60,0,1,0x7f, 3,2,1,0, 7,7,1,3,98,105,103,0,0, 10].concat(leb(code.length), code); \
+            String(new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array(bytes))).exports.big())")
+    });
+    assert_eq!(got, "7");
+}
