@@ -1418,3 +1418,23 @@ returns each class's exact source text, and `true` for the Polymer test.
 constructor and a `}` inside a comment; a class without a constructor; an anonymous, a named and a
 parenthesized class expression; a class nested in a method; a class from direct `eval`; and the
 Polymer test. All four tests fail without the patch (`function Rect() { [native code] }`).
+
+## Patch: typed array element conversion wraps (ToInt8 ... ToUint32) and rounds half to even (ToUint8Clamp)
+
+**Why.** Converting one typed array into another of a different element type
+(the `TypedArray` constructor, `%TypedArray%.prototype.set`, `slice`) goes
+through `TypedArrayKind::to_element_f64`, which used Rust `as` casts. They
+saturate: `new Uint8Array(new Int8Array([-56]))` gave 0, not 200, and
+`new Int32Array(new Float64Array([1e10]))` gave 2147483647, not 1410065408.
+`Uint8Clamped` used `f64::round`, half away from zero (2.5 -> 3; the spec and
+Chrome give 2). emscripten's in-memory file system writes files with
+`new Uint8Array(HEAP8.subarray(...))`, so JetStream 2.2's tsf-wasm read back
+files whose bytes above 127 were 0 and aborted.
+
+**What.** `src/builtins/typed_array/mod.rs`, `to_element_f64`: the integer
+kinds take the low bits of ToUint32 (non-finite is 0, truncate, modulo 2^32);
+`Uint8Clamped` clamps (NaN is 0) and uses `round_ties_even`. Marked
+`HIWAVE PATCH (typed array conversion)`.
+
+**Tests.** `crates/rustkit-js/tests/typed_array_conversion.rs`, against Chrome
+for Testing 148's numbers (`docs/diagnostics/2026-11-24/typed_array_conversion_cft148.json`).
