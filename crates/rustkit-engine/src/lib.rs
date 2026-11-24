@@ -7038,6 +7038,10 @@ impl Engine {
             } else {
                 None
             };
+            // An adopted spare's document was never parsed from a response:
+            // it is the blank document plus what script wrote into it since
+            // the insertion, and `document.write` already ran those scripts.
+            let was_adopted = adopted.is_some();
             let (child, document, target, width, height) = if let Some((child, (width, height))) = adopted {
                 let document = child.document();
                 let held = parent_of(self, id).is_some_and(|parent| parent.frame_holds_window(request.node));
@@ -7191,14 +7195,19 @@ impl Engine {
                 // The live turn's link check asks for them again.
                 Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
             }
-            // The child's classic scripts, in document order.
+            // The child's classic scripts, in document order: none for an
+            // adopted spare (above), whose written scripts ran in `write`.
             // The engine's own question (not a page script: nothing of it
             // is announced to the frame's page).
-            let listed = child.evaluate(
+            let listed = if was_adopted {
+                Ok(rustkit_js::JsValue::String("[]".into()))
+            } else {
+                child.evaluate(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
                    return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
-            );
+                )
+            };
             let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
                 _ => Vec::new(),

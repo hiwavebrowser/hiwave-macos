@@ -424,22 +424,17 @@
         var target = st.inBody ? bodyOf(d) : headOf(d);
         target.insertAdjacentHTML('beforeend', html);
     }
-    function attrOf(attrs, name) {
-        var m = new RegExp('\\b' + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i').exec(attrs);
-        return m ? (m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4]) : null;
-    }
-    function runScript(d, st, attrs, text) {
+    function runScript(d, st, markup, text) {
         skeleton(d);
-        var el = d.createElement('script');
-        // Put in as a script the engine will not queue to run again, then
-        // given back its own type: written scripts run here, once.
-        el.setAttribute('type', 'text/x-rustkit-written');
-        el.text = text;
-        (st.inBody ? bodyOf(d) : headOf(d)).appendChild(el);
-        var type = attrOf(attrs, 'type');
-        if (type === null) el.removeAttribute('type'); else el.setAttribute('type', type);
-        var src = attrOf(attrs, 'src');
-        if (src !== null) el.setAttribute('src', src);
+        // The written script goes in as the parser's own (its markup, every
+        // attribute kept), through insertAdjacentHTML: a script made that way
+        // is "already started" (HTML), so the engine never prepares it on a
+        // later insertion or attribute change. It runs here, once.
+        var target = st.inBody ? bodyOf(d) : headOf(d);
+        target.insertAdjacentHTML('beforeend', markup);
+        var el = target.lastElementChild;
+        if (!el || el.localName !== 'script') return;
+        var type = el.getAttribute('type'), src = el.getAttribute('src');
         var source = text;
         if (src !== null) {
             var url = String(src).split('#')[0];
@@ -456,7 +451,7 @@
         while ((m = re.exec(st.buffer))) {
             insertMarkup(d, st, st.buffer.slice(0, m.index));
             st.buffer = st.buffer.slice(m.index + m[0].length);
-            runScript(d, st, m[1], m[2]);
+            runScript(d, st, m[0], m[2]);
         }
         if (final) { insertMarkup(d, st, st.buffer); st.buffer = ''; return; }
         // A script not yet closed, or a tag cut off at the end, waits for the
