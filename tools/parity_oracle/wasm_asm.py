@@ -63,3 +63,37 @@ MEMMOD = module2([([I32], [I32]), ([I32, I32], []), ([], [I32])], [("env", "memo
                  [("load", 0, 0), ("store", 0, 1), ("size", 0, 2), ("grow", 0, 3)])
 # module-defined memory (1 page), exported as "mem"
 OWNMEM = module2([([], [I32])], [], [(0, [], b"\x3f\x00")], [("size", 0, 0), ("mem", 2, 0)], memory=(1, None))
+
+def module3(types, imports, funcs, exports, elems=()):
+    """imports: [(mod, name, desc)] with desc ("func", ti) | ("table", min, max|None) |
+    ("global", valtype, mutable); exports: [(name, kind, idx)]; elems: [(offset, [funcidx...])] into table 0."""
+    t = vec([b"\x60" + vec([bytes([p]) for p in ps]) + vec([bytes([r]) for r in rs]) for ps, rs in types])
+    out = b"\x00asm\x01\x00\x00\x00" + section(1, t)
+    def limits(mn, mx): return (b"\x00" + uleb(mn)) if mx is None else (b"\x01" + uleb(mn) + uleb(mx))
+    items = []
+    for m, n, d in imports:
+        if d[0] == "func": items.append(name(m) + name(n) + b"\x00" + uleb(d[1]))
+        elif d[0] == "table": items.append(name(m) + name(n) + b"\x01\x70" + limits(d[1], d[2]))
+        else: items.append(name(m) + name(n) + b"\x03" + bytes([d[1], 1 if d[2] else 0]))
+    if items: out += section(2, vec(items))
+    out += section(3, vec([uleb(ti) for ti, _, _ in funcs]))
+    out += section(7, vec([name(n) + bytes([k]) + uleb(i) for n, k, i in exports]))
+    if elems:
+        out += section(9, vec([b"\x00\x41" + sleb(off) + b"\x0b" + vec([uleb(f) for f in fs]) for off, fs in elems]))
+    bodies = []
+    for _, locs, code in funcs:
+        body = vec([uleb(c) + bytes([ty]) for c, ty in locs]) + code + b"\x0b"
+        bodies.append(uleb(len(body)) + body)
+    return out + section(10, vec(bodies))
+# imports: table env.table (2, 4) funcref; global env.g i32 mutable; global env.nan f64 immutable
+# funcs (no func imports, so func 0 is the first defined):
+#   0 seven() -> i32 = 7                         type 0 ([], [I32])
+#   1 dispatch(i) -> i32 = call_indirect type 0 (i) table 0     type 1 ([I32],[I32])
+#   2 getg() -> i32 = global.get 0             type 0
+#   3 nan() -> f64 = global.get 1               type 2 ([], [F64])
+# elem: table[1] = func 0
+TABMOD = module3([([], [I32]), ([I32], [I32]), ([], [F64])],
+                 [("env", "table", ("table", 2, 4)), ("env", "g", ("global", I32, True)), ("env", "nan", ("global", F64, False))],
+                 [(0, [], b"\x41\x07"), (1, [], b"\x20\x00\x11\x00\x00"), (0, [], b"\x23\x00"), (2, [], b"\x23\x01")],
+                 [("seven", 0, 0), ("dispatch", 0, 1), ("getg", 0, 2), ("nan", 0, 3)],
+                 elems=[(1, [0])])

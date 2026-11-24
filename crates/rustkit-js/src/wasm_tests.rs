@@ -220,3 +220,56 @@ fn w1_limits_grow_and_module_defined_memory() {
         "RangeError|-1|65536|[object WebAssembly.Memory]|1|TypeError"
     );
 }
+
+// ---- Phase 3: Table and Global. Chrome 148: docs/diagnostics/2026-11-24/wasm_table_global_cft148.json
+// (tools/parity_oracle/wasm_table_global_probe.mjs; bytes from tools/parity_oracle/wasm_asm.py).
+
+/// Imports env.table (funcref 2..4), env.g (mutable i32), env.nan (immutable f64); seven() = 7;
+/// dispatch(i) = call_indirect table[i]; getg() = env.g; nan() = env.nan; elem table[1] = seven.
+const TABMOD: &str = "new Uint8Array([0,97,115,109,1,0,0,0,1,14,3,96,0,1,127,96,1,127,1,127,96,0,1,124,2,36,3,3,101,110,118,5,116,97,98,108,101,1,112,1,2,4,3,101,110,118,1,103,3,127,1,3,101,110,118,3,110,97,110,3,124,0,3,5,4,0,1,0,2,7,33,4,5,115,101,118,101,110,0,0,8,100,105,115,112,97,116,99,104,0,1,4,103,101,116,103,0,2,3,110,97,110,0,3,9,7,1,0,65,1,11,1,0,10,24,4,4,0,65,7,11,7,0,32,0,17,0,0,11,4,0,35,0,11,4,0,35,1,11])";
+
+/// Chrome: a funcref table is null-filled; the module's element segment puts
+/// its function in, and table.get answers the very export object;
+/// call_indirect calls through it; a null entry and an out-of-range index are
+/// RuntimeErrors; table.set takes an exported function (a plain JS function
+/// is a TypeError); grow answers the old length; past the maximum, or get out
+/// of range, is a RangeError.
+#[test]
+fn a_funcref_table_shared_with_js() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, &format!("var t = new WebAssembly.Table({{ element: 'anyfunc', initial: 2, maximum: 4 }}), r = [t.length, t.get(0), Object.prototype.toString.call(t)]; \
+            var g = new WebAssembly.Global({{ value: 'i32', mutable: true }}, 41); \
+            var ex = new WebAssembly.Instance(new WebAssembly.Module({TABMOD}), {{ env: {{ table: t, g: g, nan: NaN }} }}).exports; \
+            r.push(t.get(1) === ex.seven, ex.dispatch(1)); \
+            try {{ ex.dispatch(0); }} catch (e) {{ r.push(e.constructor.name + ':' + e.message); }} \
+            try {{ ex.dispatch(9); }} catch (e) {{ r.push(e.constructor.name + ':' + e.message); }} \
+            t.set(0, ex.seven); r.push(ex.dispatch(0), t.grow(1), t.length); \
+            try {{ t.grow(5); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ t.set(0, () => 1); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ t.get(99); }} catch (e) {{ r.push(e.constructor.name); }} r.join('|')")),
+        "2||[object WebAssembly.Table]|true|7|RuntimeError:null function|RuntimeError:table index is out of bounds|7|2|3|RangeError|TypeError|RangeError"
+    );
+}
+
+/// Chrome: a Global's value and valueOf; a mutable imported Global is shared
+/// (a JS write is seen by wasm); a plain Number gives an immutable f64 import
+/// (NaN); i64 is a BigInt, f32 rounds; setting an immutable Global is a
+/// TypeError; a plain Number for a mutable global, or a non-Number for an f64
+/// one, is a LinkError; a non-Table table import is a LinkError.
+#[test]
+fn globals_and_global_imports() {
+    let mut rt = rt();
+    assert_eq!(
+        eval(&mut rt, &format!("var t = new WebAssembly.Table({{ element: 'anyfunc', initial: 2, maximum: 4 }}); \
+            var g = new WebAssembly.Global({{ value: 'i32', mutable: true }}, 41), r = [g.value, g.valueOf(), Object.prototype.toString.call(g)]; \
+            var ex = new WebAssembly.Instance(new WebAssembly.Module({TABMOD}), {{ env: {{ table: t, g: g, nan: NaN }} }}).exports; \
+            r.push(ex.getg()); g.value = 5; r.push(ex.getg(), String(ex.nan())); \
+            var ig = new WebAssembly.Global({{ value: 'i32' }}, 3); try {{ ig.value = 4; }} catch (e) {{ r.push(e.constructor.name); }} \
+            r.push(typeof new WebAssembly.Global({{ value: 'i64' }}, 5n).value, new WebAssembly.Global({{ value: 'f32' }}, 1.1).value); \
+            try {{ new WebAssembly.Instance(new WebAssembly.Module({TABMOD}), {{ env: {{ table: t, g: 41, nan: NaN }} }}); r.push('ok'); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ new WebAssembly.Instance(new WebAssembly.Module({TABMOD}), {{ env: {{ table: t, g: g, nan: 'x' }} }}); r.push('ok'); }} catch (e) {{ r.push(e.constructor.name); }} \
+            try {{ new WebAssembly.Instance(new WebAssembly.Module({TABMOD}), {{ env: {{ table: {{}}, g: g, nan: NaN }} }}); }} catch (e) {{ r.push(e.constructor.name); }} r.join('|')")),
+        "41|41|[object WebAssembly.Global]|41|5|NaN|TypeError|bigint|1.100000023841858|LinkError|LinkError|LinkError"
+    );
+}
