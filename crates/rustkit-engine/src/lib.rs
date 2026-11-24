@@ -21861,13 +21861,21 @@ impl layout_ctx::LayoutCtx {
         viewport: Option<(f32, f32)>,
     ) -> Rc<SvgPaintRules> {
         let viewport_bits = viewport.map(|(w, h)| (w.to_bits(), h.to_bits()));
-        if let Some(kept) = self.svg_prepass.borrow().paint_rules.clone() {
-            let same = kept.inline.len() == inline.len()
-                && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
-                && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
-                && kept.viewport == viewport_bits
-                && kept.order == sheet_order;
-            if same {
+        {
+            let mut prepass = self.svg_prepass.borrow_mut();
+            // A set whose `<link>` sheets are gone can never match again.
+            prepass.paint_rules_kept.retain(|kept| kept.external.strong_count() > 0);
+            let found = prepass.paint_rules_kept.iter().position(|kept| {
+                kept.inline.len() == inline.len()
+                    && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
+                    && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
+                    && kept.viewport == viewport_bits
+                    && kept.order == sheet_order
+            });
+            if let Some(at) = found {
+                let kept = prepass.paint_rules_kept.remove(at);
+                prepass.paint_rules_kept.push(kept.clone());
+                prepass.paint_rules = Some(kept.clone());
                 return kept;
             }
         }
@@ -21943,10 +21951,20 @@ impl layout_ctx::LayoutCtx {
             local,
             reads_state,
         });
-        self.svg_prepass.borrow_mut().paint_rules = Some(rules.clone());
+        let mut prepass = self.svg_prepass.borrow_mut();
+        prepass.paint_rules = Some(rules.clone());
+        // SVG_PAINT_RULES_KEPT sets: a page, its frames and a few more.
+        prepass.paint_rules_kept.push(rules.clone());
+        let over = prepass.paint_rules_kept.len().saturating_sub(SVG_PAINT_RULES_KEPT);
+        prepass.paint_rules_kept.drain(..over);
+        drop(prepass);
         rules
     }
 }
+
+/// How many sets of svg paint rules are kept (SVG-PREPASS-CACHE): enough for a page and its
+/// frames laid out in turn; each holds its `<style>` sheets, so not unbounded.
+const SVG_PAINT_RULES_KEPT: usize = 4;
 
 /// Where a rule of `SvgPaintRules` is: the n-th `<style>` sheet or the
 /// n-th `<link>` sheet.
