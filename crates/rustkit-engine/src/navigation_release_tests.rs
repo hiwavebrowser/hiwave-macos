@@ -10,6 +10,10 @@
 //!
 //! JavaScript objects are freed by a collection, not when the last Rust
 //! owner lets go, so each test forces one before it looks.
+//!
+//! The module is behind `feature = "headless"`: run it with
+//! `cargo test -p rustkit-engine --lib --features headless` (without the
+//! feature, 0 of these run; #1440 delta R1 nit 2).
 
 use super::*;
 use std::rc::Weak;
@@ -78,24 +82,38 @@ fn navigation_releases_every_replaced_document() {
 /// With nested contexts on, a page whose frame used `document.write` with
 /// scripts (the frame's realm, its spare, the written-script runner) still
 /// releases its document when navigated away from (#1440: a realm captured
-/// by the runner's native closure kept every document alive).
+/// by the runner's native closure kept every document alive). The write runs
+/// once the page has loaded and its frame is attached (an inline script
+/// during parsing would find no frame document yet), and the test checks the
+/// written script ran in the frame before navigating (#1440 delta R1 nit 1).
 #[test]
 fn navigation_releases_a_document_whose_frame_wrote_scripts() {
     let config = EngineConfig { nested_contexts: true, ..EngineConfig::default() };
     let mut engine = Engine::new(config).expect("engine");
     let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
-    engine
-        .load_html(
+    engine.load_html(view, "<html><body><iframe id=f></iframe></body></html>").expect("first load");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    for _ in 0..4 {
+        rt.block_on(engine.pump_live(view, 20));
+    }
+    let ran = engine
+        .execute_script(
             view,
-            "<html><body><iframe id=f></iframe><script>\
-             var d = document.getElementById('f').contentDocument; \
-             if (d) { d.open(); d.write('<script>window.ran = 1<\\/script><p>w</p>'); d.close(); }\
-             </script></body></html>",
+            "var d = document.getElementById('f').contentDocument; \
+             d.open(); d.write('<script>window.ran = 1<\\/script><p>w</p>'); d.close(); \
+             String(d.defaultView.ran)",
         )
-        .expect("first load");
+        .expect("write");
+    assert_eq!(ran, r#"String("1")"#, "the written script ran in the frame (the runner was exercised)");
     let first = current_document(&engine, view);
+    // The live loop runs turns after a navigation, and a navigated-away
+    // document's frame views are dropped at the view's next frame drain
+    // (`frames_nav != nav_id`); with no turn at all they would still hold it.
     for _ in 0..3 {
         engine.load_html(view, NEXT).expect("next load");
+        for _ in 0..2 {
+            rt.block_on(engine.pump_live(view, 20));
+        }
     }
     boa_gc::force_collect();
     assert_eq!(first.strong_count(), 0, "the replaced document is still held after a collection");
