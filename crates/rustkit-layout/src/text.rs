@@ -1306,6 +1306,18 @@ pub(crate) fn shape_memo_misses() -> usize {
     MISSES.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: characters passed to `TextShaper::shape` on this thread (WRAP-WINDOW).
+    static SHAPED_CHARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: characters passed to `TextShaper::shape` on this thread so far.
+#[cfg(test)]
+pub(crate) fn shaped_chars() -> usize {
+    SHAPED_CHARS.with(|c| c.get())
+}
+
 /// Bytes the per-thread shaped-text memo of [`TextShaper::shape`] may hold
 /// (SHAPED-CAP), its queue of turned-away strings included; past it, entries
 /// are evicted one at a time (`text_memo`), never all at once. Each entry is
@@ -1750,6 +1762,8 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
+        #[cfg(test)]
+        SHAPED_CHARS.with(|c| c.set(c.get() + text.chars().count()));
         // `font-size: 0`: no glyph, no advance, no extent. Core Text is not
         // asked: it answers a size of 0 with its default size, so text that
         // a page had hidden this way was measured about 12px tall.
@@ -3393,6 +3407,54 @@ impl Default for FontLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WRAP-WINDOW (STRESS-SPEED, Speedometer Editor-TipTap): wrapping one long paragraph shaped
+    /// the whole rest of it for every line (to ask whether it fits) and listed the break
+    /// opportunities of the whole rest too, so its cost grew with the square of its length (on
+    /// Windows, one paragraph's full layout: 5k chars 26.6 ms, 10k 76.5, 20k 237, 40k 732;
+    /// docs/diagnostics/2026-11-24/STRESS-SPEED-editor-tiptap.md). A line needs only a window of
+    /// text that is sure to overflow it.
+    #[test]
+    fn wrapping_a_long_paragraph_shapes_each_part_of_it_a_bounded_number_of_times() {
+        let words = ["Longtemps,", "je", "me", "suis", "couché", "de", "bonne", "heure.", "Parfois,", "à",
+            "peine", "ma", "bougie", "éteinte,", "mes", "yeux", "se", "fermaient", "si", "vite"];
+        let mut text = String::new();
+        let mut i = 0;
+        while text.chars().count() < 20_000 {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(words[(i * 7 + i / 3) % words.len()]);
+            i += 1;
+        }
+        let n = text.chars().count();
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let before = shaped_chars();
+        let lines = shaper
+            .wrap_text_white_space(
+                &text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                13.0,
+                780.0,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+                WhiteSpace::Normal,
+            )
+            .expect("wrap");
+        let shaped = shaped_chars() - before;
+        assert!(lines.len() > 50, "{} lines", lines.len());
+        assert!(lines.iter().all(|l| l.width <= 780.0 + 0.5), "every line fits");
+        assert!(
+            shaped < 30 * n,
+            "wrapping {n} characters into {} lines shaped {shaped} characters ({}x)",
+            lines.len(),
+            shaped / n
+        );
+    }
 
     #[test]
     fn a_fallback_face_taller_than_the_line_sets_both_extents() {
