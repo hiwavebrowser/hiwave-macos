@@ -799,14 +799,21 @@ mod restore_tests {
 /// `b`'s subtree (no positioned box between them, `b` itself included): it is placed against a box
 /// the memo does not see, so a recorded position cannot be restored (the RustKit chrome's tab
 /// strip: a 1px separator, recorded at (167, 1) in the container and laid out at (-27, 38)).
+/// Both position fields are read, as `snapshot` reads them (flex item collection reads
+/// `style.position`): a box counts as absolute if either says so, and as a containing block only if
+/// both do. A fixed descendant is refused by `snapshot` already, and is counted here too.
 fn abspos_escapes(b: &LayoutBox) -> bool {
-    fn walk(b: &LayoutBox, contained: bool) -> bool {
-        b.children.iter().any(|c| {
-            let abs = matches!(c.position, Position::Absolute | Position::Fixed);
-            (abs && !contained) || walk(c, contained || c.position != Position::Static)
-        })
+    fn absolute(c: &LayoutBox) -> bool {
+        matches!(c.position, Position::Absolute | Position::Fixed)
+            || matches!(c.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed)
     }
-    walk(b, b.position != Position::Static)
+    fn positioned(c: &LayoutBox) -> bool {
+        c.position != Position::Static && c.style.position != rustkit_css::Position::Static
+    }
+    fn walk(b: &LayoutBox, contained: bool) -> bool {
+        b.children.iter().any(|c| (absolute(c) && !contained) || walk(c, contained || positioned(c)))
+    }
+    walk(b, positioned(b))
 }
 
 /// FLEX-MEMO: the key of a flex container's layout. Its inputs are the arguments
@@ -844,6 +851,9 @@ fn flex_key(
     hash_edges(&b.dimensions.padding, &mut h);
     hash_edges(&b.dimensions.border, &mut h);
     hash_edges(&b.dimensions.margin, &mut h);
+    // The run reads the container's own flag (`percent_height_computes_to_auto`: the definite-cross
+    // test and step 12); `input_fingerprint` hashes only its descendants.
+    b.percent_height_is_auto.hash(&mut h);
     MemoKey {
         width: container_box.content.width.to_bits(),
         definite_height: used_inner_height.map(f32::to_bits),
@@ -888,6 +898,7 @@ impl LayoutBox {
             .unwrap_or_else(|| Box::new(BoxMemo { epoch, entries: Vec::new() }));
         let found = memo.entries.iter().position(|e| e.key == key);
         let mut verify: Option<(Vec<BoxOutputs>, f32, f32)> = None;
+        let mut predicted: Option<String> = None;
         match (found, mode) {
             (Some(i), MemoMode::On) => {
                 let entry = memo.entries.remove(i);
@@ -906,6 +917,26 @@ impl LayoutBox {
             }
             (Some(i), MemoMode::Verify) => {
                 let e = &memo.entries[i];
+                // What the restore would leave, on a copy (as the block-children verify does): the
+                // restore must write back every field the snapshot holds, and on small subtrees the
+                // whole box is compared below, which catches a field the run writes and the
+                // restore skips.
+                let n = e.outputs.len();
+                let mut probe = self.clone();
+                if restore(&mut probe, &e.outputs) {
+                    probe.dimensions.content.height = e.end_height;
+                    probe.dimensions.content.width = e.end_width;
+                    let back = snapshot(&probe);
+                    assert!(
+                        back.as_ref().is_some_and(|b| {
+                            b.len() == n && b.iter().zip(&e.outputs).all(|(a, r)| a.close_to(r))
+                        }),
+                        "FLEX-MEMO layout memo verify: restoring the recorded flex layout does not reproduce it ({n} descendants)"
+                    );
+                    if n <= DEBUG_COMPARE_MAX {
+                        predicted = Some(format!("{:?}", probe));
+                    }
+                }
                 verify = Some((e.outputs.clone(), e.end_height, e.end_width));
             }
             _ => count(|c| c.misses += 1),
@@ -930,6 +961,15 @@ impl LayoutBox {
                 "FLEX-MEMO layout memo verify: restoring the recorded flex layout would differ from laying it out ({} descendants)",
                 outputs.len()
             );
+            if let Some(predicted) = predicted {
+                let actual = format!("{:?}", self);
+                assert!(
+                    rounded(&predicted) == rounded(&actual),
+                    "FLEX-MEMO layout memo verify: a field the snapshot does not hold differs\nrecorded: {:.1500}\n actual:   {:.1500}",
+                    rounded(&predicted),
+                    rounded(&actual)
+                );
+            }
         } else {
             match snapshot(self) {
                 Some(outputs) => {
