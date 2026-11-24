@@ -3152,9 +3152,16 @@ impl LayoutBox {
 
         // `width` / `height` do not apply to a non-replaced inline (CSS 2
         // §10.3.1, §10.6.1): its box is its content, whatever they say
-        // (Chrome 148; INLINE-SIZE-IGNORED). An atomic inline (inline-block,
-        // inline-flex, inline-grid, inline-table) is sized by them.
-        let sized = self.style.display.is_atomic_inline();
+        // (Chrome 148; INLINE-SIZE-IGNORED). Only a box whose display IS
+        // `inline` and is not replaced drops them: an atomic inline keeps
+        // them, and so do the replaced elements built as inline boxes here
+        // (`<iframe>` with nested contexts off, `<object>`, `<embed>`; #1444
+        // R1: they kept their CSS size in Chrome and on develop).
+        let replaced = self
+            .identity
+            .as_ref()
+            .is_some_and(|i| matches!(i.tag.as_str(), "iframe" | "object" | "embed"));
+        let sized = self.style.display != rustkit_css::Display::Inline || replaced;
         // Check for explicit CSS width first
         let explicit_width = if !sized {
             None
