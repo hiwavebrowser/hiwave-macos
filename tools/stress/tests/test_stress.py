@@ -955,3 +955,20 @@ def test_the_chrome_reader_splits_main_thread_self_time_and_counts_other_threads
     assert s["main_other"] == 1.1  # BeginMainFrame's own time: 5.0 - 3.9
     assert (s["compositor"], s["gpu_main"]) == (0.8, 0.3), out  # whole tasks, children once
     assert out["frame_interval_ms"] == 16.0 and out["frames"] >= 4
+
+
+def test_an_unreadable_load_is_null_in_the_record():
+    # Prometheus's R1 nit on #1445: json.dumps writes inf as Infinity, which strict readers reject.
+    assert run.finite_load((float("inf"), 1.234, 2.0)) == [None, 1.23, 2.0]
+    assert json.loads(json.dumps(run.finite_load((float("inf"),) * 3))) == [None, None, None]
+
+
+def test_the_real_window_arm_is_refused_off_macos(monkeypatch):
+    # Prometheus's R1 nit on #1445: off macOS there is no ioreg; the run is refused, not a traceback.
+    monkeypatch.setattr(run.sys, "platform", "win32")
+    try:
+        run.hid_idle_seconds()
+    except SystemExit as e:
+        assert "needs macOS" in str(e)
+    else:
+        raise AssertionError("hid_idle_seconds did not refuse off macOS")

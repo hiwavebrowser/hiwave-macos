@@ -389,6 +389,11 @@ def load_avg():
     return (load, load, load)
 
 
+def finite_load(load):
+    """A load for the record: an unreadable one (inf) is null, which strict JSON readers take."""
+    return [round(x, 2) if x != float("inf") else None for x in load]
+
+
 def host_info():
     u = platform.uname()
     return {"cpus": os.cpu_count(), "machine": u.machine, "os": (u.system + " " + u.version) if WINDOWS else u.release}
@@ -543,6 +548,11 @@ def wait_for_load(limit, wait_s):
 
 
 def hid_idle_seconds():
+    # The real-window arm reads the HID idle time from ioreg, which is macOS's: off macOS the run
+    # is refused (exit 2) rather than ending in a traceback.
+    if sys.platform != "darwin":
+        raise SystemExit("the real-window arm (--engine hiwave, or --headed) needs macOS: the HID idle "
+                         "time is read with ioreg")
     r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
     m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
     return int(m.group(1)) / 1e9 if m else 0.0
@@ -1061,8 +1071,14 @@ def main():
         sys.exit("no binary at %s" % binary)
     max_load = min(args.max_load, START_LOAD)
     if not wait_for_load(max_load, args.load_wait):
-        print("1-minute load %.1f stayed at or above %.1f for %d s; not run"
-              % (load_avg()[0], max_load, args.load_wait), file=sys.stderr)
+        now = load_avg()[0]
+        if now == float("inf"):
+            # Windows: Win32_Processor.LoadPercentage gave no number (some VMs do not report it).
+            print("the load is unreadable on this host (no Win32_Processor.LoadPercentage); not run",
+                  file=sys.stderr)
+        else:
+            print("1-minute load %.1f stayed at or above %.1f for %d s; not run"
+                  % (now, max_load, args.load_wait), file=sys.stderr)
         return 2
     root, pin = check_pin(args.suite)
     limit = args.timeout or SUITE[args.suite]["timeout"]
@@ -1228,9 +1244,9 @@ def main():
         "sub_scores": sub,
         "detail": detail,
         "wall_s": wall,
-        "load_avg_before": [round(x, 2) for x in load_before],
+        "load_avg_before": finite_load(load_before),
         "load_valid": load_before[0] < SCORE_LOAD,
-        "load_avg_after": [round(x, 2) for x in load_avg()],
+        "load_avg_after": finite_load(load_avg()),
         "started": datetime.datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "exit_code": exit_code,
         "errors": record.errors,
