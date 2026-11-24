@@ -256,3 +256,52 @@ fn right_and_both_insets_at_a_percentage_height_take_the_ratio_width() {
     assert_eq!(got[0], ("abr".to_string(), 400.0, 200.0, 100.0));
     assert_eq!(got[1], ("abb".to_string(), 0.0, 200.0, 100.0));
 }
+
+/// (x, y, width, height) of each border box.
+fn boxes(body: &str, ids: &[&str]) -> Vec<(f32, f32, f32, f32)> {
+    let e = Engine::new(EngineConfig::default()).expect("engine");
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0;font:16px/20px sans-serif"><div style="width:600px">{body}</div></body></html>"#
+    );
+    let d = Document::parse_html(&html).expect("parse");
+    let mut root = e.build_layout_from_document(&d, &[]);
+    root.layout_with_collapse(
+        &Dimensions { content: Rect::new(0.0, 0.0, 600.0, 0.0), ..Default::default() },
+        &mut rustkit_layout::MarginCollapseContext::new(),
+        &mut rustkit_layout::FloatContext::new(),
+    );
+    ids.iter()
+        .map(|id| {
+            let r = by_id(&root, id).unwrap_or_else(|| panic!("#{id} has no box")).dimensions.border_box();
+            (r.x, r.y, r.width, r.height)
+        })
+        .collect()
+}
+
+/// #1443 delta R1 HOLD: a flex or grid container whose width the ratio
+/// re-derives at re-anchoring is laid out again as itself, never as a block.
+/// Chrome for Testing 148 (docs/diagnostics/2026-11-24/far_flexgrid_cft148.txt),
+/// `position:absolute; top:0; left:0; height:50%; aspect-ratio:2` in a 200px
+/// positioned parent, positions relative to the container: a flex row's two
+/// 20px items at x 0 and 20, y 0; a centred 8px flex item at (96, 46); grid
+/// `1fr 1fr` items 100 wide at x 0 and 100, y 0.
+#[test]
+fn a_reanchored_ratio_width_relays_a_flex_or_grid_container_as_itself() {
+    let pc = |id: &str, style: &str, kids: &str| {
+        format!(r#"<div style="position:relative;height:200px"><div id="{id}" style="position:absolute;top:0;left:0;height:50%;aspect-ratio:2;{style}">{kids}</div></div>"#)
+    };
+    let body = [
+        pc("fx", "display:flex", r#"<div id="f1" style="width:20px;height:20px"></div><div id="f2" style="width:20px;height:20px"></div>"#),
+        pc("gd", "display:grid;grid-template-columns:1fr 1fr", r#"<div id="g1" style="height:20px"></div><div id="g2" style="height:20px"></div>"#),
+        pc("fc", "display:flex;justify-content:center;align-items:center", r#"<div id="c1" style="width:8px;height:8px"></div>"#),
+    ]
+    .concat();
+    let b = boxes(&body, &["fx", "f1", "f2", "gd", "g1", "g2", "fc", "c1"]);
+    let rel = |c: usize, i: usize| (b[i].0 - b[c].0, b[i].1 - b[c].1, b[i].2, b[i].3);
+    assert_eq!((b[0].2, b[0].3), (200.0, 100.0), "the flex container");
+    assert_eq!(rel(0, 1), (0.0, 0.0, 20.0, 20.0), "first flex item");
+    assert_eq!(rel(0, 2), (20.0, 0.0, 20.0, 20.0), "second flex item, in the row");
+    assert_eq!(rel(3, 4), (0.0, 0.0, 100.0, 20.0), "first grid item");
+    assert_eq!(rel(3, 5), (100.0, 0.0, 100.0, 20.0), "second grid item, beside it");
+    assert_eq!(rel(6, 7), (96.0, 46.0, 8.0, 8.0), "the centred flex item");
+}
