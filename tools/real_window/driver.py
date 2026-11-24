@@ -285,6 +285,95 @@ def set_tab_urls(node, url):
     return changed
 
 
+# ── the RustKit chrome's tab strip (T38) ────────────────────────────────────
+
+# Run in the chrome (HIWAVE_RUSTKIT_CHROME_EVAL): posts the strip's box
+# (`#tabs`, the overflow-x scroller that clips its tabs) and each tab's id,
+# box, active flag and block/close button boxes whenever they change. Ids
+# and boxes only: no titles, no URLs. The app logs the body whole under
+# HIWAVE_TEST_HOOKS=1 and answers it with one "Failed to parse IPC" line.
+M1_TABS_JS = (
+    "(function () { var last = null;"
+    " function r(el) { if (!el) return null; var b = el.getBoundingClientRect();"
+    " return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; }"
+    " function report() { var strip = document.getElementById('tabs'); if (!strip) return; var tabs = [];"
+    " document.querySelectorAll('#tabs .tab').forEach(function (t) { tabs.push({ id: String(t.dataset.id),"
+    " box: r(t), active: t.classList.contains('active'), block: r(t.querySelector('.tab-block')),"
+    " close: r(t.querySelector('.tab-close')) }); });"
+    " var s = JSON.stringify({ cmd: 'm1_tabs', strip: r(strip), tabs: tabs });"
+    " if (s === last) return; last = s; window.ipc.postMessage(s); }"
+    " setInterval(report, 250); report(); })();")
+
+M1_TABS_LINE = re.compile(r'RustKit chrome IPC body=(\{"cmd":"m1_tabs".*)$', re.M)
+
+
+def _box(v):
+    """A [x, y, w, h] box of numbers, or None."""
+    if isinstance(v, list) and len(v) == 4 and all(
+            isinstance(n, (int, float)) and not isinstance(n, bool) for n in v):
+        return [float(n) for n in v]
+    return None
+
+
+def m1_strip_report(log):
+    """The last tab-strip report in `log` (see M1_TABS_JS) as
+    {"strip": box, "tabs": [{"id", "box", "active", "block", "close"}]},
+    or None when there is none or the last one is not well formed."""
+    found = None
+    for found in M1_TABS_LINE.finditer(log):
+        pass
+    if found is None:
+        return None
+    try:
+        body = json.loads(found.group(1))
+    except ValueError:
+        return None
+    strip, tabs = _box(body.get("strip")), body.get("tabs")
+    if strip is None or not isinstance(tabs, list):
+        return None
+    out = []
+    for t in tabs:
+        if not isinstance(t, dict) or _box(t.get("box")) is None:
+            return None
+        out.append({"id": str(t.get("id")), "box": _box(t.get("box")), "active": t.get("active") is True,
+                    "block": _box(t.get("block")), "close": _box(t.get("close"))})
+    return {"strip": strip, "tabs": out}
+
+
+def m1_background_tab_point(report, min_w=12):
+    """(id, (x, y)) of a point on a background tab's title, inside the strip
+    and left of the tab's block and close buttons, on the tab with the most
+    of its title showing; None when no background tab shows `min_w` of it.
+    Chrome-document points (add the title bar for the window)."""
+    sx, _, sw, _ = report["strip"]
+    best = None
+    for t in report["tabs"]:
+        if t["active"]:
+            continue
+        x, y, w, h = t["box"]
+        right = min(x + w, sx + sw)
+        for button in (t["block"], t["close"]):
+            if button is not None and button[2] > 0:
+                right = min(right, button[0])
+        left = max(x, sx)
+        if right - left >= min_w and (best is None or right - left > best[0]):
+            best = (right - left, t["id"], (int((left + right) / 2), int(y + h / 2)))
+    return (best[1], best[2]) if best else None
+
+
+def m1_close_point(report):
+    """(id, (x, y)) of the centre of the active tab's close button, when the
+    button lies wholly inside the strip; None otherwise."""
+    sx, sy, sw, sh = report["strip"]
+    for t in report["tabs"]:
+        if not t["active"] or t["close"] is None:
+            continue
+        x, y, w, h = t["close"]
+        if w > 0 and h > 0 and sx <= x and x + w <= sx + sw and sy <= y and y + h <= sy + sh:
+            return t["id"], (int(x + w / 2), int(y + h / 2))
+    return None
+
+
 # ── frames ─────────────────────────────────────────────────────────────────
 
 def resize_ack(out):
@@ -2291,69 +2380,76 @@ class Driver:
     def m1_cmd_w_after_clicks(self):
         """M1: Cmd+W after clicking a background tab closes that tab; after a tab's close button, Cmd+W closes the active tab of the rest."""
         c = "m1_cmd_w_after_clicks"
-        if not self.open_page(c, "e9_final.html"):
+        # Where each tab sits is not fixed (the strip scrolls and clips its
+        # tabs), and every tab's block button sits left of its close button
+        # and takes clicks while transparent, so a pixel sweep along the row
+        # met a block button first (Trace #243, T38). The chrome reports its
+        # tabs' boxes instead (M1_TABS_JS) and the check clicks those.
+        if not self.open_page(c, "e9_final.html", env={"HIWAVE_RUSTKIT_CHROME_EVAL": M1_TABS_JS}):
             return
         self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"get_workspaces"', 20)
         time.sleep(1.0)
         if not self.can_input:
             return self.not_run(c, "clicks on tabs, then Cmd+W", self.why_not("Accessibility"))
         pid = self.app.proc.pid
-        made = self.m1_tabs(c, 3)
-        # Cmd+T left the last new tab active. Walk the strip's row left to
-        # right (6 px steps; a tab is 100-180 px wide) until a click
-        # activates another tab: where a tab sits is not fixed, the strip
-        # scrolls its active tab to the centre and clips the tab at its left
-        # edge. A tab's close button shows under the pointer, so the walk
-        # can close a tab (a clipped tab's button can be the first thing it
-        # meets): then Cmd+T makes a known active tab again and the walk
-        # starts over, at most three times.
-        act, got, active = None, None, made[-1] if made else None
-        for _ in range(3):
-            for x in range(232, 1000, 6):
-                at = len(self.app.log_text())
-                self.hw("click", pid, x, self.E4_TAB[1] - 9)
-                got = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab)","id":"(\d+)"\}', 0.4, at)
-                if got and (got.group(1) == "close_tab" or got.group(2) != active):
-                    break
-            if got and got.group(1) == "activate_tab":
-                act = got
-                break
-            time.sleep(0.8)
-            again = self.m1_tabs(c, 1)
-            active = again[-1] if again else active
-        self.expect(c, "a click on a background tab activates it", bool(act),
-                    act.group(0) if act else ("last: %s" % got.group(0) if got else "no other tab on the row"))
+        self.m1_tabs(c, 3)
+        report = self.m1_strip()
+        if report is None:
+            return self.not_run(c, "clicks on tabs, then Cmd+W",
+                                "the chrome reported no tab boxes (the RustKit chrome and HIWAVE_TEST_HOOKS=1 "
+                                "run M1_TABS_JS)")
+        # Cmd+T left the last new tab active: click another tab's title.
+        pick, act = m1_background_tab_point(report), None
+        if pick:
+            want, (x, y) = pick
+            at = len(self.app.log_text())
+            self.hw("click", pid, x, self.TITLE_BAR + y)
+            act = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab|block_and_close)",'
+                                    r'"id":"(\d+)"\}', 3, at)
+        self.expect(c, "a click on a background tab activates it",
+                    bool(act) and act.group(1) == "activate_tab" and act.group(2) == want,
+                    ("tab %s at %d,%d: %s" % (want, x, y, act.group(0) if act else "no IPC in 3 s")) if pick
+                    else "no background tab shows on the strip: %s" % self.m1_strip_shape(report))
         time.sleep(0.8)
-        if act:
+        if act and act.group(1) == "activate_tab":
             self.m1_cmd_w(c, "Cmd+W after the click", act.group(2))
-        # A tab's close button shows on the active tab and under the
-        # pointer. Walk the strip's row left to right (4 px steps, the
-        # button is 16 px) until a click closes a tab. Each click on a tab
-        # activates it and the strip scrolls it to the centre, so the row
-        # moves under the walk: up to three walks.
-        # The tab's block button (block the site and close the tab) sits
-        # left of it and shows the same way: a walk that meets it first
-        # stops there and the step is NOT RUN, not a fail.
-        hit = blocked = None
-        for _ in range(3):
-            for x in range(232, 1000, 4):
-                at = len(self.app.log_text())
-                self.hw("click", pid, x, self.E4_TAB[1])
-                hit = self.app.wait_log(self.CLOSE_IPC, 0.4, at)
-                blocked = self.app.wait_log(r'"cmd":"block_and_close"', 0, at)
-                if hit or blocked:
-                    break
-            if hit or blocked:
-                break
-        if blocked and not hit:
-            return self.not_run(c, "a click on a tab's close button closes it, then Cmd+W",
-                                "the walk met the tab's block button first (x=%d)" % x)
-        self.expect(c, "a click on a tab's close button closes it", bool(hit),
-                    hit.group(0) if hit else "no close_tab while walking the strip")
+        # The active tab's close button (shown on the active tab).
+        report = self.m1_strip()
+        pick = m1_close_point(report) if report else None
+        hit = closed = None
+        if pick:
+            want, (x, y) = pick
+            at = len(self.app.log_text())
+            self.hw("click", pid, x, self.TITLE_BAR + y)
+            hit = self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"(activate_tab|close_tab|block_and_close)",'
+                                    r'"id":"(\d+)"\}', 3, at)
+            closed = self.app.wait_log(r"Closed tab: TabId\((\d+)\)", 3, at) if hit else None
+        self.expect(c, "a click on a tab's close button closes it",
+                    bool(hit) and hit.group(1) == "close_tab" and hit.group(2) == want
+                    and bool(closed) and closed.group(1) == want,
+                    ("tab %s at %d,%d: %s, closed %s" % (want, x, y, hit.group(0) if hit else "no IPC in 3 s",
+                                                         closed.group(1) if hit and closed else "nothing"))
+                    if pick else "the active tab's close button is not inside the strip: %s"
+                    % (self.m1_strip_shape(report) if report else "no report"))
         time.sleep(0.8)
-        if hit:
+        if hit and hit.group(1) == "close_tab":
             self.m1_cmd_w(c, "Cmd+W after the close button")
         self.expect(c, "the app is still running", self.app.alive())
+
+    def m1_strip(self):
+        """The chrome's tab-strip report once the strip has settled (its
+        last report 0.8 s after the last action), or None."""
+        time.sleep(0.8)
+        if not self.app.wait_log(r'RustKit chrome IPC body=\{"cmd":"m1_tabs"', 10):
+            return None
+        return m1_strip_report(self.app.log_text())
+
+    @staticmethod
+    def m1_strip_shape(report):
+        """A report in one line: the strip, then each tab as id[*active]@x+w."""
+        sx, _, sw, _ = report["strip"]
+        return "strip x %d+%d; tabs %s" % (sx, sw, " ".join(
+            "%s%s@%d+%d" % (t["id"], "*" if t["active"] else "", t["box"][0], t["box"][2]) for t in report["tabs"]))
 
     # ── CH3.A4: the shelf, the Inspector and settings as RustKit views ──────
 
