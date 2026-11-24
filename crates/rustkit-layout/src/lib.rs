@@ -15173,18 +15173,6 @@ pub fn measure_text_advanced(
 /// strings.
 pub(crate) const TEXT_MEASURE_MEMO_CAP: usize = 16384;
 
-/// Measure text using the text shaper with letter-spacing and word-spacing.
-///
-/// This provides accurate text measurement using DirectWrite on Windows,
-/// with support for CSS letter-spacing and word-spacing properties.
-///
-/// Results are memoised per thread. Intrinsic sizing (flex and grid
-/// min/max-content, shrink-to-fit) walks the same subtree once per ancestor
-/// that asks, so a deep flex page measures each word dozens of times:
-/// netflix spent 17 s of its first layout in Core Text shaping, reached
-/// from `own_min_content_width` / `own_max_content_width` again and again.
-/// The answer depends only on the arguments and on the installed
-/// `@font-face` set, so entries are dropped whenever that set changes.
 /// The text-measure memo's key (TEXT-MEMO-KEY): the text, the family name
 /// and the numbers that select a measurement. Owned only when stored; a
 /// lookup borrows the strings ([`MeasureKeyLike`]).
@@ -15243,6 +15231,18 @@ impl<'a> std::borrow::Borrow<dyn MeasureKeyLike + 'a> for std::rc::Rc<MeasureKey
     }
 }
 
+/// Measure text using the text shaper with letter-spacing and word-spacing.
+///
+/// This provides accurate text measurement using DirectWrite on Windows,
+/// with support for CSS letter-spacing and word-spacing properties.
+///
+/// Results are memoised per thread. Intrinsic sizing (flex and grid
+/// min/max-content, shrink-to-fit) walks the same subtree once per ancestor
+/// that asks, so a deep flex page measures each word dozens of times:
+/// netflix spent 17 s of its first layout in Core Text shaping, reached
+/// from `own_min_content_width` / `own_max_content_width` again and again.
+/// The answer depends only on the arguments and on the installed
+/// `@font-face` set, so entries are dropped whenever that set changes.
 pub fn measure_text_with_spacing(
     text: &str,
     font_family: &str,
