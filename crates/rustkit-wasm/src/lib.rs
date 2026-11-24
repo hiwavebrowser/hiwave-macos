@@ -57,6 +57,12 @@ pub struct WasmRealm {
     store: RefCell<wasmi::Store<HostData>>,
     /// Compiled modules, with each exported function's index in the module's
     /// function space (an exported function's JS `name`, as in Chrome).
+    ///
+    /// These tables (and `funcs`, and `HostData::imports`) only grow: an entry
+    /// per compile, instantiation and import, freed at `drop_realm` (#1453 R1
+    /// nit 4). Not a leak across realms (navigation releases them), but a page
+    /// instantiating in a loop keeps every entry until then. Phase 2 frees
+    /// them with their owning `Module` / `Instance` objects.
     modules: RefCell<Vec<(wasmi::Module, HashMap<String, u32>)>>,
     funcs: RefCell<Vec<wasmi::Func>>,
 }
@@ -122,14 +128,20 @@ impl StoreLike for Caller {
     }
 }
 
-/// Each exported function's index, from the module's export section (id 7).
-/// The bytes have already been validated.
+/// Each exported function's index in the module's function space (its JS
+/// `name`, as in Chrome), from the export section (id 7). wasmi 2.0.0 keeps
+/// that index private (`ExportType` has only `name` and `ty`), so the section
+/// is read here. The bytes were validated by wasmi first; even so every step
+/// is bounds-checked, and anything malformed just ends the walk.
 fn export_func_indices(bytes: &[u8]) -> HashMap<String, u32> {
     fn leb(b: &[u8], i: &mut usize) -> Option<u32> {
-        let (mut r, mut shift) = (0u32, 0);
+        let (mut r, mut shift) = (0u32, 0u32);
         loop {
             let x = *b.get(*i)?;
             *i += 1;
+            if shift >= 32 {
+                return None;
+            }
             r |= u32::from(x & 0x7f).checked_shl(shift)?;
             if x & 0x80 == 0 {
                 return Some(r);
@@ -138,24 +150,26 @@ fn export_func_indices(bytes: &[u8]) -> HashMap<String, u32> {
         }
     }
     let mut out = HashMap::new();
-    let mut i = 8;
+    let mut i = 8usize;
     while i < bytes.len() {
         let id = bytes[i];
         i += 1;
         let Some(size) = leb(bytes, &mut i) else { break };
-        let end = i + size as usize;
+        let Some(end) = i.checked_add(size as usize).filter(|&e| e <= bytes.len()) else { break };
         if id == 7 {
-            let mut j = i;
-            let n = leb(bytes, &mut j).unwrap_or(0);
+            let section = &bytes[i..end];
+            let mut j = 0usize;
+            let n = leb(section, &mut j).unwrap_or(0);
             for _ in 0..n {
-                let Some(len) = leb(bytes, &mut j) else { break };
-                let name = String::from_utf8_lossy(bytes.get(j..j + len as usize).unwrap_or_default()).into_owned();
-                j += len as usize;
-                let kind = bytes.get(j).copied().unwrap_or(0xff);
+                let Some(len) = leb(section, &mut j) else { break };
+                let Some(stop) = j.checked_add(len as usize).filter(|&e| e <= section.len()) else { break };
+                let Ok(name) = std::str::from_utf8(&section[j..stop]) else { break };
+                j = stop;
+                let Some(&kind) = section.get(j) else { break };
                 j += 1;
-                let Some(index) = leb(bytes, &mut j) else { break };
+                let Some(index) = leb(section, &mut j) else { break };
                 if kind == 0 {
-                    out.insert(name, index);
+                    out.insert(name.to_string(), index);
                 }
             }
             break;
@@ -413,6 +427,9 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                 let name = row.get(1, context)?.to_string(context)?.to_std_string_escaped();
                 by_name.insert((m, name), row.get(2, context)?);
             }
+            // A start function may call a JS import: instantiation is a call
+            // level of its own, in this native's context.
+            let context_ptr = context as *mut Context;
             let linked: JsResult<Vec<(wasmi::Func, String, usize, u32)>> = realm.with_store(|s| {
                 let mut ctx = s.ctx();
                 let mut linker = <wasmi::Linker<HostData>>::new(&realm.engine);
@@ -443,12 +460,17 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                         }
                     }
                 }
-                let instance = linker
-                    .instantiate_and_start(&mut ctx, &module)
-                    .map_err(|e| match e.as_trap_code() {
+                ctx.data_mut().contexts.push(context_ptr);
+                let started = linker.instantiate_and_start(&mut ctx, &module);
+                ctx.data_mut().contexts.pop();
+                let instance = started.map_err(|e| match ctx.data_mut().pending.take() {
+                    // The start function's JS import threw: that, unchanged.
+                    Some(pending) => pending,
+                    None => match e.as_trap_code() {
                         Some(code) => wasm_error("RuntimeError", trap_message(code)),
                         None => wasm_error("LinkError", e),
-                    })?;
+                    },
+                })?;
                 let mut out = Vec::new();
                 for export in module.exports() {
                     if let Some(func) = instance.get_func(ctx.as_context(), export.name()) {
@@ -498,4 +520,47 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
         .function(instantiate, js_string!("instantiate"), 2)
         .function(call, js_string!("call"), 2)
         .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_func_indices;
+
+    const HEADER: [u8; 8] = [0, 97, 115, 109, 1, 0, 0, 0];
+
+    fn with_sections(sections: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut out = HEADER.to_vec();
+        for (id, body) in sections {
+            out.push(*id);
+            out.push(body.len() as u8);
+            out.extend_from_slice(body);
+        }
+        out
+    }
+
+    #[test]
+    fn no_export_section_gives_nothing() {
+        assert!(export_func_indices(&with_sections(&[(1, &[1, 0x60, 0, 0])])).is_empty());
+    }
+
+    #[test]
+    fn a_function_export_and_a_multi_byte_index() {
+        // two exports: "a" -> func 3; "bb" -> func 200 (LEB 0xc8 0x01); a memory export skipped
+        let exports: &[u8] = &[3, 1, b'a', 0, 3, 2, b'b', b'b', 0, 0xc8, 0x01, 1, b'm', 2, 0];
+        let got = export_func_indices(&with_sections(&[(7, exports)]));
+        assert_eq!(got.get("a"), Some(&3));
+        assert_eq!(got.get("bb"), Some(&200));
+        assert_eq!(got.get("m"), None);
+    }
+
+    #[test]
+    fn a_truncated_section_stops_cleanly() {
+        let mut bytes = with_sections(&[(7, &[1, 5, b'a'])]);
+        bytes.truncate(bytes.len() - 1);
+        assert!(export_func_indices(&bytes).is_empty());
+        // A section size past the end.
+        let mut lying = HEADER.to_vec();
+        lying.extend_from_slice(&[7, 0x7f, 1]);
+        assert!(export_func_indices(&lying).is_empty());
+    }
 }

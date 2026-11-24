@@ -1579,10 +1579,6 @@ impl JsRuntime {
         Ok(())
     }
 
-    /// Evaluate JavaScript code as one of the embedder's own scripts: its
-    /// frames are passed over in error reports and console positions (the
-    /// page's own scripts go through
-    /// [`evaluate_script_named`](Self::evaluate_script_named)).
     /// Install `WebAssembly` in the current realm (WASM W1,
     /// docs/design/WASM-W1.md). The bindings call it per realm when the
     /// engine's flag is on.
@@ -1613,6 +1609,10 @@ impl JsRuntime {
         Err(JsError::NotInitialized)
     }
 
+    /// Evaluate JavaScript code as one of the embedder's own scripts: its
+    /// frames are passed over in error reports and console positions (the
+    /// page's own scripts go through
+    /// [`evaluate_script_named`](Self::evaluate_script_named)).
     pub fn evaluate_script(&mut self, source: &str) -> Result<JsValue, JsError> {
         self.evaluate(source, None, false)
     }
