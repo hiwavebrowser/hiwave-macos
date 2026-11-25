@@ -10,6 +10,7 @@ license = "AGPL-3.0-or-later"
 default = ["boa"]
 # Use Boa (pure Rust, lightweight, good for development)
 boa = ["boa_engine"]
+script-phase-tracing = ["boa"]
 # Use V8 (production-ready, requires native build)
 # v8 = ["v8"]
 
