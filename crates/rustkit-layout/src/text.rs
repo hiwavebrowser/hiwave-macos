@@ -2910,8 +2910,9 @@ impl TextShaper {
 
             // Need to find a break point. Within the window: a break past it cannot fit, since
             // the window alone overflows the line.
-            let break_offset = self.find_line_break(
+            let (break_offset, cached_line) = self.find_line_break(
                 window,
+                shaped.metrics.width,
                 font_chain,
                 weight,
                 style,
@@ -3001,8 +3002,10 @@ impl TextShaper {
                 skip_break_spaces(&mut line_start);
             } else {
                 let line_text = &remaining[..break_offset];
-                let shaped_line =
-                    self.shape(line_text, font_chain, weight, style, stretch, size)?;
+                let shaped_line = match cached_line {
+                    Some(run) if run.text.len() == line_text.len() => run,
+                    _ => self.shape(line_text, font_chain, weight, style, stretch, size)?,
+                };
 
                 // A line closed by a soft break reports its INK width: the
                 // collapsible space at the break point stays in the text
@@ -3051,7 +3054,15 @@ impl TextShaper {
             let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
             return Ok((remaining, shaped));
         }
-        let mut chars = 512usize;
+        if !max_width.is_finite() {
+            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+            return Ok((remaining, shaped));
+        }
+        // Size the initial window to ~2x the expected line length (at ~0.35em avg char width),
+        // clamped to [64, 512], so normal 60-100 char lines do not shape 512 chars on every line.
+        let mut chars = (((max_width.max(0.0) / (size.max(1.0) * 0.35)).ceil() as usize)
+            .saturating_mul(2))
+        .clamp(64, 512);
         loop {
             let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
             let window = &remaining[..end];
@@ -3063,9 +3074,11 @@ impl TextShaper {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_line_break(
         &self,
         text: &str,
+        window_width: f32,
         font_chain: &FontFamilyChain,
         weight: FontWeight,
         style: FontStyle,
@@ -3075,59 +3088,79 @@ impl TextShaper {
         breaker: &LineBreaker,
         hang_trailing_spaces: bool,
         truncated: bool,
-    ) -> Result<usize, TextError> {
-        // Get all break opportunities
-        let break_offsets = breaker.break_offsets(text);
+    ) -> Result<(usize, Option<ShapedRun>), TextError> {
+        // Get all break opportunities within the window.
+        let mut break_offsets = breaker.break_offsets(text);
+        // Keep only non-zero breaks, and drop a truncated window's artificial end offset.
+        break_offsets.retain(|&o| o > 0 && !(truncated && o >= text.len()));
+        if break_offsets.is_empty() {
+            return Ok((0, None));
+        }
 
-        // Find the last break that fits
-        let mut best_break = 0;
-
-        for &offset in &break_offsets {
-            if offset == 0 {
-                continue;
-            }
-            // WRAP-WINDOW (Prometheus's R1 nit): the end of a truncated window is not a break
-            // opportunity of the whole text; inside a run of preserved spaces it would close the
-            // line mid-run.
-            if truncated && offset >= text.len() {
-                break;
-            }
-
-            // css-text-3 §4.1.3: collapsible spaces at the end of a line are
-            // removed before the line is measured — they HANG past the edge
-            // and never decide the break. Measuring the prefix with its
-            // break-point space made every line whose ink fits but whose
-            // ink + space does not break one word early (n49: a 300px Georgia
-            // line "…and the official" wrapped "official" where Chrome fits
-            // it), and the trailing-space width was silently added to the
-            // slack of every justified line. `break-spaces` is the one value
-            // whose spaces never hang (§4.1.3): they are measured.
+        let mut best_run: Option<(usize, ShapedRun)> = None;
+        let mut fits_at = |offset: usize| -> Result<bool, TextError> {
+            // css-text-3 §4.1.3: collapsible spaces at the end of a line hang past the edge.
             let prefix = if hang_trailing_spaces {
                 text[..offset].trim_end_matches(is_collapsible_space)
             } else {
                 &text[..offset]
             };
-            // A space-only prefix is a line of hanging spaces: zero ink, it
-            // always fits (pre-wrap " XXXXX" in 5ch breaks after the leading
-            // space — WPT overflow-wrap-anywhere-004/005 — the space-only
-            // first line is the break, not a skipped opportunity).
-            let fits = if prefix.is_empty() {
-                true
-            } else {
-                self.shape(prefix, font_chain, weight, style, stretch, size)?
-                    .metrics
-                    .width
-                    <= max_width + Self::FIT_EPSILON
-            };
+            if prefix.is_empty() {
+                return Ok(true);
+            }
+            let shaped = self.shape(prefix, font_chain, weight, style, stretch, size)?;
+            let fits = shaped.metrics.width <= max_width + Self::FIT_EPSILON;
+            if fits && prefix.len() == offset {
+                best_run = Some((offset, shaped));
+            }
+            Ok(fits)
+        };
 
-            if fits {
+        // Interpolation-seeded binary search over `break_offsets`: prose lands within +/-1 word
+        // on the very first probe, reducing ~15-20 shape() calls per line to ~2-4.
+        let mut lo = 0usize;
+        let mut hi = break_offsets.len();
+        let mut best_break = 0usize;
+
+        if window_width > 0.0 && max_width > 0.0 && hi > 2 {
+            let target_byte = ((text.len() as f32) * (max_width / window_width).clamp(0.0, 1.0)) as usize;
+            let guess = break_offsets.partition_point(|&o| o < target_byte).min(hi - 1);
+            let offset = break_offsets[guess];
+            if fits_at(offset)? {
                 best_break = offset;
+                lo = guess + 1;
+                // Common case: the next break overflows, so we are done in 2 shape() calls.
+                if lo < hi && !fits_at(break_offsets[lo])? {
+                    hi = lo;
+                }
             } else {
-                break;
+                hi = guess;
+                // Common case: the previous break fits, so we are done in 2 shape() calls.
+                if hi > 0 {
+                    let prev = break_offsets[hi - 1];
+                    if fits_at(prev)? {
+                        best_break = prev;
+                        lo = hi;
+                    } else {
+                        hi -= 1;
+                    }
+                }
             }
         }
 
-        Ok(best_break)
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let offset = break_offsets[mid];
+            if fits_at(offset)? {
+                best_break = offset;
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        let cached = best_run.and_then(|(o, run)| (o == best_break).then_some(run));
+        Ok((best_break, cached))
     }
 }
 
