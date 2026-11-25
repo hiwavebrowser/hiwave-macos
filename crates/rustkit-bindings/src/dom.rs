@@ -1498,6 +1498,10 @@ fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
     let Some(node) = host.node_at(args, index) else {
         return String::new();
     };
+    element_label(&node)
+}
+
+fn element_label(node: &Node) -> String {
     let NodeType::Element {
         tag_name,
         attributes,
@@ -1596,6 +1600,51 @@ fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Op
         }
         let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| property == name)?;
         reads |= bits;
+    }
+    (reads != 0).then_some(reads)
+}
+
+/// Zero-allocation version of `paint_style_reads` for `__rustkit_style_write`, which already holds
+/// the parsed `old_decls` and `new_decls` lists.
+fn paint_style_reads_from_decls(
+    host: &DomHost,
+    old_raw: &str,
+    new_raw: &str,
+    old_decls: &[crate::inline_style::Decl],
+    new_decls: &[crate::inline_style::Decl],
+) -> Option<u8> {
+    if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
+        return None;
+    }
+    if old_raw.contains(['"', '\'', '\\', '{', '}'])
+        || old_raw.contains("/*")
+        || new_raw.contains(['"', '\'', '\\', '{', '}'])
+        || new_raw.contains("/*")
+    {
+        return None;
+    }
+    let mut reads = 0;
+    for d in old_decls {
+        if d.value.bytes().filter(|&b| b == b'(').count() != d.value.bytes().filter(|&b| b == b')').count() {
+            return None;
+        }
+        let same = new_decls
+            .iter()
+            .find(|n| n.name == d.name)
+            .is_some_and(|n| n.value == d.value && n.important == d.important);
+        if !same {
+            let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| *property == d.name)?;
+            reads |= bits;
+        }
+    }
+    for n in new_decls {
+        if n.value.bytes().filter(|&b| b == b'(').count() != n.value.bytes().filter(|&b| b == b')').count() {
+            return None;
+        }
+        if !old_decls.iter().any(|d| d.name == n.name) {
+            let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| *property == n.name)?;
+            reads |= bits;
+        }
     }
     (reads != 0).then_some(reads)
 }
@@ -2903,22 +2952,22 @@ pub(crate) fn install(
         "__rustkit_style_write",
         6,
         Box::new(move |args| {
-            let found = h.borrow().node(args).map(|node| {
-                let raw = node.get_attribute("style");
-                (node.id.raw(), h.borrow().style_decls(node.id.raw(), raw.as_deref().unwrap_or("")))
-            });
-            let Some((id, decls)) = found else {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
                 return JsValue::Number(-1.0);
             };
+            let id = node.id.raw();
+            let old_raw = node.get_attribute("style").unwrap_or("");
+            let old_decls = host.style_decls(id, old_raw);
             let name = string_arg(args, 3).unwrap_or("");
             let (answer, written) = match string_arg(args, 2).unwrap_or("") {
                 "remove" => {
-                    let (old, written) = crate::inline_style::remove_property(&decls, name);
+                    let (old, written) = crate::inline_style::remove_property(&old_decls, name);
                     (JsValue::String(old), written)
                 }
                 _ => {
                     let written = crate::inline_style::set_property(
-                        &decls,
+                        &old_decls,
                         name,
                         string_arg(args, 4).unwrap_or(""),
                         string_arg(args, 5).unwrap_or(""),
@@ -2926,18 +2975,69 @@ pub(crate) fn install(
                     (JsValue::Boolean(written.is_some()), written)
                 }
             };
-            if let Some(decls) = written {
-                let text = crate::inline_style::serialize_decls(&decls);
+            if let Some(new_decls) = written {
+                let text = crate::inline_style::serialize_decls(&new_decls);
+                let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+                    return JsValue::Number(-1.0);
+                };
+                let NodeType::Element {
+                    tag_name,
+                    namespace,
+                    attributes,
+                } = &node.node_type
+                else {
+                    return JsValue::Number(-1.0);
+                };
+                let changed = attributes.get("style").map(String::as_str) != Some(text.as_str());
+                let reach = if !changed {
+                    Reach::Seen
+                } else if !rendered_connected(&node, document) || under_hidden(&host, &node, &d) {
+                    Reach::Unseen
+                } else if is_html_element(&node) {
+                    match paint_style_reads_from_decls(&host, old_raw, &text, &old_decls, &new_decls) {
+                        Some(reads) => Reach::Paint(reads),
+                        None => Reach::Seen,
+                    }
+                } else {
+                    Reach::Seen
+                };
                 // The next read or write of this text needs no parse, when the list reads back as itself
                 // (the JS copy's `exactOf`). Kept before the write: a write the page's own code changes
                 // again (a custom element's callback) leaves other text, which is parsed.
-                if crate::inline_style::reads_back_as_itself(&decls) {
-                    h.borrow().keep_style_decls(id, &text, decls);
+                if crate::inline_style::reads_back_as_itself(&new_decls) {
+                    host.keep_style_decls(id, &text, new_decls);
                 }
-                let write_args =
-                    [args[0].clone(), JsValue::String("setAttr".into()), JsValue::Number(id as f64), JsValue::String("style".into()), JsValue::String(text)];
-                if let JsValue::String(_) = dom_write(&h, &d, &m, &l, &write_args) {
-                    return JsValue::Number(-1.0);
+                if changed {
+                    let mut new_attrs = attributes.clone();
+                    new_attrs.insert("style".to_string(), text);
+                    document.replace_node_data(
+                        node.id,
+                        NodeType::Element {
+                            tag_name: tag_name.clone(),
+                            namespace: namespace.clone(),
+                            attributes: new_attrs,
+                        },
+                    );
+                    l.borrow_mut().push(MutationRecord {
+                        node: id,
+                        kind: MutationKind::Style,
+                        attr: Some("style".to_string()),
+                        old: None,
+                        child: None,
+                    });
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        let connected = is_connected(&node, document);
+                        tracing::trace!(
+                            op = "setAttr",
+                            tag = %tag_name,
+                            connected,
+                            detail = "style",
+                            bucket = ?DomDirty::Style,
+                            "DOM write dirtied the page"
+                        );
+                    }
+                    note_mutation(&m, DomDirty::Style, MutationKind::Style, || element_label(&node));
+                    reach.mark(&d, DomDirty::Style, "style", crate::Logged::Yes);
                 }
             }
             answer
@@ -5739,7 +5839,16 @@ const WRAPPERS_JS: &str = r#"
         },
         setProperty: function (name, value, priority) {
             if (styleNative) {
-                styleWrite(this[OWNER], 'set', styleString(name), value == null ? '' : styleString(value), styleString(priority || ''));
+                var n = typeof name === 'string' ? name : styleString(name);
+                var sv = typeof value === 'string' ? value : (value == null ? '' : styleString(value));
+                var sp = !priority ? '' : (typeof priority === 'string' ? priority : styleString(priority));
+                if (!HOOKS.mutation && (!HOOKS.attrs || HOOKS.watched.style !== true)) {
+                    var s = this[OWNER][SLOT];
+                    var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', n, sv, sp);
+                    if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+                } else {
+                    styleWrite(this[OWNER], 'set', n, sv, sp);
+                }
                 return;
             }
             name = propertyName(name);
@@ -5796,25 +5905,29 @@ const WRAPPERS_JS: &str = r#"
         st = new Proxy(target, {
             get: function (t, p) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
-                if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                var c = p.charCodeAt(0);
+                if (c >= 48 && c <= 57 && /^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                var n = cssNames[p] || cssName(p);
                 if (styleNative) {
-                    var r = N.styleRead(s.gen, s.id, 'value', cssName(p));
+                    var r = N.styleRead(s.gen, s.id, 'value', n);
                     return r === -1 ? '' : r;
                 }
-                return t.getPropertyValue(cssName(p));
+                return t.getPropertyValue(n);
             },
             set: function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
                 // `setProperty(name, v)` with no priority, without the method call (NATIVE-SETPROPERTY).
+                var n = cssNames[p] || cssName(p);
                 if (styleNative) {
+                    var sv = typeof v === 'string' ? v : (v == null ? '' : styleString(v));
                     if (!HOOKS.mutation && (!HOOKS.attrs || HOOKS.watched.style !== true)) {
-                        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', cssName(p), v == null ? '' : styleString(v), '');
+                        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', n, sv, '');
                         if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
                     } else {
-                        styleWrite(el, 'set', cssName(p), v == null ? '' : styleString(v), '');
+                        styleWrite(el, 'set', n, sv, '');
                     }
                 } else {
-                    t.setProperty(cssName(p), v);
+                    t.setProperty(n, v);
                 }
                 return true;
             }
