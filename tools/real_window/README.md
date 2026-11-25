@@ -21,6 +21,15 @@ starts the app with `HIWAVE_TEST_HOOKS=1`, which lets it run
 `HIWAVE_RUSTKIT_CHROME_EVAL` and log chrome IPC bodies; a RustKit panel's IPC
 is logged as its `cmd` and size only, always.
 
+`m1_cmd_w_after_clicks` clicks tabs where the chrome says they are (T38):
+it runs `M1_TABS_JS` in the chrome, which posts the tab strip's box and each
+tab's id, box, active flag and block/close button boxes (no titles, no URLs)
+whenever they change. The check clicks a background tab's title left of its
+buttons and the active tab's close button. Until T38 it swept the strip's
+row from x=232, and every tab's block button (left of its close button,
+clickable while transparent) came first, so the step was `NOT RUN`
+(Trace #243). Without the report (the WebKit chrome) the check is `NOT RUN`.
+
 ## Which chrome
 
 The RustKit chrome (chrome.html, the shelf, the Inspector and the settings
@@ -59,6 +68,17 @@ seat lacks and is never counted as a pass. Exit code: `0` all passed, `1` at
 least one failed, `3` none failed but some did not run, `2` the driver could
 not run. `--out` gets `result.json` (assertions and the full request log),
 one `<check>.app.log` per check and the captured frames.
+
+A `FAIL` from a known engine gap (driver.py `KNOWN_GAPS`) stays a `FAIL` and
+still sets exit code `1`, but it is labelled so it is not read as a regression:
+its detail starts `A8-blocked (...)`, its `result.json` row has
+`"blocked_by": "A8"` (every row has the field, `null` when unlabelled),
+`tally.blocked` counts them per gap, and the summary line reads
+`FAIL 3 (1 A8-blocked)`. Today the one entry is b11's "the sidebar shows a
+Settings item": `hwdrive find` is an Accessibility lookup and the RustKit
+chrome has no AX tree until A8 (T39). The label applies only on the RustKit
+chrome; with `HIWAVE_RUSTKIT_CHROME=0` a miss is a plain `FAIL`. When a
+labelled assertion passes, its detail says to drop the entry.
 
 ## Recording a pass (`--record`)
 
@@ -176,7 +196,13 @@ the page made in the turn its script was stopped in is still answered to it. Two
   log from it (the page view is the one the fixture URL was loaded into).
   In `i0a_layout` that frame is asserted against the same 200 ms; in the
   others the page's thread is knowingly held (a runaway script, a load in
-  progress: LAT15/LAT17), and it is reported for information only. The
+  progress: LAT15/LAT17), and it is reported for information only. A key
+  shortcut is answered when the app writes its line (`New tab - navigating
+  to start page`, `Closed tab`), timed by that line's own UTC stamp from
+  `hwdrive key`'s `req_epoch` (the key-down); only lines stamped after the
+  key-down count, and an hwdrive without `req_epoch` fails the check. Until
+  T37 the driver timed the whole subprocess plus its own 100 ms log poll,
+  and i0a_close flipped 308 → 157 ms between runs with no change. The
   page's stop in `i0a_script` is the content thread's (`Script stopped at the
   script budget source=timers`); the window thread is not held while it
   spins. The resize checks first ran on 2026-11-09 (T36, on develop

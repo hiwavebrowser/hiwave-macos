@@ -2290,6 +2290,57 @@ impl JsRuntime {
         }
     }
 
+    /// Register `name` in the current realm: a function that runs its first
+    /// argument, synchronously, as a classic script of THIS realm (the one
+    /// current now), whatever realm calls it, and returns its completion
+    /// value. An exception the script throws propagates to the caller.
+    ///
+    /// For `document.write` (JETSTREAM-IFRAME-SYNC): a frame's written
+    /// scripts run inside the `write` call, in the frame's realm, as the
+    /// parser reaches them. A classic script, not an indirect `eval`: its
+    /// top-level `let`/`class` go to the realm's global lexical scope, shared
+    /// with the realm's other scripts. No job runs inside it (Boa runs jobs
+    /// only when asked), so no microtask checkpoint happens between written
+    /// scripts, as in Chrome. The running script's deadline applies: past it,
+    /// the call is refused like any host call.
+    pub fn register_script_runner(&mut self, name: &str) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsString, NativeFunction, Script, Source};
+            let deadline = self.deadline.clone();
+            // SAFETY: the closure captures only the deadline (no GC-managed
+            // data). It must NOT capture the realm: a `Realm` held by an
+            // untraced closure is a root the collector never releases, which
+            // kept every navigated-away document alive (navigation_release_tests,
+            // #1440). It needs none: Boa calls a native function in the realm it
+            // was created in (`NativeFunctionObject::realm`, swapped in by the
+            // call), so the context's realm here IS this function's realm.
+            let native = unsafe {
+                NativeFunction::from_closure(move |_this, args, context| {
+                    if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at)
+                        && !context.stop_finally_running()
+                    {
+                        return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
+                    }
+                    let source = match args.first() {
+                        Some(v) => v.to_string(context)?.to_std_string_escaped(),
+                        None => return Ok(boa_engine::JsValue::undefined()),
+                    };
+                    Script::parse(Source::from_bytes(source.as_bytes()), None, context)
+                        .and_then(|script| script.evaluate(context))
+                })
+            };
+            self.context
+                .register_global_callable(JsString::from(name), 1, native)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = name;
+            Err(JsError::NotInitialized)
+        }
+    }
+
     /// Convert Boa value to JsValue.
     #[cfg(feature = "boa")]
     fn convert_boa_value(&self, value: &boa_engine::JsValue) -> JsValue {

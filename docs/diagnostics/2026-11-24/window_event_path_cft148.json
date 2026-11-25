@@ -1,0 +1,17 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "script": "\nvar n = { win: 0, doc: 0, body: 0, btn: 0, inline: 0 };\nwindow.addEventListener('click', function () { n.win++; });\nwindow.addEventListener('todo-add', function () { n.win++; });\ndocument.addEventListener('click', function () { n.doc++; });\ndocument.body.onclick = function () { n.body++; };\nvar b = document.getElementById('b');\nb.addEventListener('todo-add', function () { n.btn++; });\nfor (var i = 0; i < 50; i++) {\n  b.dispatchEvent(new MouseEvent('click', { bubbles: true }));\n  b.dispatchEvent(new CustomEvent('todo-add', { bubbles: true, composed: true }));\n}\nvar pn = window.parentNode, nt = window.nodeType;\n[n.win, n.doc, n.body, n.btn, n.inline, pn === undefined ? 'undefined' : pn.id, nt === undefined ? 'undefined' : nt.id].join(' ');\n",
+  "cases": [
+    {
+      "label": "plain",
+      "body": "<div id=a><button id=b onclick=\"n.inline++\">x</button></div>",
+      "got": "100 50 50 50 50 undefined undefined"
+    },
+    {
+      "label": "an element with id=parentNode and one named nodeType",
+      "body": "<div id=parentNode></div><form name=nodeType id=nt></form><div id=a><button id=b onclick=\"n.inline++\">x</button></div>",
+      "got": "100 50 50 50 50 parentNode nt"
+    }
+  ]
+}
