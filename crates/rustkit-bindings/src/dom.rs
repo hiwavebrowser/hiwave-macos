@@ -820,6 +820,11 @@ impl DomHost {
         host.borrow().node(args).map(|n| n.id.raw())
     }
 
+    #[inline]
+    pub(crate) fn has_generation(&self, gen: u64) -> bool {
+        u64::from(self.generation) == gen
+    }
+
     /// The `src` and `srcset` attributes of the bound document's node
     /// `node` as they are now, when it is an `<img>` element.
     pub(crate) fn img_sources(&self, node: usize) -> Option<(Option<String>, Option<String>)> {
@@ -2366,6 +2371,29 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_rel",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            match args.get(2) {
+                Some(JsValue::Number(n)) => match *n as u32 {
+                    0 => node_id(node.parent()),
+                    1 => node_id(node.first_child()),
+                    2 => node_id(node.last_child()),
+                    3 => node_id(node.next_sibling()),
+                    4 => node_id(node.previous_sibling()),
+                    _ => JsValue::Null,
+                },
+                _ => JsValue::Null,
+            }
+        }),
+    )?;
+
+    let h = host.clone();
     let d = dirty.clone();
     runtime.register_host_function_by_op(
         "__rustkit_dom_info",
@@ -3123,7 +3151,7 @@ const WRAPPERS_JS: &str = r#"
 (function (g) {
     var N = {
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
-        collect: __rustkit_dom_collect, info: __rustkit_dom_info,
+        collect: __rustkit_dom_collect, info: __rustkit_dom_info, rel: __rustkit_dom_rel,
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
@@ -3141,7 +3169,7 @@ const WRAPPERS_JS: &str = r#"
     };
     delete g.__rustkit_style_read;
     delete g.__rustkit_style_write;
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
+    ['root', 'by_id', 'collect', 'info', 'rel', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
         'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'register_property', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
@@ -3620,7 +3648,9 @@ const WRAPPERS_JS: &str = r#"
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = objCreate(proto);
-        defineOwn(w, SLOT, { value: slotRecord(id) });
+        var r = slotRecord(id);
+        r.t = t;
+        defineOwn(w, SLOT, { value: r });
         cache.set(id, w);
         return w;
     }
@@ -3707,8 +3737,20 @@ const WRAPPERS_JS: &str = r#"
     NodeList.prototype.keys = Array.prototype.keys;
     NodeList.prototype.values = Array.prototype.values;
 
-    getter(Node.prototype, 'nodeType', function () { return info(this, 'type'); });
-    getter(Node.prototype, 'nodeName', function () { return info(this, 'name'); });
+    getter(Node.prototype, 'nodeType', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var t = s.t;
+        if (t === undefined) { t = N.info(s.gen, s.id, 'type'); s.t = t; }
+        return t;
+    });
+    getter(Node.prototype, 'nodeName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var nm = s.nm;
+        if (nm === undefined) { nm = N.info(s.gen, s.id, 'name'); s.nm = nm; }
+        return nm;
+    });
     function accessor(proto, name, get, set) {
         Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true });
     }
@@ -3754,14 +3796,38 @@ const WRAPPERS_JS: &str = r#"
     function text(v) { return v === null ? '' : String(v); }
     accessor(Node.prototype, 'textContent', function () { return info(this, 'text'); },
         function (v) { setData(this, 'setText', text(v), null, 'textContent'); });
-    getter(Node.prototype, 'parentNode', function () { return related(this, 'parent'); });
-    getter(Node.prototype, 'parentElement', function () {
-        var p = related(this, 'parent'); return p && p.nodeType === 1 ? p : null;
+    getter(Node.prototype, 'parentNode', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 0)) : null;
     });
-    getter(Node.prototype, 'firstChild', function () { return related(this, 'first'); });
-    getter(Node.prototype, 'lastChild', function () { return related(this, 'last'); });
-    getter(Node.prototype, 'nextSibling', function () { return related(this, 'next'); });
-    getter(Node.prototype, 'previousSibling', function () { return related(this, 'prev'); });
+    getter(Node.prototype, 'parentElement', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        if (s.gen !== gen) return null;
+        var p = wrap(N.rel(s.gen, s.id, 0));
+        return p && p[SLOT].t === 1 ? p : null;
+    });
+    getter(Node.prototype, 'firstChild', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 1)) : null;
+    });
+    getter(Node.prototype, 'lastChild', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 2)) : null;
+    });
+    getter(Node.prototype, 'nextSibling', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 3)) : null;
+    });
+    getter(Node.prototype, 'previousSibling', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 4)) : null;
+    });
     getter(Node.prototype, 'childNodes', function () { return cachedKids(this, false).list; });
     // A node in a DOMParser document is owned by it; every other node by
     // the global document.
@@ -4016,7 +4082,13 @@ const WRAPPERS_JS: &str = r#"
     });
     getter(CharacterData.prototype, 'length', function () { return (info(this, 'text') || '').length; });
 
-    getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
+    getter(Element.prototype, 'tagName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var nm = s.nm;
+        if (nm === undefined) { nm = N.info(s.gen, s.id, 'name'); s.nm = nm; }
+        return nm;
+    });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
     // The outerHTML setter: the markup, parsed in the context of the
@@ -4043,7 +4115,13 @@ const WRAPPERS_JS: &str = r#"
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) { parent.insertBefore(n, self); });
         parent.removeChild(self);
     });
-    getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
+    getter(Element.prototype, 'localName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var ln = s.ln;
+        if (ln === undefined) { ln = N.info(s.gen, s.id, 'local'); s.ln = ln; }
+        return ln;
+    });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
     // `id` and `className` read the attribute with the engine native and write it with the same
@@ -5712,19 +5790,32 @@ const WRAPPERS_JS: &str = r#"
     function styleFor(el) {
         var st = styles.get(el);
         if (st) return st;
+        var s = el[SLOT];
         var target = Object.create(CSSStyleDeclaration.prototype);
         Object.defineProperty(target, OWNER, { value: el });
         st = new Proxy(target, {
             get: function (t, p) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
                 if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                if (styleNative) {
+                    var r = N.styleRead(s.gen, s.id, 'value', cssName(p));
+                    return r === -1 ? '' : r;
+                }
                 return t.getPropertyValue(cssName(p));
             },
             set: function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
                 // `setProperty(name, v)` with no priority, without the method call (NATIVE-SETPROPERTY).
-                if (styleNative) styleWrite(t[OWNER], 'set', cssName(p), v == null ? '' : styleString(v), '');
-                else t.setProperty(cssName(p), v);
+                if (styleNative) {
+                    if (!HOOKS.mutation && (!HOOKS.attrs || HOOKS.watched.style !== true)) {
+                        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', cssName(p), v == null ? '' : styleString(v), '');
+                        if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+                    } else {
+                        styleWrite(el, 'set', cssName(p), v == null ? '' : styleString(v), '');
+                    }
+                } else {
+                    t.setProperty(cssName(p), v);
+                }
                 return true;
             }
         });

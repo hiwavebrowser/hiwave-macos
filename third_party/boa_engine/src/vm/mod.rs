@@ -116,6 +116,25 @@ pub(crate) fn check_argument_count(count: usize) -> JsResult<()> {
     Ok(())
 }
 
+/// HIWAVE PATCH (native-call-inline-args): stack-allocated argument buffer for native calls
+/// with <= 8 arguments (eliminates a heap `Vec<JsValue>` allocation on every native call).
+pub(crate) enum InlineArgs {
+    Inline { buf: [JsValue; 8], len: usize },
+    Heap(Vec<JsValue>),
+}
+
+impl std::ops::Deref for InlineArgs {
+    type Target = [JsValue];
+
+    #[inline]
+    fn deref(&self) -> &[JsValue] {
+        match self {
+            Self::Inline { buf, len } => &buf[..*len],
+            Self::Heap(v) => v,
+        }
+    }
+}
+
 /// Virtual Machine.
 #[derive(Debug)]
 pub struct Vm {
@@ -352,6 +371,34 @@ impl Stack {
     ) -> Vec<JsValue> {
         let index = self.stack.len() - argument_count;
         self.stack.split_off(index)
+    }
+
+    /// HIWAVE PATCH (native-call-inline-args): pop arguments into a stack buffer for <= 8 args,
+    /// avoiding a heap `Vec<JsValue>` allocation on every native call.
+    #[inline]
+    pub(crate) fn calling_convention_pop_arguments_inline(
+        &mut self,
+        argument_count: usize,
+    ) -> InlineArgs {
+        if argument_count == 0 {
+            return InlineArgs::Inline {
+                buf: std::array::from_fn(|_| JsValue::undefined()),
+                len: 0,
+            };
+        }
+        let index = self.stack.len() - argument_count;
+        if argument_count <= 8 {
+            let mut buf = std::array::from_fn(|_| JsValue::undefined());
+            for (dst, src) in buf.iter_mut().zip(self.stack.drain(index..)) {
+                *dst = src;
+            }
+            InlineArgs::Inline {
+                buf,
+                len: argument_count,
+            }
+        } else {
+            InlineArgs::Heap(self.stack.split_off(index))
+        }
     }
 
     /// Push the function arguments according to the calling convention.

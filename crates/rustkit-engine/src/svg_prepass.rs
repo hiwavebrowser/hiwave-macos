@@ -63,8 +63,10 @@ pub(crate) const REFERABLE: &[&str] = &[
 
 fn walk(node: &Rc<Node>, f: &mut impl FnMut(&Rc<Node>)) {
     f(node);
-    for child in node.children() {
-        walk(&child, f);
+    let mut child = node.first_child();
+    while let Some(c) = child {
+        walk(&c, f);
+        child = c.next_sibling();
     }
 }
 

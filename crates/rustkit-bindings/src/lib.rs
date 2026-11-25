@@ -535,7 +535,7 @@ delete globalThis.__rustkit_app_read;
 /// `host_object_tests` checks the list against the scripts.
 pub(crate) const HOST_SLOTS: &[&str] = &[
     "FocusEvent", "adoptTo", "advanceTimers", "advanceTimersFramed", "animatedStyle", "animationNow", "animationRound", "becomeFrame", "builtins",
-    "canvasCall", "canvasSlot", "compose",
+    "canvasCall", "canvasNatives", "canvasSlot", "compose",
     "decodeWait", "dispatchTo", "domDirty", "domHooks", "domReset", "dragStore", "dropTimers", "editKey",
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",

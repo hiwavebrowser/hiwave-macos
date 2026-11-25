@@ -333,12 +333,27 @@ pub(crate) fn native_function_call(
     argument_count: usize,
     context: &mut InternalMethodCallContext<'_>,
 ) -> JsResult<CallValue> {
+    // HIWAVE PATCH (native-call-inline-args): stack-allocated args for <= 8 arguments,
+    // single downcast of NativeFunctionObject, and skip Realm clone/swap when `realm` is None.
     let args = context
         .vm
         .stack
-        .calling_convention_pop_arguments(argument_count);
+        .calling_convention_pop_arguments_inline(argument_count);
     let _func = context.vm.stack.pop();
     let this = context.vm.stack.pop();
+
+    let (settles_promises, function, name, constructor, mut realm) = {
+        let nf = obj
+            .downcast_ref::<NativeFunctionObject>()
+            .expect("the object should be a native function object");
+        (
+            context.vm.settling_promises && nf.settles_promises,
+            nf.f.clone(),
+            nf.name.clone(),
+            nf.constructor,
+            nf.realm.clone(),
+        )
+    };
 
     // We technically don't need this since native functions don't push any new frames to the
     // vm, but we'll eventually have to combine the native stack with the vm stack.
@@ -347,27 +362,12 @@ pub(crate) fn native_function_call(
     // `new_promise_reaction_job`); the stop lands at its next check.
     // A promise's bookkeeping is entered too while the engine settles
     // promises in a stopped turn (see `Vm::settling_promises`).
-    let settles_promises = context.vm.settling_promises
-        && obj
-            .downcast_ref::<NativeFunctionObject>()
-            .is_some_and(|f| f.settles_promises);
     if std::mem::take(&mut context.vm.interrupt_exempt_once) || settles_promises {
         context.check_depth_limits()?;
     } else {
         context.check_runtime_limits()?;
     }
     let this_function_object = obj.clone();
-
-    let NativeFunctionObject {
-        f: function,
-        name,
-        constructor,
-        realm,
-        .. // HIWAVE PATCH (interrupt)
-    } = obj
-        .downcast_ref::<NativeFunctionObject>()
-        .expect("the object should be a native function object")
-        .clone();
 
     let pc = context.vm.frame().pc;
     let native_source_info = context.native_source_info();
@@ -376,9 +376,9 @@ pub(crate) fn native_function_call(
         .shadow_stack
         .push_native(pc, name, native_source_info);
 
-    let mut realm = realm.unwrap_or_else(|| context.realm().clone());
-
-    context.swap_realm(&mut realm);
+    if let Some(ref mut realm) = realm {
+        context.swap_realm(realm);
+    }
     context.vm.native_active_function = Some(this_function_object);
 
     let result = if constructor.is_some() {
@@ -389,7 +389,9 @@ pub(crate) fn native_function_call(
     .map_err(|err| err.inject_realm(context.realm().clone()));
 
     context.vm.native_active_function = None;
-    context.swap_realm(&mut realm);
+    if let Some(ref mut realm) = realm {
+        context.swap_realm(realm);
+    }
 
     context.vm.shadow_stack.pop();
 
@@ -414,16 +416,17 @@ fn native_function_construct(
     context.check_runtime_limits()?;
     let this_function_object = obj.clone();
 
-    let NativeFunctionObject {
-        f: function,
-        name,
-        constructor,
-        realm,
-        .. // HIWAVE PATCH (interrupt)
-    } = obj
-        .downcast_ref::<NativeFunctionObject>()
-        .expect("the object should be a native function object")
-        .clone();
+    let (function, name, constructor, mut realm) = {
+        let nf = obj
+            .downcast_ref::<NativeFunctionObject>()
+            .expect("the object should be a native function object");
+        (
+            nf.f.clone(),
+            nf.name.clone(),
+            nf.constructor,
+            nf.realm.clone(),
+        )
+    };
 
     let pc = context.vm.frame().pc;
     let native_source_info = context.native_source_info();
@@ -432,16 +435,16 @@ fn native_function_construct(
         .shadow_stack
         .push_native(pc, name, native_source_info);
 
-    let mut realm = realm.unwrap_or_else(|| context.realm().clone());
-
-    context.swap_realm(&mut realm);
+    if let Some(ref mut realm) = realm {
+        context.swap_realm(realm);
+    }
     context.vm.native_active_function = Some(this_function_object);
 
     let new_target = context.vm.stack.pop();
     let args = context
         .vm
         .stack
-        .calling_convention_pop_arguments(argument_count);
+        .calling_convention_pop_arguments_inline(argument_count);
     let _func = context.vm.stack.pop();
     let _this = context.vm.stack.pop();
 
@@ -472,7 +475,9 @@ fn native_function_construct(
         });
 
     context.vm.native_active_function = None;
-    context.swap_realm(&mut realm);
+    if let Some(ref mut realm) = realm {
+        context.swap_realm(realm);
+    }
 
     context.vm.shadow_stack.pop();
 
