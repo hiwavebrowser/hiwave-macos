@@ -72,6 +72,13 @@ impl fmt::Display for InlineCache {
     }
 }
 
+/// Result of a fast inline-cache lookup that reads a prototype slot inside the same
+/// `prototype.borrow()` that verifies `CacheEntry::holder`.
+pub(crate) enum CacheHit {
+    Own(Slot),
+    Prototype(Slot, crate::JsValue),
+}
+
 impl InlineCache {
     pub(crate) fn new(name: JsString) -> Self {
         // A canonical numeric string is ToString of a Number: it starts with a digit, `-`, `I`
@@ -186,6 +193,60 @@ impl InlineCache {
             self.megamorphic.set(true);
             entries.clear();
         }
+    }
+
+    /// HIWAVE PATCH (zero-clone-ic): fast lookup using a shared borrow of `entries`, raw address
+    /// pre-check before `WeakShape::upgrade`, and a single `prototype.borrow()` that both validates
+    /// `CacheEntry::holder` and reads `storage[slot.index + slot_offset]`.
+    #[inline(always)]
+    pub(crate) fn get_with_slot_offset(
+        &self,
+        shape: &Shape,
+        slot_offset: usize,
+    ) -> Option<CacheHit> {
+        if self.megamorphic.get() {
+            return None;
+        }
+
+        let shape_addr = shape.to_addr_usize();
+        let mut stale_idx = None;
+        {
+            let entries = self.entries.borrow();
+            for (i, entry) in entries.iter().enumerate() {
+                if entry.shape.to_addr_usize() != shape_addr {
+                    continue;
+                }
+                let Some(upgraded) = entry.shape.upgrade() else {
+                    stale_idx = Some(i);
+                    break;
+                };
+                if let Some(holder) = &entry.holder {
+                    let Some(prototype) = upgraded.prototype() else {
+                        stale_idx = Some(i);
+                        break;
+                    };
+                    let prototype = prototype.borrow();
+                    if holder.to_addr_usize() != prototype.shape().to_addr_usize() {
+                        stale_idx = Some(i);
+                        break;
+                    }
+                    let val = prototype
+                        .properties()
+                        .storage
+                        .get(entry.slot.index as usize + slot_offset)
+                        .cloned()?;
+                    return Some(CacheHit::Prototype(entry.slot, val));
+                }
+                return Some(CacheHit::Own(entry.slot));
+            }
+        }
+        if let Some(i) = stale_idx {
+            let mut entries = self.entries.borrow_mut();
+            if i < entries.len() {
+                entries.swap_remove(i);
+            }
+        }
+        None
     }
 
     /// Returns the cached `(Shape, Slot)` if a matching shape exists in the inline cache.

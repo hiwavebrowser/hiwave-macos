@@ -172,10 +172,62 @@ pub(crate) struct SetPropertyByName;
 impl SetPropertyByName {
     #[inline(always)]
     pub(crate) fn operation(
-        (value, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
+        (value, object_reg, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
-        let object = context.vm.get_register(object.into()).clone();
+        // HIWAVE PATCH (zero-clone-ic): fast path when the base register is already a `JsObject`,
+        // avoiding two `JsObject` clones, a redundant `value.clone()`, and a double RefCell borrow
+        // on every own-data inline-cache hit.
+        if let Some(obj) = context.vm.get_register(object_reg.into()).as_object() {
+            let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+            let mut obj_borrowed = obj.borrow_mut();
+            if let Some(hit) = ic.get_with_slot_offset(obj_borrowed.shape(), 1) {
+                match hit {
+                    crate::vm::inline_cache::CacheHit::Own(slot) => {
+                        let slot_index = slot.index as usize;
+                        if !slot.attributes.is_accessor_descriptor() {
+                            if has_ordinary_define_own_property(&obj)
+                                || (obj.is_array() && ic.name != StaticJsStrings::LENGTH)
+                            {
+                                let storage = &mut obj_borrowed.properties_mut().storage;
+                                if slot_index < storage.len() {
+                                    storage[slot_index] =
+                                        context.vm.get_register(value.into()).clone();
+                                    return Ok(());
+                                }
+                            }
+                        } else if has_ordinary_set(&obj) && slot.attributes.has_set() {
+                            let setter = obj_borrowed
+                                .properties()
+                                .storage
+                                .get(slot_index + 1)
+                                .cloned();
+                            drop(obj_borrowed);
+                            if let Some(setter) = setter.as_ref().and_then(JsValue::as_object) {
+                                let val = context.vm.get_register(value.into()).clone();
+                                let receiver = context.vm.get_register(object_reg.into()).clone();
+                                setter.call(&receiver, std::slice::from_ref(&val), context)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    crate::vm::inline_cache::CacheHit::Prototype(slot, setter) => {
+                        drop(obj_borrowed);
+                        if slot.attributes.is_accessor_descriptor()
+                            && has_ordinary_set(&obj)
+                            && slot.attributes.has_set()
+                            && let Some(setter) = setter.as_object()
+                        {
+                            let val = context.vm.get_register(value.into()).clone();
+                            let receiver = context.vm.get_register(object_reg.into()).clone();
+                            setter.call(&receiver, std::slice::from_ref(&val), context)?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        let object = context.vm.get_register(object_reg.into()).clone();
         set_by_name(value, &object, &object, index, context)
     }
 }
