@@ -21,8 +21,6 @@ FAIL	test/annexB/built-ins/RegExp/legacy-accessors/index/this-not-regexp-constru
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/index/this-not-regexp-constructor.js	strict
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js	sloppy
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js	strict
-FAIL	test/annexB/built-ins/RegExp/legacy-accessors/input/prop-desc.js	sloppy
-FAIL	test/annexB/built-ins/RegExp/legacy-accessors/input/prop-desc.js	strict
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/input/this-cross-realm-constructor.js	sloppy
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/input/this-cross-realm-constructor.js	strict
 FAIL	test/annexB/built-ins/RegExp/legacy-accessors/input/this-not-regexp-constructor.js	sloppy
@@ -2131,6 +2129,8 @@ FAIL	test/built-ins/Function/15.3.5.4_2-90gs.js	sloppy
 FAIL	test/built-ins/Function/15.3.5.4_2-91gs.js	sloppy
 FAIL	test/built-ins/Function/15.3.5.4_2-92gs.js	sloppy
 FAIL	test/built-ins/Function/15.3.5.4_2-93gs.js	sloppy
+FAIL	test/built-ins/Function/prototype/toString/built-in-function-object.js	sloppy
+FAIL	test/built-ins/Function/prototype/toString/built-in-function-object.js	strict
 FAIL	test/built-ins/Function/prototype/toString/line-terminator-normalisation-CR.js	sloppy
 FAIL	test/built-ins/Function/prototype/toString/line-terminator-normalisation-CR.js	strict
 FAIL	test/built-ins/Iterator/prototype/Symbol.dispose/invokes-return.js	sloppy
@@ -6813,8 +6813,6 @@ FAIL	test/staging/sm/regress/regress-586482-3.js	sloppy
 FAIL	test/staging/sm/regress/regress-586482-4.js	sloppy
 FAIL	test/staging/sm/regress/regress-586482-5.js	sloppy
 FAIL	test/staging/sm/regress/regress-602621.js	sloppy
-FAIL	test/staging/sm/statements/regress-642975.js	sloppy
-FAIL	test/staging/sm/statements/regress-642975.js	strict
 FAIL	test/staging/sm/strict/deprecated-octal-noctal-tokens.js	sloppy
 FAIL	test/staging/sm/strict/eval-variable-environment.js	sloppy
 FAIL	test/staging/sm/strict/eval-variable-environment.js	strict

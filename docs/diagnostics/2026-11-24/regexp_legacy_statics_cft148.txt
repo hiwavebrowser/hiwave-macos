@@ -1,0 +1,5 @@
+Chrome for Testing 148.0.7778.216, headless --dump-dom of a data: page (no network), 2026-11-24.
+Script: before any match read lastMatch; /b(c)(d)?/.test("abcz"); read lastMatch, $&, $1, $2, $3, lastParen, leftContext, rightContext, input, $_; /x/.test("nomatch") then lastMatch; RegExp.input="set" then input; getter .call({}); lastMatch descriptor; $_ setter.
+Result:
+""|bc|bc|c|""|empty3||""|a|z|abcz|abcz|after-fail:bc|set|other-this:undefined|enum:false conf:true set:function|$_set:function
+Notes: no TypeError for a non-RegExp this; every static has a setter (only input/$_ changes anything); a failed match leaves the statics as they were; an unmatched capture reads "".
