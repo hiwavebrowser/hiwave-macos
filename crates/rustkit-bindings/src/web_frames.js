@@ -77,7 +77,14 @@
     // returns: what would hear it is recorded now (`HOOKS.loadSnapshot`)
     // and the `load` is replayed to that record (`loaded`), or not asked
     // for at all when the record is empty.
-    var NORMAL = 0, QUIET = 1, INITIAL = 2;
+    var NORMAL = 0, QUIET = 1, INITIAL = 2, PREBUILT = 4;
+    // The document's spare child (JETSTREAM-IFRAME-SYNC): `{ win, become }`,
+    // a realm the engine built at a drain, bound to an about:blank document.
+    // A frame this document's script inserts with no `src` (or about:blank)
+    // takes it at once: `contentWindow` / `contentDocument` answer inside the
+    // insertion, as in Chrome, and the engine adopts it at the drain. One at a
+    // time; the engine offers the next.
+    var spare = null;
     var heardAt = create(null); // node id -> what could hear the blank load
     function navigate(el, inserted, parsed) {
         var id = HOOKS.nodeId(el);
@@ -90,7 +97,21 @@
             var snap = HOOKS.loadSnapshot(el, !!parsed);
             if (snap) { heardAt[id] = snap; mode = INITIAL; } else { delete heardAt[id]; mode = QUIET; }
         }
-        request(id, url, mode);
+        // The spare, for the insertion's blank document. Not for a sandboxed
+        // frame (the engine leaves it blank: the floor).
+        var s = null;
+        if ((inserted || parsed) && url === 'about:blank' && spare && getAttr(el, 'sandbox') === null) {
+            s = spare;
+            mode |= PREBUILT;
+        }
+        // Attached only once the engine kept the request: a refused one
+        // (past the bound) leaves the spare with the document.
+        var kept = request(id, url, mode) === true;
+        if (s && kept) {
+            spare = null;
+            frames[id].win = s.win;
+            s.become(g, __rk.realTop, el);
+        }
     }
     function gone(el) {
         var id = HOOKS.nodeId(el);
@@ -177,6 +198,15 @@
             }
             return true;
         },
+        // The engine's spare child for this document (JETSTREAM-IFRAME-SYNC).
+        offerSpare: function (s) {
+            if (spare || !s || !s.win || typeof s.become !== 'function') return false;
+            spare = s;
+            return true;
+        },
+        // Whether the frame still holds a window (it may have left the
+        // document in the script that inserted it).
+        holds: function (id) { var r = frames[id]; return !!(r && r.win); },
         // The child's viewport until layout sizes frames (Stage 3): the
         // element's own CSS px width/height, its attributes, or 300x150.
         size: function (id) {

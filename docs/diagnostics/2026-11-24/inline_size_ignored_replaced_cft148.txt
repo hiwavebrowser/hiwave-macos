@@ -1,0 +1,5 @@
+isi_replaced.html
+  ifr: x=0 y=0 w=120 h=30
+  obj: x=0 y=36 w=120 h=30
+  emb: x=0 y=0 w=0 h=0
+  ifc: x=240 y=72 w=120 h=30
