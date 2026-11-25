@@ -525,6 +525,8 @@ mod ua_control_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wrapped_span_strut_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ch_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod logical_size_tests;
