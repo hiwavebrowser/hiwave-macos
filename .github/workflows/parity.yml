@@ -705,8 +705,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: parity-aggregate
+          # The gate reports ride along so a ratchet re-cut (ratchet_gate.py
+          # --write-seed) is a download, not a rebuild from the shards.
           path: |
             parity-results/aggregate_report.json
+            parity-results/gate-a.json
+            parity-results/gate-b.json
+            parity-results/ratchet.txt
           retention-days: 30
 
   # ===========================================================================

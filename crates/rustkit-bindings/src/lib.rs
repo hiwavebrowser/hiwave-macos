@@ -540,7 +540,7 @@ pub(crate) const HOST_SLOTS: &[&str] = &[
     "finishComposing", "fire", "fireAnimation", "fireDrag", "fireError", "fireInput", "fireKey", "fireMouse", "fireOn",
     "fireRejection", "fireTextInput", "fireTransition", "fireWheel", "followLink", "fragmentNavigation", "framePending", "frameRounds", "hasCtor", "historyReset",
     "imageFailed", "imageFailedFor", "imageGaveUp", "imageLoaded", "imageLoadedFor", "imageWritten",
-    "implicitSubmit", "inlineStyleParses", "isDispatching", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
+    "implicitSubmit", "inertDocumentMethods", "inertFrameDocument", "inlineStyleParses", "installFrameWrite", "isDispatching", "joinTimers", "keepCtor", "keepFinish", "likelySubtags", "locationHashSync",
     "locationSync", "make", "markEdited", "matchMediaTagged", "mediaCall", "mediaChanges", "mediaEvent", "net", "newTextEvent", "nextTimer",
     "now", "observersTick", "pendingFrameRound", "perfNow", "pickOption", "realTop", "registerProperty", "resizeHeld", "runTimers", "runTimersFramed", "scrollToFragment",
     "scrollToLocationFragment", "setAdoptedStyles", "setCurrentScript", "setDetClock", "setFocus", "setGridStamps", "setOneRound", "setSelection",
@@ -1365,6 +1365,13 @@ const PAGE_LIFECYCLE_JS: &str = r#"
             delete pumps[Q.pumpCount];
         }
     };
+    // A spare (JETSTREAM-IFRAME-SYNC) is no document of the tree until it is
+    // made a frame's: it leaves the tables when offered (`dropTimers`) and
+    // takes its place again here, once, when it becomes the frame's window.
+    __rk.joinTimers = function () {
+        for (var p = 0; p < Q.pumpCount; p++) if (pumps[p] === pump) return;
+        pumps[Q.pumpCount++] = pump;
+    };
     // The runtime asks for another turn at once (rejections it has still
     // to announce, `JsRuntime::set_rejection_events`): a timer of the
     // engine's own that is due now and does nothing, so the live loop's
@@ -1910,6 +1917,11 @@ pub struct FrameRequest {
     pub sandbox: Option<String>,
     pub initial: bool,
     pub quiet: bool,
+    /// The page half attached the document's spare child (a pre-built
+    /// about:blank realm) to the frame inside the insertion: the engine
+    /// adopts it ([`DomBindings::take_spare`]) instead of making one
+    /// (JETSTREAM-IFRAME-SYNC).
+    pub prebuilt: bool,
 }
 
 pub struct DomBindings {
@@ -1921,6 +1933,18 @@ pub struct DomBindings {
     /// Frame requests not yet taken (`take_frame_requests`); filled only
     /// once `enable_frames` ran.
     frame_requests: Rc<RefCell<Vec<FrameRequest>>>,
+    /// The document's spare child (JETSTREAM-IFRAME-SYNC): a realm already
+    /// bound to an about:blank document, which the page half attaches to a
+    /// frame inside the insertion and the engine then adopts. Built by the
+    /// engine at a drain ([`Self::offer_spare`]); one at a time.
+    spare: RefCell<Option<Box<DomBindings>>>,
+    /// An about:blank document's creator's origin ([`Self::inherit_origin_from`]);
+    /// cleared when a location is set.
+    inherited_origin: RefCell<Option<String>>,
+    /// The window's `load` has fired for the bound document (set by
+    /// [`Self::fire_lifecycle_event`], so script cannot fake it): the engine
+    /// builds a spare only after it (JETSTREAM-IFRAME-SYNC, off the load path).
+    window_loaded: std::cell::Cell<bool>,
     /// The `sandbox` attribute of each iframe of the document as it was
     /// bound (the parser's), until that frame is first asked for: a markup
     /// frame is asked for at the engine's scan, after the page's first
@@ -2058,7 +2082,13 @@ impl DomBindings {
                         Some(JsValue::Number(mode)) => *mode as u8,
                         _ => 0,
                     };
-                    queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1 });
+                    // +4: the page half attached the spare (`prebuilt`).
+                    let prebuilt = mode & 4 != 0;
+                    let mode = mode & 3;
+                    queue.push(FrameRequest { node, url, sandbox, initial: mode == 1 || mode == 2, quiet: mode == 1, prebuilt });
+                    // Kept: the page half may attach the spare (a refused
+                    // request, past the bound, gets none).
+                    return JsValue::Boolean(true);
                 }
                 JsValue::Null
             }),
@@ -2160,9 +2190,93 @@ impl DomBindings {
         Ok(matches!(fired, JsValue::Boolean(true)))
     }
 
+    /// An about:blank document's origin is its creator's (HTML: "about:blank
+    /// inherits the origin of its creator"): blob URLs the parent made are
+    /// reachable from the frame, as in Chrome. Called for an unsandboxed
+    /// about:blank child, after its location (which set an opaque origin).
+    pub fn inherit_origin_from(&self, parent: &DomBindings) {
+        let origin = parent.origin();
+        self.runtime.borrow_mut().set_realm_origin(self.runtime.realm, &origin);
+        *self.inherited_origin.borrow_mut() = Some(origin);
+        self.canvases.borrow_mut().origin = parent.canvases.borrow().origin.clone();
+    }
+
+    /// The document's origin as the engine knows it: its URL's, or for an
+    /// about:blank document, the one it inherited ([`Self::inherit_origin_from`]).
+    pub fn origin(&self) -> String {
+        if let Some(o) = self.inherited_origin.borrow().as_ref() {
+            return o.clone();
+        }
+        self.window.borrow().location.origin.clone()
+    }
+
+    /// The document these bindings are bound to.
+    pub fn document(&self) -> Option<Rc<Document>> {
+        self.window.borrow().document.clone()
+    }
+
+    /// Whether the window's `load` has fired for the bound document.
+    pub fn window_loaded(&self) -> bool {
+        self.window_loaded.get()
+    }
+
+    /// Whether the document holds a spare child.
+    pub fn has_spare(&self) -> bool {
+        self.spare.borrow().is_some()
+    }
+
+    /// Give the document `child` (from [`Self::new_child`], bound to its
+    /// about:blank document) as its spare: the page half keeps its window and
+    /// a way to make it a frame's, so a frame inserted by script can have it
+    /// at once (JETSTREAM-IFRAME-SYNC). `false` (and `child` dropped) when
+    /// the page half has no frames or already holds one.
+    pub fn offer_spare(&self, child: DomBindings) -> Result<bool, BindingError> {
+        let handed = child.runtime.borrow_mut().evaluate_host_bookkeeping(
+            "if (__rk.dropTimers) __rk.dropTimers(); \
+             __rk.shared.handoff = { win: globalThis, become: function (up, top, el) { \
+               __rk.becomeFrame(up, top, el); if (__rk.joinTimers) __rk.joinTimers(); } }; \
+             return true;",
+        );
+        let taken = handed.and_then(|_| {
+            self.runtime.borrow_mut().evaluate_host_bookkeeping(
+                "var S = __rk.shared, s = S.handoff; S.handoff = null; \
+                 return !!(__rk.frames && s && __rk.frames.offerSpare(s));",
+            )
+        });
+        let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping("__rk.shared.handoff = null;");
+        if matches!(taken, Ok(JsValue::Boolean(true))) {
+            *self.spare.borrow_mut() = Some(Box::new(child));
+            Ok(true)
+        } else {
+            self.drop_child(child);
+            taken.map(|_| false).map_err(Into::into)
+        }
+    }
+
+    /// Take the spare the page half attached to a frame (a `prebuilt`
+    /// request): the engine adopts it as that frame's window.
+    pub fn take_spare(&self) -> Option<DomBindings> {
+        self.spare.borrow_mut().take().map(|b| *b)
+    }
+
+    /// Whether frame `node` still holds a window (it may have left the
+    /// document in the script that inserted it).
+    pub fn frame_holds_window(&self, node: usize) -> bool {
+        matches!(
+            self.runtime
+                .borrow_mut()
+                .evaluate_host_bookkeeping(&format!("return !!(__rk.frames && __rk.frames.holds({node}));")),
+            Ok(JsValue::Boolean(true))
+        )
+    }
+
     /// End a child made with [`Self::new_child`]: its realm can no longer be
-    /// evaluated in. Objects of it the parent still holds stay alive.
+    /// evaluated in. Objects of it the parent still holds stay alive. Its own
+    /// spare, if it holds one, is ended with it (a realm of the same runtime).
     pub fn drop_child(&self, child: DomBindings) -> bool {
+        if let Some(spare) = child.take_spare() {
+            child.drop_child(spare);
+        }
         // Its timers are in the tree's queue: they go with it.
         let _ = child.runtime.borrow_mut().evaluate_host_bookkeeping("if (__rk.dropTimers) __rk.dropTimers();");
         let realm = child.runtime.realm;
@@ -2269,6 +2383,10 @@ impl DomBindings {
         runtime.evaluate_script(include_str!("web_traversal.js"))?;
         // document.location/fonts/forms/visibilityState/..., FontFace (web_document.js) and
         // DOMMatrix (web_dommatrix.js): members pages read without feature-testing.
+        // `document.write` in a frame runs its scripts through this, in this
+        // realm (JETSTREAM-IFRAME-SYNC); web_document.js takes it off the
+        // window.
+        runtime.register_script_runner("__rustkit_run_written")?;
         runtime.evaluate_with_host(include_str!("web_document.js"))?;
         runtime.evaluate_script(include_str!("web_dommatrix.js"))?;
         // document.styleSheets, CSSStyleSheet, CSS.supports/escape (web_cssom.js);
@@ -2342,6 +2460,9 @@ impl DomBindings {
             runtime: page,
             clock_origin,
             frame_requests: Rc::new(RefCell::new(Vec::new())),
+            spare: RefCell::new(None),
+            inherited_origin: RefCell::new(None),
+            window_loaded: std::cell::Cell::new(false),
             frame_sandbox_parsed: Rc::new(RefCell::new(None)),
             window: RefCell::new(WindowState::default()),
             dom_host,
@@ -3323,6 +3444,7 @@ impl DomBindings {
 
     /// Set the document.
     pub fn set_document(&self, document: Rc<Document>) -> Result<(), BindingError> {
+        self.window_loaded.set(false);
         // Update state. Marks against the previous document are moot: the
         // new one gets a full layout of its own.
         self.window.borrow_mut().document = Some(document.clone());
@@ -3356,6 +3478,7 @@ impl DomBindings {
 
         // Update state
         self.window.borrow_mut().location = location.clone();
+        *self.inherited_origin.borrow_mut() = None;
         self.canvases.borrow_mut().origin = Some(url.origin());
         // The file an `error` event names for code with no script of its own.
         self.runtime.borrow_mut().set_document_url(url.as_str());
@@ -4043,6 +4166,9 @@ impl DomBindings {
         target: LifecycleTarget,
         event_type: &str,
     ) -> Result<(), BindingError> {
+        if matches!(target, LifecycleTarget::Window) && event_type == "load" {
+            self.window_loaded.set(true);
+        }
         let target = match target {
             LifecycleTarget::Window => "window",
             LifecycleTarget::Document => "document",

@@ -191,6 +191,10 @@ pub(crate) struct SvgPrepass {
     pub(crate) failed: HashSet<String>,
     /// The paint rules of the sheets last read (`svg_paint_rules`).
     pub(crate) paint_rules: Option<Rc<SvgPaintRules>>,
+    /// SVG-PREPASS-CACHE: the paint rules of the last few sets of sheets read, most recent last,
+    /// so two documents laid out in turn (a page and its frame) each find their own set again
+    /// (the same `Rc`, which `element_paint` checks) instead of replacing each other's.
+    pub(crate) paint_rules_kept: Vec<Rc<SvgPaintRules>>,
     /// Per svg element (by pointer), when the paint rules read only the
     /// element and its ancestors: the element and its ancestors, the
     /// rules, and the element's paint style under them; and (CH2.E19) the
