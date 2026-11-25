@@ -15,7 +15,10 @@ use std::cell::RefCell;
 
 #[derive(Default)]
 struct LegacyState {
+    /// What `RegExp.input` reads; the setter changes only this.
     input: Option<JsString>,
+    /// The string the last match was taken from; the match and context getters slice it.
+    subject: Option<JsString>,
     matched: Option<Range>,
     captures: Vec<Option<Range>>,
 }
@@ -34,6 +37,7 @@ pub(super) fn record(input: &JsString, matched: Range, captures: &[Option<Range>
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.input = Some(input.clone());
+        s.subject = Some(input.clone());
         s.matched = Some(matched);
         s.captures = captures.to_vec();
     });
@@ -48,15 +52,15 @@ fn slice(input: &JsString, range: &Range) -> JsValue {
 fn read(_this: &JsValue, _context: &mut Context, f: impl FnOnce(&LegacyState, &JsString) -> JsValue) -> JsResult<JsValue> {
     Ok(STATE.with(|s| {
         let s = s.borrow();
-        match s.input.as_ref() {
-            Some(input) => f(&s, input),
+        match s.subject.as_ref() {
+            Some(subject) => f(&s, subject),
             None => JsValue::new(js_string!()),
         }
     }))
 }
 
-pub(super) fn get_input(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    read(this, context, |_, input| JsValue::new(input.clone()))
+pub(super) fn get_input(_this: &JsValue, _: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(STATE.with(|s| JsValue::new(s.borrow().input.clone().unwrap_or_default())))
 }
 
 pub(super) fn set_input(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
