@@ -24567,3 +24567,19 @@ pub fn margin_walks() -> u64 {
 pub fn take_layout_visits() -> u64 {
     LAYOUT_VISITS.with(|n| n.replace(0))
 }
+
+thread_local! {
+    /// Flex containers laid out on this thread since the last [`take_flex_layouts`] (FLEX-MEMO):
+    /// each run of the flex algorithm counts one; a layout the memo restores does not.
+    static FLEX_LAYOUTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+pub(crate) fn count_flex_layout() {
+    FLEX_LAYOUTS.with(|n| n.set(n.get() + 1));
+}
+
+/// The number of flex-container layouts on this thread since the last call, and a fresh count.
+pub fn take_flex_layouts() -> u64 {
+    FLEX_LAYOUTS.with(|n| n.replace(0))
+}
