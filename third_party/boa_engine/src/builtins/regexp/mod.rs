@@ -32,6 +32,8 @@ use std::str::FromStr;
 use super::{BuiltInBuilder, BuiltInConstructor, IntrinsicObject};
 
 mod regexp_string_iterator;
+// HIWAVE PATCH (REGEXP-LEGACY-STATICS): RegExp.lastMatch, $1..$9 and friends.
+mod legacy_statics;
 pub(crate) use regexp_string_iterator::RegExpStringIterator;
 #[cfg(test)]
 mod tests;
@@ -161,7 +163,50 @@ impl IntrinsicObject for RegExp {
         let get_source = BuiltInBuilder::callable(realm, Self::get_source)
             .name(js_string!("get source"))
             .build();
-        let regexp = BuiltInBuilder::from_standard_constructor::<Self>(realm)
+        // HIWAVE PATCH (REGEXP-LEGACY-STATICS): each legacy static is a configurable,
+        // non-enumerable accessor with a getter and a setter on the constructor; only the
+        // `input`/`$_` setter changes anything (Chrome 148, measured).
+        type NativeFn = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
+        let legacy_getter = |name: &str, f: NativeFn| {
+            BuiltInBuilder::callable(realm, f).name(js_string!(format!("get {name}").as_str())).build()
+        };
+        let legacy_setter = |name: &str, f: NativeFn| {
+            BuiltInBuilder::callable(realm, f).name(js_string!(format!("set {name}").as_str())).length(1).build()
+        };
+        let legacy: Vec<(&str, NativeFn, bool)> = vec![
+            ("input", legacy_statics::get_input, true),
+            ("$_", legacy_statics::get_input, true),
+            ("lastMatch", legacy_statics::get_last_match, false),
+            ("$&", legacy_statics::get_last_match, false),
+            ("lastParen", legacy_statics::get_last_paren, false),
+            ("$+", legacy_statics::get_last_paren, false),
+            ("leftContext", legacy_statics::get_left_context, false),
+            ("$`", legacy_statics::get_left_context, false),
+            ("rightContext", legacy_statics::get_right_context, false),
+            ("$'", legacy_statics::get_right_context, false),
+            ("$1", legacy_statics::get_1, false),
+            ("$2", legacy_statics::get_2, false),
+            ("$3", legacy_statics::get_3, false),
+            ("$4", legacy_statics::get_4, false),
+            ("$5", legacy_statics::get_5, false),
+            ("$6", legacy_statics::get_6, false),
+            ("$7", legacy_statics::get_7, false),
+            ("$8", legacy_statics::get_8, false),
+            ("$9", legacy_statics::get_9, false),
+        ];
+        let mut builder = BuiltInBuilder::from_standard_constructor::<Self>(realm);
+        for (name, get, settable) in legacy {
+            let getter = legacy_getter(name, get);
+            let set: NativeFn = if settable { legacy_statics::set_input } else { legacy_statics::set_ignored };
+            let setter = Some(legacy_setter(name, set));
+            builder = builder.static_accessor(
+                js_string!(name),
+                Some(getter),
+                setter,
+                Attribute::CONFIGURABLE,
+            );
+        }
+        let regexp = builder
             .static_method(Self::escape, js_string!("escape"), 1)
             .static_accessor(
                 JsSymbol::species(),
@@ -1323,6 +1368,9 @@ impl RegExp {
             // a. Perform ? Set(R, "lastIndex", 𝔽(e), true).
             this.set(js_string!("lastIndex"), e, true, context)?;
         }
+
+        // HIWAVE PATCH (REGEXP-LEGACY-STATICS): a successful match updates the legacy statics.
+        legacy_statics::record(input, (last_index as usize)..e, &match_value.captures);
 
         // 17. Let n be the number of elements in r's captures List.
         let n = match_value.captures.len() as u64;
