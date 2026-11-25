@@ -1,6 +1,6 @@
 test262 @ 2e58f87d8350ad51224617a041c6e041d52f8444  area=test
-runs 103352  pass 96522 (93.39%)  not passing 6830
-  test/annexB/built-ins                                       76/482     15.77%
+runs 103352  pass 96524 (93.39%)  not passing 6828
+  test/annexB/built-ins                                       78/482     16.18%
   test/annexB/language                                       208/895     23.24%
   test/built-ins/AbstractModuleSource                          0/8        0.00%
   test/built-ins/AggregateError                               50/50     100.00%
@@ -21,7 +21,7 @@ runs 103352  pass 96522 (93.39%)  not passing 6830
   test/built-ins/DisposableStack                               0/186      0.00%
   test/built-ins/Error                                       134/186     72.04%
   test/built-ins/FinalizationRegistry                         90/94      95.74%
-  test/built-ins/Function                                    870/893     97.42%
+  test/built-ins/Function                                    868/893     97.20%
   test/built-ins/GeneratorFunction                            46/46     100.00%
   test/built-ins/GeneratorPrototype                          122/122    100.00%
   test/built-ins/Infinity                                     10/10     100.00%
@@ -122,6 +122,6 @@ runs 103352  pass 96522 (93.39%)  not passing 6830
   test/staging/decorators                                     10/14      71.43%
   test/staging/explicit-resource-management                   16/105     15.24%
   test/staging/set-methods                                     6/6      100.00%
-  test/staging/sm                                           2450/2631    93.12%
+  test/staging/sm                                           2452/2631    93.20%
   test/staging/source-phase-imports                            2/4       50.00%
   test/staging/top-level-await                                 1/1      100.00%
