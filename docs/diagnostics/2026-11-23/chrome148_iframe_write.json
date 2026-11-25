@@ -1,0 +1,40 @@
+{
+ "before_insert": true,
+ "no_src": {
+  "url": "about:blank",
+  "ready": "complete",
+  "html": "<html><head></head><body></body></html>",
+  "body": true,
+  "win": true,
+  "same": true
+ },
+ "src_blank": {
+  "url": "about:blank",
+  "body": true
+ },
+ "nested": {
+  "url": "about:blank",
+  "body": true
+ },
+ "after_open": {
+  "body": null,
+  "html": null
+ },
+ "after_write": {
+  "log": [
+   "s1:loading",
+   "s2:true"
+  ],
+  "ready": "loading",
+  "p": true
+ },
+ "after_close": {
+  "log": [
+   "s1:loading",
+   "s2:true",
+   "s3"
+  ],
+  "ready": "complete",
+  "html_len": 226
+ }
+}
