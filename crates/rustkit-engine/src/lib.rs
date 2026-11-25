@@ -50043,11 +50043,12 @@ impl RetainedStyles {
 
 fn retained_styles_from(value: Option<&str>) -> RetainedStyles {
     match value {
+        Some("off") | Some("0") => RetainedStyles::Off,
         Some("on") | Some("1") => RetainedStyles::On,
         Some("verify") => RetainedStyles::Verify,
-        Some("boxes") => RetainedStyles::Boxes,
         Some("boxes-verify") => RetainedStyles::BoxesVerify,
-        _ => RetainedStyles::Off,
+        Some("boxes") | None | Some("") => RetainedStyles::Boxes,
+        _ => RetainedStyles::Boxes,
     }
 }
 

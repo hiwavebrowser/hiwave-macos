@@ -8,9 +8,9 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-/// `RUSTKIT_INCREMENTAL_LAYOUT`: `off` (default), `verify` (lay out in full
+/// `RUSTKIT_INCREMENTAL_LAYOUT`: `on` (default), `off` / `0` (disable), `verify` (lay out in full
 /// as today, run the incremental path beside it and count the box rects
-/// that differ), `on` (paint the incremental result when it applies).
+/// that differ).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Off,
@@ -20,9 +20,10 @@ pub(crate) enum Mode {
 
 pub(crate) fn mode_from(value: Option<&str>) -> Mode {
     match value {
-        Some("on") | Some("1") => Mode::On,
+        Some("off") | Some("0") => Mode::Off,
         Some("verify") => Mode::Verify,
-        _ => Mode::Off,
+        Some("on") | Some("1") | None | Some("") => Mode::On,
+        _ => Mode::On,
     }
 }
 
