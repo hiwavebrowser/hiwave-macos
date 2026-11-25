@@ -656,6 +656,24 @@ impl Drop for JsRuntime {
     }
 }
 
+#[cfg(all(feature = "boa", not(feature = "script-phase-tracing")))]
+#[inline(always)]
+fn script_phase<T>(_phase: &'static str, _bytes: usize, run: impl FnOnce() -> T) -> T {
+    run()
+}
+
+#[cfg(feature = "script-phase-tracing")]
+fn script_phase<T>(phase: &'static str, bytes: usize, run: impl FnOnce() -> T) -> T {
+    if !tracing::enabled!(target: "rustkit_js::script_phases", tracing::Level::DEBUG) {
+        return run();
+    }
+    let start = std::time::Instant::now();
+    let result = run();
+    tracing::debug!(target: "rustkit_js::script_phases", phase, bytes,
+        elapsed_us = start.elapsed().as_micros() as u64);
+    result
+}
+
 impl JsRuntime {
     /// Create a new JavaScript runtime.
     pub fn new() -> Result<Self, JsError> {
@@ -1635,11 +1653,16 @@ impl JsRuntime {
             let source_path = std::path::Path::new(path.unwrap_or(diag::EMBEDDER_PATH));
             let compiled = {
                 let _detail = ErrorDetailScope::enter(detail);
-                boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
-                    .and_then(|script| script.codeblock(&mut self.context).map(|_| script))
+                script_phase("parse", source.len(), || {
+                    boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
+                }).and_then(|script| {
+                    script_phase("compile", source.len(), || script.codeblock(&mut self.context)).map(|_| script)
+                })
             };
-            let result = compiled.and_then(|script| script.evaluate(&mut self.context));
-            self.settle_evaluation(result, path)
+            let result = compiled.and_then(|script| {
+                script_phase("execute", source.len(), || script.evaluate(&mut self.context))
+            });
+            script_phase("settle", source.len(), || self.settle_evaluation(result, path))
         }
 
         #[cfg(not(feature = "boa"))]
