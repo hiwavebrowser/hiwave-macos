@@ -2591,15 +2591,33 @@ var s = document.createElement('script'); s.src = '/a.js'; document.head.appendC
 
     /// Wake the view until its load has ended (either path).
     fn load_and_settle(view: &RustKitView, url: &str) {
+        let mark = log_mark();
         view.wry_load_url(url).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(20);
         loop {
             wake(view);
             let loading = if view.content.is_some() { *view.loading.borrow() } else { view.is_loading() };
-            if !loading && (view.content.is_none() || view.latest_commit.borrow().is_some()) {
+            let committed = view.latest_commit.borrow().is_some();
+            if !loading && (view.content.is_none() || committed) {
                 return;
             }
-            assert!(Instant::now() < deadline, "the load never ended");
+            if Instant::now() >= deadline {
+                // Say where it stalled: the path, the two load flags, and every thread's log since
+                // the load began (the page thread may never have been built, so no thread filter).
+                let lines: Vec<String> = captured_log().lock().unwrap().get(mark..).unwrap_or_default()
+                    .iter().map(|(thread, line)| format!("{thread:?} {line}")).collect();
+                let tail = lines.len().saturating_sub(60);
+                panic!(
+                    "the load never ended: {} path, loading={loading}, committed={committed}, after {:?}; \
+                     {} log lines since the load began, last {}:\n{}",
+                    if view.content.is_some() { "content-thread" } else { "in-process" },
+                    started.elapsed(),
+                    lines.len(),
+                    lines.len() - tail,
+                    lines[tail..].concat()
+                );
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
     }
