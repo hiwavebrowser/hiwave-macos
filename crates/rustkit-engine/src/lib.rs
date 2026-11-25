@@ -596,6 +596,7 @@ mod opacity_value_tests;
 mod aspect_ratio_apply_tests;
 #[cfg(test)]
 mod logical_size_apply_tests;
+mod svg_paint_rules_keep_tests;
 #[cfg(test)]
 mod color_shorthand_keep_tests;
 #[cfg(test)]
@@ -22056,7 +22057,7 @@ impl layout_ctx::LayoutCtx {
     /// with the root's custom properties: kept while the sheets, their
     /// order and media are the same (LAT4b), since reading them means
     /// visiting every rule of every sheet.
-    fn svg_paint_rules(
+    pub(crate) fn svg_paint_rules(
         &self,
         inline: Vec<Rc<Stylesheet>>,
         external: &Rc<Vec<Stylesheet>>,
