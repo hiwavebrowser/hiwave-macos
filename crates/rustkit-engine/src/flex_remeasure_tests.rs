@@ -150,3 +150,63 @@ fn nested_flex_pages_lay_out_identically_with_the_memo_off_and_on_and_as_chrome(
     }
     assert!(wrong.is_empty(), "nested flex pages:\n{}", wrong.join("\n"));
 }
+
+/// FLEX-MEMO: NewsSite's shape: a column flex page whose navbar and article list are rows of small
+/// flex containers (an icon and a label each), nested in flex at every level. With the memo on, each
+/// flex container is laid out about once per pass: NewsSite-Nuxt made ~3,800 flex-container layouts
+/// per forced layout for at most ~330 containers, and the memo, which wrapped only block children,
+/// saw almost none of them (each container's subtree is small, and the flex algorithm's own
+/// recursion bypassed it). Bound: at most 2.25 layouts per container (3.9 before).
+#[test]
+fn with_the_memo_on_nested_small_flex_rows_are_laid_out_about_once_each() {
+    let rows: String = (0..24)
+        .map(|i| format!("<li class=r><span class=i>*</span><span class=l>Item {i}</span></li>"))
+        .collect();
+    let css = "body{margin:0;font:13px/1.5 Arial} #page{display:flex;flex-direction:column} \
+               #nav{display:flex;flex-wrap:wrap;gap:4px} ul{display:flex;flex-direction:column;margin:0;padding:0} \
+               .r{display:flex;align-items:center;gap:6px} .i{display:flex;width:16px} .l{display:flex;flex:1}";
+    let body = format!(
+        "<div id=page><div id=nav><ul id=u1>{rows}</ul><ul id=u2>{rows}</ul></div><main id=m><ul id=u3>{rows}</ul></main></div>"
+    );
+    let page = format!("<!doctype html><style>{css}</style>{body}");
+    let containers = 3 + 3 + 3 * 24 * 3;
+    for (mode, want) in [(MemoMode::On, true), (MemoMode::Off, false)] {
+        set_memo_mode(Some(mode));
+        set_memo_min_subtree(None);
+        let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+        let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 1280, height: 800 }).expect("view");
+        rustkit_layout::take_flex_layouts();
+        engine.load_html(view, &page).expect("load_html");
+        let layouts = rustkit_layout::take_flex_layouts();
+        set_memo_mode(None);
+        eprintln!("memo {mode:?}: {layouts} flex-container layouts for {containers} flex containers");
+        if want {
+            // 3.9 each before FLEX-MEMO (874 for 222). What is left are calls with other inputs: the
+            // block pre-pass hands a container another width, or its flow cursor as the height,
+            // which the flex algorithm reads (main size, percent heights), so they are new layouts.
+            assert!(
+                layouts * 4 <= containers * 9,
+                "memo on: {layouts} flex-container layouts for {containers} flex containers (want at most 2.25 each)"
+            );
+        }
+    }
+}
+
+/// FLEX-MEMO: an absolutely positioned descendant whose containing block is outside a memoised flex
+/// container (the RustKit chrome's tab strip: a 1px separator) is placed against a box the memo
+/// does not see, so the container is not memoised. Verify mode lays every would-be hit out again
+/// and panics on any difference; the boxes are the same with the memo off and on.
+#[test]
+fn a_flex_container_with_an_escaping_absolute_descendant_is_not_restored_from_the_memo() {
+    let css = "body{margin:0;font:13px/1.5 Arial} #outer{position:relative;display:flex;flex-direction:column;padding:10px} \
+               #strip{display:flex;gap:4px} .tab{display:flex;align-items:center;padding:2px 6px} \
+               #sep{position:absolute;right:3px;top:1px;width:1px;height:14px;background:#888}";
+    let tabs: String = (0..6).map(|i| format!("<div class=tab><span>Tab {i}</span></div>")).collect();
+    let body = format!("<div id=outer><div id=strip>{tabs}<div class=tab><span id=sep></span>New</div></div><div id=c>content</div></div>");
+    let ids = ["outer", "strip", "sep", "c"];
+    let (off, _) = lay_out(css, &body, &ids, MemoMode::Off);
+    let (verified, _) = lay_out(css, &body, &ids, MemoMode::Verify);
+    let (on, _) = lay_out(css, &body, &ids, MemoMode::On);
+    assert_eq!(off, verified, "memo verify");
+    assert_eq!(off, on, "memo on");
+}

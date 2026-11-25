@@ -16,7 +16,9 @@
 //! - `on`: restores.
 //!
 //! `RUSTKIT_LAYOUT_MEMO_MIN=n` sets the smallest subtree (in descendant boxes) that is memoised
-//! (default 33; the corpus runs with 1 so every child layout is checked).
+//! (default 1, since FLEX-MEMO: NewsSite's repeated flex containers are small rows; at 33 they
+//! bypassed the memo, and at 1 NewsSite-Nuxt/Next took about half the time with TipTap and Lit
+//! unchanged; the corpus has always run with 1 so every child layout is checked).
 //!
 //! What a hit assumes, and what refuses it: the key is the box's width, edges, definite height,
 //! margin context and the layout INPUT state below it (child counts, percent-height marks, which
@@ -116,7 +118,7 @@ fn env_mode() -> MemoMode {
 
 fn env_min() -> usize {
     static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MIN.get_or_init(|| std::env::var("RUSTKIT_LAYOUT_MEMO_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(33))
+    *MIN.get_or_init(|| std::env::var("RUSTKIT_LAYOUT_MEMO_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
 }
 
 pub fn memo_mode() -> MemoMode {
@@ -182,12 +184,14 @@ struct MemoEntry {
     outputs: Vec<BoxOutputs>,
     end_height: f32,
     end_margin: MarginCollapseContext,
+    /// FLEX-MEMO: the flex container's own content width after the run (block entries: unused).
+    end_width: f32,
 }
 
 impl MemoEntry {
     fn new(key: MemoKey, outputs: Vec<BoxOutputs>, end_height: f32, end_margin: MarginCollapseContext) -> Self {
         LIVE.with(|n| n.set(n.get() + 1));
-        MemoEntry { key, outputs, end_height, end_margin }
+        MemoEntry { key, outputs, end_height, end_margin, end_width: f32::NAN }
     }
 }
 
@@ -788,5 +792,199 @@ mod restore_tests {
         set_memo_min_subtree(None);
         let h = body.children[0].children[0].dimensions.border_box().height;
         assert!((h - 30.0).abs() < 0.5, "grid float-only item height {h} with the memo on; Chromium 30");
+    }
+}
+
+/// FLEX-MEMO: whether an absolutely positioned descendant of `b` has its containing block outside
+/// `b`'s subtree (no positioned box between them, `b` itself included): it is placed against a box
+/// the memo does not see, so a recorded position cannot be restored (the RustKit chrome's tab
+/// strip: a 1px separator, recorded at (167, 1) in the container and laid out at (-27, 38)).
+/// Both position fields are read, as `snapshot` reads them (flex item collection reads
+/// `style.position`): a box counts as absolute if either says so, and as a containing block only if
+/// both do. A fixed descendant is refused by `snapshot` already, and is counted here too.
+fn abspos_escapes(b: &LayoutBox) -> bool {
+    fn absolute(c: &LayoutBox) -> bool {
+        matches!(c.position, Position::Absolute | Position::Fixed)
+            || matches!(c.style.position, rustkit_css::Position::Absolute | rustkit_css::Position::Fixed)
+    }
+    fn positioned(c: &LayoutBox) -> bool {
+        c.position != Position::Static && c.style.position != rustkit_css::Position::Static
+    }
+    fn walk(b: &LayoutBox, contained: bool) -> bool {
+        b.children.iter().any(|c| (absolute(c) && !contained) || walk(c, contained || positioned(c)))
+    }
+    walk(b, positioned(b))
+}
+
+/// FLEX-MEMO: the key of a flex container's layout. Its inputs are the arguments
+/// (`layout_flex_container_at`'s containing box, positioning box, used and resolved inner heights),
+/// the box's own edges and the input state below it (`input_fingerprint`); a tag keeps the entries
+/// apart from the block-children entries in the same box memo.
+fn flex_key(
+    b: &LayoutBox,
+    container_box: &Dimensions,
+    positioning_cb: Option<&Dimensions>,
+    used_inner_height: Option<f32>,
+    resolved: Option<f32>,
+) -> MemoKey {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "flex".hash(&mut h);
+    for d in [Some(container_box), positioning_cb].into_iter().flatten() {
+        hash_edges(&d.padding, &mut h);
+        hash_edges(&d.border, &mut h);
+        hash_edges(&d.margin, &mut h);
+        hash_edges(&d.scrollbar, &mut h);
+        d.content.width.to_bits().hash(&mut h);
+        d.content.height.to_bits().hash(&mut h);
+    }
+    positioning_cb.is_some().hash(&mut h);
+    resolved.map(f32::to_bits).hash(&mut h);
+    // The flex algorithm places the items from the containing box's origin, and the outputs are
+    // stored relative to the container's own content origin: where the two differ, the offset is an
+    // input (a positioning box's origin too, for absolutely positioned items).
+    let origin = (b.dimensions.content.x, b.dimensions.content.y);
+    for d in [Some(container_box), positioning_cb].into_iter().flatten() {
+        (d.content.x - origin.0).to_bits().hash(&mut h);
+        (d.content.y - origin.1).to_bits().hash(&mut h);
+    }
+    hash_edges(&b.dimensions.padding, &mut h);
+    hash_edges(&b.dimensions.border, &mut h);
+    hash_edges(&b.dimensions.margin, &mut h);
+    // The run reads the container's own flag (`percent_height_computes_to_auto`: the definite-cross
+    // test and step 12); `input_fingerprint` hashes only its descendants.
+    b.percent_height_is_auto.hash(&mut h);
+    MemoKey {
+        width: container_box.content.width.to_bits(),
+        definite_height: used_inner_height.map(f32::to_bits),
+        edges: h.finish(),
+        margin: MarginCollapseContext::new(),
+        inputs: input_fingerprint(b),
+        shares_floats: false,
+    }
+}
+
+impl LayoutBox {
+    /// FLEX-MEMO: a flex container's layout (`layout_flex_container_at`'s `run`), memoised as LAT21
+    /// memoises block children. A container nested directly in flex containers is laid out again
+    /// at each level's measuring passes with the same inputs (NewsSite: ~3,800 flex-container
+    /// layouts per forced layout for at most ~330 containers), and those calls never reached the
+    /// block-children memo. Same modes (`RUSTKIT_LAYOUT_MEMO`), same refusals (fixed or sticky
+    /// descendants, a shared float context, tables), the container's own width and height restored
+    /// with its descendants' outputs.
+    pub(crate) fn flex_layout_memoised(
+        &mut self,
+        container_box: &Dimensions,
+        positioning_cb: Option<&Dimensions>,
+        used_inner_height: Option<f32>,
+        resolved: Option<f32>,
+        run: impl FnOnce(&mut LayoutBox),
+    ) {
+        let mode = memo_mode();
+        if mode == MemoMode::Off
+            || self.style.display.is_table()
+            || self.context_floats.is_some()
+            || !descendants_at_least(self, memo_min_subtree())
+            || abspos_escapes(self)
+        {
+            return run(self);
+        }
+        let epoch = EPOCH.with(|e| e.get());
+        let key = flex_key(self, container_box, positioning_cb, used_inner_height, resolved);
+        let mut memo = self
+            .layout_memo
+            .take()
+            .filter(|m| m.epoch == epoch)
+            .unwrap_or_else(|| Box::new(BoxMemo { epoch, entries: Vec::new() }));
+        let found = memo.entries.iter().position(|e| e.key == key);
+        let mut verify: Option<(Vec<BoxOutputs>, f32, f32)> = None;
+        let mut predicted: Option<String> = None;
+        match (found, mode) {
+            (Some(i), MemoMode::On) => {
+                let entry = memo.entries.remove(i);
+                if restore(self, &entry.outputs) {
+                    count(|c| {
+                        c.hits += 1;
+                        c.restored_boxes += entry.outputs.len() as u64;
+                    });
+                    self.dimensions.content.height = entry.end_height;
+                    self.dimensions.content.width = entry.end_width;
+                    memo.entries.insert(0, entry);
+                    self.layout_memo = Some(memo);
+                    return;
+                }
+                count(|c| c.misses += 1);
+            }
+            (Some(i), MemoMode::Verify) => {
+                let e = &memo.entries[i];
+                // What the restore would leave, on a copy (as the block-children verify does): the
+                // restore must write back every field the snapshot holds, and on small subtrees the
+                // whole box is compared below, which catches a field the run writes and the
+                // restore skips.
+                let n = e.outputs.len();
+                let mut probe = self.clone();
+                if restore(&mut probe, &e.outputs) {
+                    probe.dimensions.content.height = e.end_height;
+                    probe.dimensions.content.width = e.end_width;
+                    let back = snapshot(&probe);
+                    assert!(
+                        back.as_ref().is_some_and(|b| {
+                            b.len() == n && b.iter().zip(&e.outputs).all(|(a, r)| a.close_to(r))
+                        }),
+                        "FLEX-MEMO layout memo verify: restoring the recorded flex layout does not reproduce it ({n} descendants)"
+                    );
+                    if n <= DEBUG_COMPARE_MAX {
+                        predicted = Some(format!("{:?}", probe));
+                    }
+                }
+                verify = Some((e.outputs.clone(), e.end_height, e.end_width));
+            }
+            _ => count(|c| c.misses += 1),
+        }
+        run(self);
+        // Entries a nested block-children layout of this box recorded during the run.
+        if let Some(inner) = self.layout_memo.take().filter(|m| m.epoch == epoch) {
+            for e in inner.entries {
+                if !memo.entries.iter().any(|m| m.key == e.key) {
+                    memo.entries.push(e);
+                }
+            }
+        }
+        if let Some((outputs, h, w)) = verify {
+            count(|c| c.verified += 1);
+            let ok = snapshot(self)
+                .is_some_and(|a| a.len() == outputs.len() && a.iter().zip(&outputs).all(|(x, y)| x.close_to(y)))
+                && close(self.dimensions.content.height, h)
+                && close(self.dimensions.content.width, w);
+            assert!(
+                ok,
+                "FLEX-MEMO layout memo verify: restoring the recorded flex layout would differ from laying it out ({} descendants)",
+                outputs.len()
+            );
+            if let Some(predicted) = predicted {
+                let actual = format!("{:?}", self);
+                assert!(
+                    rounded(&predicted) == rounded(&actual),
+                    "FLEX-MEMO layout memo verify: a field the snapshot does not hold differs\nrecorded: {:.1500}\n actual:   {:.1500}",
+                    rounded(&predicted),
+                    rounded(&actual)
+                );
+            }
+        } else {
+            match snapshot(self) {
+                Some(outputs) => {
+                    count(|c| c.stored += 1);
+                    let key = flex_key(self, container_box, positioning_cb, used_inner_height, resolved);
+                    let mut entry =
+                        MemoEntry::new(key, outputs, self.dimensions.content.height, MarginCollapseContext::new());
+                    entry.end_width = self.dimensions.content.width;
+                    memo.entries.retain(|e| e.key != entry.key);
+                    memo.entries.insert(0, entry);
+                }
+                None => count(|c| c.refused += 1),
+            }
+        }
+        memo.entries.truncate(4);
+        self.layout_memo = Some(memo);
     }
 }
