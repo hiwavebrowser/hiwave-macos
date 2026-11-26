@@ -216,3 +216,109 @@ fn a_span_that_starts_at_a_line_end_with_a_forced_break_or_split_by_a_block_keep
         .collect();
     assert!(wrong.is_empty(), "Ahem 20px/1:\n{}", wrong.join("\n"));
 }
+
+// Prometheus (HOLD at 61853644): in WPT css-text/letter-spacing/letter-spacing-200's box 3 the
+// mid-line start put a span on the wrong line without always changing a height: the pre-wrap
+// row's `4 5` drawn at the end of `1 2 3`, and `456` (with Arial) or `七` (with Ahem) drawn on
+// the line before its own. So these pin the lines themselves, paragraph by paragraph: each line's
+// characters, in order, whitespace dropped. Chrome for Testing 148.0.7778.216 (win64),
+// docs/diagnostics/2026-11-26/inline_mid_line_rows_cft148.json
+// (tools/parity_oracle/inline_mid_line_rows_log.mjs, the same markup; the paragraphs' ids are
+// added here to find them in the layout export).
+
+/// letter-spacing-200's box 3 as written, in `face`, its paragraphs `#r1`..`#r4`.
+fn letter_spacing_200_box_3(face: &str) -> String {
+    format!(
+        "<style>body{{margin:0}} .contain{{font:20px/1 {face};width:5em;border:solid blue;margin:1em;float:left}} \
+         span,.test{{letter-spacing:1em}} .pre,.control p{{white-space:pre-wrap}} p{{margin:0}}</style>\
+         <div class=\"contain\"><p id=r1><span>1 2</span></p><p id=r2>1 2 \u{4e09}<span>456</span>\u{4e03} 8 9</p>\
+         <p id=r3>1 2 3<br><span>4 5</span><br>6 7 8</p><p id=r4 class=\"pre\">1 2 3\n<span>4 5</span>\n6 7 8</p></div>"
+    )
+}
+
+/// Each of `#r1`..`#r4`'s painted lines, top to bottom: the text commands inside the paragraph's
+/// box grouped by their middle's y, each line its characters left to right with whitespace dropped.
+fn painted_rows(page: &str) -> Vec<Vec<String>> {
+    use base64::Engine as _;
+    let face = format!(
+        "<style>@font-face{{font-family:Ahem;src:url(data:font/ttf;base64,{})}}</style>",
+        base64::engine::general_purpose::STANDARD.encode(AHEM)
+    );
+    let mut engine = Engine::new(EngineConfig::default()).expect("engine");
+    let view = engine
+        .create_headless_view(Bounds { x: 0, y: 0, width: 800, height: 600 })
+        .expect("view");
+    engine.load_html(view, &format!("<!doctype html>{face}{page}")).expect("load_html");
+    let file = std::env::temp_dir().join(format!("inline_mid_line_rows_{}_{}.json", std::process::id(), page.len()));
+    engine.export_layout_json(view, file.to_str().unwrap()).expect("export");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&file);
+    fn find<'a>(v: &'a serde_json::Value, sel: &str) -> Option<&'a serde_json::Value> {
+        if v.get("selector").and_then(|t| t.as_str()) == Some(sel) {
+            return Some(v);
+        }
+        v.get("children")?.as_array()?.iter().find_map(|c| find(c, sel))
+    }
+    let bands: Vec<(f64, f64)> = (1..=4)
+        .map(|i| {
+            let b = &find(&json["root"], &format!("#r{i}")).expect("paragraph")["border_box"];
+            let y = b["y"].as_f64().unwrap();
+            (y, y + b["height"].as_f64().unwrap())
+        })
+        .collect();
+    let list = engine.views[&view].display_list.as_ref().expect("display list");
+    let mut runs: Vec<(f64, f32, String)> = list
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            // Banded by the glyphs' middle: `y` is the top of the face's content area, which
+            // with Arial (22.3px at 20px) sits above a 20px line box's top.
+            rustkit_layout::DisplayCommand::Text { text, x, y, font_size, .. } => {
+                let chars: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                (!chars.is_empty()).then(|| (((*y + *font_size / 2.0) as f64).round(), *x, chars))
+            }
+            _ => None,
+        })
+        .collect();
+    runs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    bands
+        .iter()
+        .map(|&(top, bottom)| {
+            let mut lines: Vec<(f64, String)> = Vec::new();
+            for (y, _, chars) in runs.iter().filter(|r| r.0 >= top && r.0 < bottom) {
+                match lines.last_mut() {
+                    Some((ly, s)) if ly == y => s.push_str(chars),
+                    _ => lines.push((*y, chars.clone())),
+                }
+            }
+            lines.into_iter().map(|(_, s)| s).collect()
+        })
+        .collect()
+}
+
+fn rows_of(chrome: &[&[&str]]) -> Vec<Vec<String>> {
+    chrome.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect()
+}
+
+#[test]
+fn letter_spacing_200_box_3_keeps_each_span_on_its_own_lines_arial() {
+    let got = painted_rows(&letter_spacing_200_box_3("Arial"));
+    let chrome = rows_of(&[
+        &["12"],
+        &["12\u{4e09}", "456", "\u{4e03}89"],
+        &["123", "45", "678"],
+        &["123", "45", "678"],
+    ]);
+    assert_eq!(got, chrome, "letter-spacing-200 box 3, Arial: each paragraph's lines");
+}
+
+/// With Ahem the second paragraph is the mid-line start's: `456` and `七 8 9` each on a line of
+/// their own. The other three paragraphs are left out: RustKit keeps `1 2` and `4 5` on one line
+/// where Chrome breaks them at the space (each is 120px with its letter-spacing in a 100px box),
+/// on develop as on this branch; that is a letter-spacing row of its own, not this change's.
+#[test]
+fn letter_spacing_200_box_3_keeps_each_span_on_its_own_lines_ahem() {
+    let got = painted_rows(&letter_spacing_200_box_3("Ahem"));
+    let chrome = rows_of(&[&["12\u{4e09}", "456", "\u{4e03}89"]]);
+    assert_eq!(got[1..2], chrome[..], "letter-spacing-200 box 3, Ahem: the second paragraph's lines (all: {got:?})");
+}
