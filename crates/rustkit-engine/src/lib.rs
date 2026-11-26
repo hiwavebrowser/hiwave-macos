@@ -7402,7 +7402,9 @@ impl Engine {
             .set_document(Rc::new(document))
             .and_then(|_| child.set_location(&blank))
             .and_then(|_| child.enable_net_bridge())
-            .and_then(|_| child.enable_frames());
+            .and_then(|_| child.enable_frames())
+            // As the drain's frames do: a spare becomes a frame's realm.
+            .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
         if bound.is_err() {
             parent.drop_child(child);
             return;
