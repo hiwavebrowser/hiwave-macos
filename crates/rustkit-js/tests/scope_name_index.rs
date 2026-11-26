@@ -61,7 +61,10 @@ fn parse_and_compile_time_grows_linearly_with_a_functions_variables() {
     for _ in 0..3 {
         let (small, large) = fastest_pair(&small_src, &large_src);
         let ratio = large.as_secs_f64() / small.as_secs_f64();
-        if ratio < 6.0 {
+        // x8, not x6: GitHub's hosted runner read x6.26-x6.90 on a linear
+        // develop (issue #1474) while the Mac reads under x6; the scan this
+        // guards against is x13-x16, so x8 still separates them.
+        if ratio < 8.0 {
             return;
         }
         seen.push(format!("5k {small:?}, 20k {large:?}: x{ratio:.2}"));

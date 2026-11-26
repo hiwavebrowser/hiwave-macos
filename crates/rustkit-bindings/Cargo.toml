@@ -6,6 +6,13 @@ description = "JavaScript-to-DOM bindings for RustKit browser engine"
 authors = ["HiWave Team"]
 license = "AGPL-3.0-or-later"
 
+[features]
+profile-bundle = ["rustkit-js/script-phase-tracing"]
+
+[[example]]
+name = "profile_bundle"
+required-features = ["profile-bundle"]
+
 [dependencies]
 # Core crates
 rustkit-common = { path = "../rustkit-common" }

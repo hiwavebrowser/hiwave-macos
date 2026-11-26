@@ -253,6 +253,44 @@ the same lock. Kill only processes your own run started.
   what you did not check. Never claim a run you did not make.
 - **No timeline promises.** Give order and dependencies, not dates.
 
+## Working rules (added 2026-11-25, from batches 125-131)
+
+Each of these cost a batch re-cut, a regression or a lost day in the week of
+2026-11-23.
+
+1. **Test-module lines go in alphabetical order, one per PR.** Register a new
+   `mod foo_tests;` in `crates/rustkit-engine/src/lib.rs` (and any other
+   module list) at its alphabetical place, never appended after the newest
+   line. Appending at the same spot made three batches need hand-written
+   conflict resolvers.
+2. **Base every PR on `develop`; never stack.** A PR based on another PR's
+   branch is closed by GitHub when that branch is deleted at landing. If work
+   depends on an open PR, wait for it to land, then branch from `develop`.
+3. **A change that switches on a property or flips a default needs a
+   real-site check beyond the 19-site A/B.** Run `scripts/realsite_board.py`
+   (at least the sites the change plausibly touches) against `develop` and the
+   branch, and put both in the PR. #1442 (`inline-size` now applied) blanked
+   GitHub's home page and the layout-memo default flip changed walmart's
+   header; neither site is in the A/B.
+4. **Speed claims need a full-suite run.** Speedometer and JetStream numbers
+   in a PR come from the whole suite (median of 3, base and branch
+   interleaved), not one workload alone: per-document costs only show after
+   the earlier workloads have run (#1440 measured 1-3% alone and 6-9% in the
+   full suite). Micro-benchmarks are welcome as extra evidence, not instead.
+5. **Prune `target/debug/deps/*.o` in any checkout reused across tasks**
+   (`find target/debug/deps -maxdepth 1 -name '*.o' -delete` when no cargo
+   job of yours is running). Above a few hundred thousand files, a fresh test
+   binary's first text shaping indexes that directory and timed waits fail
+   (CTENV; 838k files stalled two gate stages on 11-24).
+6. **No heavy builds or full suites on the Mac while a batch is gating.** Use
+   your own machine, or wait for the lead's `BATCH n LANDED` line. Static
+   review and single-crate checks are fine.
+7. **Wall-clock assertions carry margin for hosted runners.** A test that
+   compares timings (ratios, budgets) must pass on a loaded GitHub runner:
+   bound it with room between the healthy value and the failure it guards
+   against, or keep it out of the hosted suites. A x6 bound on a ~x4 ratio
+   reddened `develop` on 11-25 (#1474).
+
 ## Pull requests labelled `no-check`
 
 A pull request carrying the GitHub label `no-check` is a standing or parked PR

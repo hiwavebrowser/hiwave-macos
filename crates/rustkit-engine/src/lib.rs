@@ -525,6 +525,8 @@ mod ua_control_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wrapped_span_strut_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ch_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod logical_size_tests;
@@ -18637,7 +18639,7 @@ impl layout_ctx::LayoutCtx {
 
         // The font is final now; `ch` lengths that the cascade dropped for
         // want of a font can finally be applied.
-        self.resolve_ch_lengths(&mut style, &ch_pending);
+        self.resolve_ch_lengths(&mut style, parent_style, &ch_pending);
 
         // MEDIA-AVF (#1332 R1): Chrome's UA sheet has `audio:not([controls]) { display:
         // none !important }`, which no author declaration beats (an `!important` UA
@@ -18908,11 +18910,22 @@ impl layout_ctx::LayoutCtx {
     /// `margin: 1ch` followed by a later `margin-left: 2px` re-applies the
     /// shorthand and clobbers the longhand. Both are dropped entirely today,
     /// so this is strictly less wrong — but it is not the cascade.
-    fn resolve_ch_lengths(&self, style: &mut ComputedStyle, ch_pending: &ChPending) {
+    fn resolve_ch_lengths(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        ch_pending: &ChPending,
+    ) {
         if ch_pending.is_empty() {
             return;
         }
-        let advance = ch_advance_px(style);
+        // The parent's font-size as it computes: handed down in px, or a root-relative size.
+        let parent_font_px = match parent_style.map(|p| &p.font_size) {
+            Some(rustkit_css::Length::Px(px)) => *px,
+            Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
+            _ => 16.0,
+        };
+        let advance = ch_advance_px(style, parent_font_px);
         for (property, value) in ch_pending.winners() {
             let substituted = substitute_ch_units(value, advance);
             self.apply_style_property(style, property, &substituted);
@@ -29702,9 +29715,17 @@ fn substitute_ch_units(value: &str, advance: f32) -> String {
 /// The spec's fallback when the font has no "0" glyph is 0.5em; we use the
 /// same fallback if measurement returns nothing, so a missing font degrades
 /// to a defined value instead of collapsing the length to zero.
-fn ch_advance_px(style: &ComputedStyle) -> f32 {
+fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
+    // CH-REM-FONT-SIZE: the cascade has not absolutized this element's font-size yet, so a rem,
+    // em or % size is resolved here the way it will compute (rem against the root font, em and %
+    // against the parent's). Reading only px and falling back to 16px measured `16ch` at
+    // `font-size: 3.5rem` with a 16px "0" (GitHub's hero heading, Chrome 148: equal widths).
     let font_size = match style.font_size {
         rustkit_css::Length::Px(px) => px,
+        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
+        rustkit_css::Length::Em(v) => v * parent_font_px,
+        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
+        rustkit_css::Length::Zero => 0.0,
         _ => 16.0,
     };
     let measured = rustkit_layout::measure_text_advanced(
