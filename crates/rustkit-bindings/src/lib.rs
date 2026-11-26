@@ -172,6 +172,8 @@ mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
 #[cfg(test)]
+mod window_event_path_unit_tests;
+#[cfg(test)]
 mod child_realm_tests;
 #[cfg(test)]
 mod child_realm_hardening_tests;

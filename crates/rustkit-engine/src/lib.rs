@@ -598,6 +598,8 @@ mod opacity_value_tests;
 mod aspect_ratio_apply_tests;
 #[cfg(test)]
 mod logical_size_apply_tests;
+#[cfg(test)]
+mod ch_font_size_unit_tests;
 mod svg_paint_rules_keep_tests;
 #[cfg(test)]
 mod color_shorthand_keep_tests;
@@ -18946,11 +18948,7 @@ impl layout_ctx::LayoutCtx {
             return;
         }
         // The parent's font-size as it computes: handed down in px, or a root-relative size.
-        let parent_font_px = match parent_style.map(|p| &p.font_size) {
-            Some(rustkit_css::Length::Px(px)) => *px,
-            Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
-            _ => 16.0,
-        };
+        let parent_font_px = ch_parent_font_px(parent_style);
         let advance = ch_advance_px(style, parent_font_px);
         for (property, value) in ch_pending.winners() {
             let substituted = substitute_ch_units(value, advance);
@@ -29746,14 +29744,7 @@ fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
     // em or % size is resolved here the way it will compute (rem against the root font, em and %
     // against the parent's). Reading only px and falling back to 16px measured `16ch` at
     // `font-size: 3.5rem` with a 16px "0" (GitHub's hero heading, Chrome 148: equal widths).
-    let font_size = match style.font_size {
-        rustkit_css::Length::Px(px) => px,
-        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
-        rustkit_css::Length::Em(v) => v * parent_font_px,
-        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
-        rustkit_css::Length::Zero => 0.0,
-        _ => 16.0,
-    };
+    let font_size = ch_font_size_px(style, parent_font_px);
     let measured = rustkit_layout::measure_text_advanced(
         "0",
         &style.font_family,
@@ -29766,6 +29757,32 @@ fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
         measured
     } else {
         font_size * 0.5
+    }
+}
+
+/// The element's font-size in px for a `ch` length, before the cascade absolutizes it.
+///
+/// Rem uses the thread's root font; em and % use `parent_font_px`. Anything else that is not
+/// already px falls back to 16 (the initial value), matching the pre-absolutize path in
+/// `ch_advance_px`.
+pub(crate) fn ch_font_size_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
+    match style.font_size {
+        rustkit_css::Length::Px(px) => px,
+        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
+        rustkit_css::Length::Em(v) => v * parent_font_px,
+        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
+        rustkit_css::Length::Zero => 0.0,
+        _ => 16.0,
+    }
+}
+
+/// The parent's font-size as `resolve_ch_lengths` hands it to `ch_advance_px`: already-px, or a
+/// root-relative rem; everything else (including a missing parent) is 16.
+pub(crate) fn ch_parent_font_px(parent: Option<&ComputedStyle>) -> f32 {
+    match parent.map(|p| &p.font_size) {
+        Some(rustkit_css::Length::Px(px)) => *px,
+        Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
+        _ => 16.0,
     }
 }
 
