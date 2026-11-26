@@ -3830,7 +3830,7 @@ const WRAPPERS_JS: &str = r#"
         }
         var isCharData = n.t === 3 || n.t === 8;
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
-        var inserted = !isCharData && op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
+        var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
         var err = N.mutate(gen, op, p.gen === gen ? p.id : -1, n.gen === gen ? n.id : -1, c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
