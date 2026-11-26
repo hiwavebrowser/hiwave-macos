@@ -1028,7 +1028,7 @@ impl Document {
         note_mutation();
         let new = Node::new(id, node_type);
         new.event_target.adopt_listeners(&old.event_target);
-        *new.adopted_styles.borrow_mut() = old.adopted_styles.borrow().clone();
+        *new.adopted_styles.borrow_mut() = std::mem::take(&mut *old.adopted_styles.borrow_mut());
         new.adopted_generation.set(old.adopted_generation.get());
         // An attribute change keeps a <style>'s sheet; new data in a Text
         // child ends its parent's.
@@ -1062,6 +1062,7 @@ impl Document {
             for slot in p.children.borrow_mut().iter_mut() {
                 if Rc::ptr_eq(slot, &old) {
                     *slot = new.clone();
+                    break;
                 }
             }
         }
@@ -1069,12 +1070,26 @@ impl Document {
         shadow::move_link(&old, &new);
 
         self.nodes.borrow_mut().insert(id, new.clone());
-        let mut by_id = self.elements_by_id.borrow_mut();
-        by_id.retain(|_, n| n.id != id);
-        if let Some(value) = new.get_attribute("id").filter(|v| !v.is_empty()) {
-            by_id.entry(value.to_string()).or_insert_with(|| new.clone());
+        let old_id = old.get_attribute("id").filter(|v| !v.is_empty());
+        let new_id = new.get_attribute("id").filter(|v| !v.is_empty());
+        if old_id != new_id {
+            let mut by_id = self.elements_by_id.borrow_mut();
+            if let Some(old_key) = old_id {
+                if by_id.get(old_key).is_some_and(|n| n.id == id) {
+                    by_id.remove(old_key);
+                }
+            }
+            if let Some(new_key) = new_id {
+                by_id.entry(new_key.to_string()).or_insert_with(|| new.clone());
+            }
+        } else if let Some(key) = new_id {
+            let mut by_id = self.elements_by_id.borrow_mut();
+            if let Some(entry) = by_id.get_mut(key) {
+                if entry.id == id {
+                    *entry = new.clone();
+                }
+            }
         }
-        drop(by_id);
         Some(new)
     }
 
