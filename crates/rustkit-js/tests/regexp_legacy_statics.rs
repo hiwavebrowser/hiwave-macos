@@ -67,3 +67,31 @@ fn the_wsl_lexer_pattern_reads_the_match_length() {
         "2"
     );
 }
+
+/// The statics belong to a realm: a match made in one realm is not visible through another
+/// realm's `RegExp` (frames run in their own realms on the same thread).
+#[test]
+fn a_match_in_one_realm_is_not_visible_from_another() {
+    use boa_engine::{Context, Source};
+    let mut context = Context::default();
+    let other = context.create_realm().expect("realm");
+    context
+        .eval(Source::from_bytes(r#"/se(cr)et/.test("a secret here")"#))
+        .expect("match in the first realm");
+    let outer = context.enter_realm(other);
+    let seen = context
+        .eval(Source::from_bytes("[RegExp.lastMatch, RegExp.input, RegExp.$1].join('|')"))
+        .expect("read in the second realm")
+        .to_string(&mut context)
+        .expect("string")
+        .to_std_string_escaped();
+    context.enter_realm(outer);
+    assert_eq!(seen, "||", "the second realm sees nothing from the first realm's match");
+    let first = context
+        .eval(Source::from_bytes("RegExp.lastMatch"))
+        .expect("read in the first realm")
+        .to_string(&mut context)
+        .expect("string")
+        .to_std_string_escaped();
+    assert_eq!(first, "secret", "the first realm still sees its own match");
+}
