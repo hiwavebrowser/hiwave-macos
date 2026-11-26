@@ -5,26 +5,37 @@
 //! `this._index += RegExp.lastMatch.length` after each `test`, so without them its first test
 //! throws "cannot convert 'null' or 'undefined' to object".
 //!
-//! State is the last successful RegExpBuiltinExec on this thread. The proposal keeps it per
-//! realm and skips the update for subclass instances and cross-realm calls; neither is done
-//! here yet (stated gap, see PATCHES.md).
+//! State belongs to a realm (kept in the realm's host-defined slot): a match updates the statics of
+//! the realm that is current when it runs, and the getters read their own realm's. Frames run in
+//! their own realms on one thread, so nothing one realm matched is visible through another's
+//! `RegExp`. The proposal's subclass rule is not applied yet (stated in PATCHES.md).
 
-use crate::{Context, JsResult, JsString, JsValue, js_string};
+use crate::{Context, JsData, JsResult, JsString, JsValue, js_string};
+use boa_gc::{Finalize, Trace};
 use regress::Range;
-use std::cell::RefCell;
 
-#[derive(Default)]
+#[derive(Default, Trace, Finalize, JsData)]
 struct LegacyState {
     /// What `RegExp.input` reads; the setter changes only this.
+    #[unsafe_ignore_trace]
     input: Option<JsString>,
     /// The string the last match was taken from; the match and context getters slice it.
+    #[unsafe_ignore_trace]
     subject: Option<JsString>,
+    #[unsafe_ignore_trace]
     matched: Option<Range>,
+    #[unsafe_ignore_trace]
     captures: Vec<Option<Range>>,
 }
 
-thread_local! {
-    static STATE: RefCell<LegacyState> = RefCell::new(LegacyState::default());
+/// Run `f` on the current realm's state, creating it on first use.
+fn with_state<R>(context: &mut Context, f: impl FnOnce(&mut LegacyState) -> R) -> R {
+    let realm = context.realm().clone();
+    let mut host = realm.host_defined_mut();
+    if host.get::<LegacyState>().is_none() {
+        host.insert(LegacyState::default());
+    }
+    f(host.get_mut::<LegacyState>().expect("inserted above"))
 }
 
 /// The other statics have a setter too in Chrome 148 (measured), which changes nothing.
@@ -33,9 +44,8 @@ pub(super) fn set_ignored(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResu
 }
 
 /// Record a successful match (called from `abstract_builtin_exec`).
-pub(super) fn record(input: &JsString, matched: Range, captures: &[Option<Range>]) {
-    STATE.with(|s| {
-        let mut s = s.borrow_mut();
+pub(super) fn record(input: &JsString, matched: Range, captures: &[Option<Range>], context: &mut Context) {
+    with_state(context, |s| {
         s.input = Some(input.clone());
         s.subject = Some(input.clone());
         s.matched = Some(matched);
@@ -49,23 +59,20 @@ fn slice(input: &JsString, range: &Range) -> JsValue {
 
 // Chrome 148 answers whatever the this value (measured: `get.call({})` does not throw), so
 // unlike the proposal there is no %RegExp% check.
-fn read(_this: &JsValue, _context: &mut Context, f: impl FnOnce(&LegacyState, &JsString) -> JsValue) -> JsResult<JsValue> {
-    Ok(STATE.with(|s| {
-        let s = s.borrow();
-        match s.subject.as_ref() {
-            Some(subject) => f(&s, subject),
-            None => JsValue::new(js_string!()),
-        }
+fn read(_this: &JsValue, context: &mut Context, f: impl FnOnce(&LegacyState, &JsString) -> JsValue) -> JsResult<JsValue> {
+    Ok(with_state(context, |s| match s.subject.clone() {
+        Some(subject) => f(s, &subject),
+        None => JsValue::new(js_string!()),
     }))
 }
 
-pub(super) fn get_input(_this: &JsValue, _: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-    Ok(STATE.with(|s| JsValue::new(s.borrow().input.clone().unwrap_or_default())))
+pub(super) fn get_input(_this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(with_state(context, |s| JsValue::new(s.input.clone().unwrap_or_default())))
 }
 
 pub(super) fn set_input(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_default().to_string(context)?;
-    STATE.with(|s| s.borrow_mut().input = Some(value));
+    with_state(context, |s| s.input = Some(value));
     Ok(JsValue::undefined())
 }
 

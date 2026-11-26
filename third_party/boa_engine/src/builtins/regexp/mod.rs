@@ -1371,7 +1371,7 @@ impl RegExp {
         }
 
         // HIWAVE PATCH (REGEXP-LEGACY-STATICS): a successful match updates the legacy statics.
-        legacy_statics::record(input, (last_index as usize)..e, &match_value.captures);
+        legacy_statics::record(input, (last_index as usize)..e, &match_value.captures, context);
 
         // 17. Let n be the number of elements in r's captures List.
         let n = match_value.captures.len() as u64;
