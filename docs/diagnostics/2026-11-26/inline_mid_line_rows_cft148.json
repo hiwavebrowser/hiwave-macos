@@ -1,0 +1,61 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "label": "box 3, Ahem",
+      "style": "body{margin:0} .contain{font:20px/1 Ahem;width:5em;border:solid blue;margin:1em;float:left} span,.test{letter-spacing:1em} .pre,.control p{white-space:pre-wrap} p{margin:0}",
+      "body": "<div class=\"contain\" id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<br><span>4 5</span><br>6 7 8</p><p class=\"pre\">1 2 3\n<span>4 5</span>\n6 7 8</p></div>",
+      "height": 266,
+      "rows": [
+        [
+          "1",
+          "2"
+        ],
+        [
+          "12三",
+          "456",
+          "七89"
+        ],
+        [
+          "123",
+          "4",
+          "5",
+          "678"
+        ],
+        [
+          "123",
+          "4",
+          "5",
+          "678"
+        ]
+      ]
+    },
+    {
+      "label": "box 3, Arial",
+      "style": "body{margin:0} .contain{font:20px/1 Arial;width:5em;border:solid blue;margin:1em;float:left} span,.test{letter-spacing:1em} .pre,.control p{white-space:pre-wrap} p{margin:0}",
+      "body": "<div class=\"contain\" id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<br><span>4 5</span><br>6 7 8</p><p class=\"pre\">1 2 3\n<span>4 5</span>\n6 7 8</p></div>",
+      "height": 206,
+      "rows": [
+        [
+          "12"
+        ],
+        [
+          "12三",
+          "456",
+          "七89"
+        ],
+        [
+          "123",
+          "45",
+          "678"
+        ],
+        [
+          "123",
+          "45",
+          "678"
+        ]
+      ]
+    }
+  ]
+}
