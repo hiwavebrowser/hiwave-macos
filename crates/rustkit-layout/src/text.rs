@@ -1380,6 +1380,10 @@ pub(crate) fn shaped_memo_bytes() -> usize {
 pub struct TextShaper {
     #[allow(dead_code)]
     cache: FontCache,
+    /// `letter-spacing` and `word-spacing` in px that the wrap functions fit lines with
+    /// (LETTER-SPACING-BREAK). The runs they return are still unspaced: the spacing is applied
+    /// where the lines are shaped for paint (`ShapedRun::apply_spacing`).
+    spacing: (f32, f32),
 }
 
 impl TextShaper {
@@ -1387,7 +1391,32 @@ impl TextShaper {
     pub fn new() -> Self {
         Self {
             cache: FontCache::new(),
+            spacing: (0.0, 0.0),
         }
+    }
+
+    /// This shaper with the `letter-spacing` and `word-spacing` (px) its wrap functions fit
+    /// lines with. The spacing is part of the content's width (CSS Text 3 §8), so a line breaks
+    /// where its spaced width no longer fits: without it `1 2` at `letter-spacing:1em` in a 5em
+    /// box stayed on one line 6em wide (WPT css-text/letter-spacing/letter-spacing-200).
+    pub fn with_spacing(mut self, letter_spacing: f32, word_spacing: f32) -> Self {
+        self.spacing = (letter_spacing, word_spacing);
+        self
+    }
+
+    /// `run`'s width with this shaper's spacing, as `ShapedRun::apply_spacing` would make it:
+    /// the letter-spacing after every glyph and the word-spacing after every white-space glyph.
+    fn fit_width(&self, run: &ShapedRun) -> f32 {
+        let (letter, word) = self.spacing;
+        if letter == 0.0 && word == 0.0 {
+            return run.metrics.width;
+        }
+        let spaces = if word == 0.0 {
+            0
+        } else {
+            run.glyphs.iter().filter(|g| g.character.is_whitespace()).count()
+        };
+        run.metrics.width + letter * run.glyphs.len() as f32 + word * spaces as f32
     }
 
     /// Whether `c`, a character the primary face lacks, takes the emoji
@@ -2896,7 +2925,7 @@ impl TextShaper {
             let remaining = &text[line_start..];
             let (window, shaped) = self.overflowing_window(remaining, font_chain, weight, style, stretch, size, cur_max)?;
 
-            if window.len() == remaining.len() && shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
+            if window.len() == remaining.len() && self.fit_width(&shaped) <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2962,7 +2991,7 @@ impl TextShaper {
                             stretch,
                             size,
                         )?;
-                        if shaped_prefix.metrics.width <= cur_max + Self::FIT_EPSILON {
+                        if self.fit_width(&shaped_prefix) <= cur_max + Self::FIT_EPSILON {
                             fitted = offset;
                         } else {
                             break;
@@ -3056,7 +3085,7 @@ impl TextShaper {
             let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
             let window = &remaining[..end];
             let shaped = self.shape(window, font_chain, weight, style, stretch, size)?;
-            if end == remaining.len() || shaped.metrics.width > enough {
+            if end == remaining.len() || self.fit_width(&shaped) > enough {
                 return Ok((window, shaped));
             }
             chars *= 2;
@@ -3114,9 +3143,7 @@ impl TextShaper {
             let fits = if prefix.is_empty() {
                 true
             } else {
-                self.shape(prefix, font_chain, weight, style, stretch, size)?
-                    .metrics
-                    .width
+                self.fit_width(&self.shape(prefix, font_chain, weight, style, stretch, size)?)
                     <= max_width + Self::FIT_EPSILON
             };
 

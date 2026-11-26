@@ -3396,7 +3396,8 @@ impl LayoutBox {
             } else {
                 f32::INFINITY
             };
-            let shaper = TextShaper::new();
+            // Lines fit with their spacing (LETTER-SPACING-BREAK).
+            let shaper = TextShaper::new().with_spacing(letter_spacing, word_spacing);
             let chain = FontFamilyChain::from_css_value(&self.style.font_family);
             if let Ok(lines) = shaper.wrap_text_white_space(
                 &text,
@@ -3657,7 +3658,9 @@ impl LayoutBox {
             _ => 16.0,
         };
 
-        let shaper = TextShaper::new();
+        // Lines fit with their spacing (LETTER-SPACING-BREAK).
+        let (letter, word) = style_spacing_px(&self.style, font_size);
+        let shaper = TextShaper::new().with_spacing(letter, word);
         let chain = FontFamilyChain::from_css_value(&self.style.font_family);
         // A run that starts at an inline cursor past the line start says so
         // explicitly: with a zero-wide container the first and full budgets
@@ -15409,6 +15412,17 @@ fn shape_text_metrics(
     }
 }
 
+/// `style`'s `letter-spacing` and `word-spacing` in px at `font_size`.
+fn style_spacing_px(style: &rustkit_css::ComputedStyle, font_size: f32) -> (f32, f32) {
+    let px = |l: &Length| match *l {
+        Length::Px(px) => px,
+        Length::Em(em) => em * font_size,
+        Length::Rem(rem) => rem * rustkit_css::root_font_px(),
+        _ => 0.0,
+    };
+    (px(&style.letter_spacing), px(&style.word_spacing))
+}
+
 /// One line of `text` shaped in `style`, letter/word-spacing applied: the
 /// single shape call behind `shape_line_advances` and `shape_line_run`.
 fn shape_line(
@@ -15416,18 +15430,7 @@ fn shape_line(
     style: &rustkit_css::ComputedStyle,
     font_size: f32,
 ) -> Option<ShapedRun> {
-    let letter_spacing = match style.letter_spacing {
-        Length::Px(px) => px,
-        Length::Em(em) => em * font_size,
-        Length::Rem(rem) => rem * rustkit_css::root_font_px(),
-        _ => 0.0,
-    };
-    let word_spacing = match style.word_spacing {
-        Length::Px(px) => px,
-        Length::Em(em) => em * font_size,
-        Length::Rem(rem) => rem * rustkit_css::root_font_px(),
-        _ => 0.0,
-    };
+    let (letter_spacing, word_spacing) = style_spacing_px(style, font_size);
     let shaper = TextShaper::new();
     let chain = FontFamilyChain::from_css_value(&style.font_family);
     let mut run = shaper
