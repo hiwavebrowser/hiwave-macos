@@ -24,7 +24,8 @@
 //   hwdrive menus    <pid>                  (the process's on-screen windows above layer 0)
 //   hwdrive cursor                          (which AppKit cursor is showing)
 //   hwdrive scroll   <pid> <x> <y> <dx> <dy> (pixels; dy < 0 moves the page down)
-//   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]
+//   hwdrive key      <pid> <keycode> [cmd|shift|alt|ctrl ...]  (req_epoch: wall time of the
+//                                        key-down; post_ms: posting both events)
 //   hwdrive menu     <pid> <menu title> <item title>   (press a menu bar item)
 //   hwdrive type     <pid> <text>
 //   hwdrive resize   <pid> <w> <h>      (returns once the window server shows the size: ack_ms,
@@ -416,12 +417,20 @@ case "key":
         default: emit(["error": "unknown modifier \(m)"], code: 2)
         }
     }
+    // req_epoch is the wall-clock time (Unix seconds, the clock the app
+    // log's UTC stamps use) just before the key-down is posted, so a caller
+    // times the app's answer from its own stamped log line rather than from
+    // before this process was spawned (T37: the spawn, the two 30 ms post
+    // sleeps and the caller's log poll are not the app's).
+    let reqEpoch = Date().timeIntervalSince1970
+    let t0 = DispatchTime.now().uptimeNanoseconds
     for down in [true, false] {
         let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
         e?.flags = (bareUp && !down) ? [] : flags
         post(e)
     }
-    emit(["key": Int(code)])
+    let postMs = (Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e4).rounded() / 100
+    emit(["key": Int(code), "req_epoch": reqEpoch, "post_ms": postMs])
 
 case "type":
     requireInput()
