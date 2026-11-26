@@ -1438,8 +1438,11 @@ unmatched capture reads `""`.
 **Where it differs from the proposal, following Chrome.** No TypeError when the `this` value is
 not `%RegExp%`, and every static has a setter (Chrome 148, measured).
 
-**Gaps (stated).** The state is per thread, not per realm, and subclass instances and cross-realm
-calls update it too (the proposal skips those).
+**Per realm.** The state lives in the current realm's host-defined slot: a match updates the realm
+that is current when it runs, and the getters read their own realm's, so realms on one thread
+(frames) do not share it. Pinned by `a_match_in_one_realm_is_not_visible_from_another`.
+
+**Gap (stated).** Subclass instances update the statics too (the proposal skips them).
 
 **Receipt.** Chrome for Testing 148.0.7778.216, `docs/diagnostics/2026-11-24/regexp_legacy_statics_cft148.txt`.
 
