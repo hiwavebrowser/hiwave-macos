@@ -3292,7 +3292,7 @@ impl LayoutBox {
                 }
                 if matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::holds_preserved_newline(child)
+                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow { left: f.left, width: f.width, line_top, pen });
                 }
@@ -3650,6 +3650,31 @@ impl LayoutBox {
         match inline.inline_flow_end {
             Some((n, end, lh)) => Some((n, (end - container_left).max(0.0), out.map_or(lh, |o| o.2))),
             None => out,
+        }
+    }
+
+    /// Whether the in-flow path (INLINE-MID-LINE) leaves `b` out: an inline that holds a
+    /// preserved newline or spaced text is laid out as before it, moved whole to the next line
+    /// when it does not fit the rest of this one.
+    fn stays_out_of_flow(b: &LayoutBox) -> bool {
+        Self::holds_preserved_newline(b) || Self::holds_spaced_text(b)
+    }
+
+    /// Whether `b` is, or holds among its inline content, text with a non-zero `letter-spacing`
+    /// or `word-spacing`. The in-flow path wraps text with the shaper's widths, which carry
+    /// neither spacing (`layout_text_in_flow`), so a spaced inline measured short there and
+    /// started on a line it did not fit (WPT css-text/letter-spacing/letter-spacing-200 box 3:
+    /// `1 2 三<span>456</span>` with `letter-spacing:1em` drew `456` on the `1 2 三` line, and
+    /// with Ahem the text after it on the span's own line). Such an inline is not laid out in
+    /// flow: if it does not fit the rest of the line it moves to the next line, as before
+    /// INLINE-MID-LINE.
+    fn holds_spaced_text(b: &LayoutBox) -> bool {
+        match &b.box_type {
+            BoxType::Text(_) => {
+                !is_zero_length(&b.style.letter_spacing) || !is_zero_length(&b.style.word_spacing)
+            }
+            BoxType::Inline => b.children.iter().any(Self::holds_spaced_text),
+            _ => false,
         }
     }
 
@@ -7293,7 +7318,7 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::holds_preserved_newline(child)
+                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,
@@ -8592,7 +8617,7 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::holds_preserved_newline(child)
+                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,
