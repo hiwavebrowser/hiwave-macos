@@ -622,6 +622,8 @@ mod sheet_reuse_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
+#[cfg(test)]
+mod load_virtual_frame_tests;
 #[cfg(all(test, feature = "headless"))]
 mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -2148,6 +2150,13 @@ pub struct EngineConfig {
     /// every run, however long its turns take in real time. Frame callbacks' timestamps and
     /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
     pub grid_frame_stamps: bool,
+    /// The load's timer horizon is cut into frames of virtual time (LOAD-VIRTUAL-TIME): the page is
+    /// laid out and its observers are told between timers of different 16 ms frames of the timers'
+    /// clock, never inside one. Off, a slice ends once 16 ms of real time has passed, so where the
+    /// layouts and observer callbacks fall among the timers depends on how fast the engine runs
+    /// (walmart: a faster layout put more timers in a slice, and the page opened a dialog it did not
+    /// open at the slower speed). Off by default: a window publishes frames on the real clock.
+    pub virtual_load_frames: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -2277,6 +2286,7 @@ impl Default for EngineConfig {
             disable_animations: false,
             deterministic_page_clock: false,
             grid_frame_stamps: false,
+            virtual_load_frames: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -10422,6 +10432,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // Slices of virtual time, not real time (LOAD-VIRTUAL-TIME).
+            let virtual_frames = self.config.virtual_load_frames;
             // The script time of every slice, for the errors the timers reported (H19c).
             let mut timers_ms: u64 = 0;
             loop {
@@ -10433,7 +10445,11 @@ impl Engine {
                 let (caught, stopped) = with_script_js(bindings, || {
                     let _job = rustkit_js::DiagJob::enter("timer");
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        if virtual_frames {
+                            bindings.run_timers_for_virtual_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        } else {
+                            bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        }
                     }))
                 });
                 let slice_ms = step_started.elapsed().as_millis() as u64;
