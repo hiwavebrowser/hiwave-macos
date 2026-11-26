@@ -460,6 +460,21 @@ fn layout_flex_container_at(
     used_inner_height: Option<f32>,
     resolved_percent_inner_height: Option<f32>,
 ) {
+    container.flex_layout_memoised(container_box, positioning_cb, used_inner_height, resolved_percent_inner_height, |c| {
+        layout_flex_container_at_run(c, container_box, positioning_cb, used_inner_height, resolved_percent_inner_height)
+    });
+}
+
+/// `layout_flex_container_at` itself: the flex algorithm, run when the memo has no result
+/// (FLEX-MEMO, `LayoutBox::flex_layout_memoised`).
+fn layout_flex_container_at_run(
+    container: &mut LayoutBox,
+    container_box: &Dimensions,
+    positioning_cb: Option<&Dimensions>,
+    used_inner_height: Option<f32>,
+    resolved_percent_inner_height: Option<f32>,
+) {
+    crate::count_flex_layout();
     // A flex item is a formatting root (css-flexbox-1 §3): it encloses its
     // floats. Marked before anything lays an item out.
     for child in &mut container.children {

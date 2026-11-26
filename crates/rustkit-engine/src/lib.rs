@@ -438,6 +438,8 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(test)]
+mod frames_sync_blank_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -503,7 +505,7 @@ mod computed_display_tests;
 #[cfg(test)]
 mod empty_block_box_tests;
 #[cfg(test)]
-mod wasm_engine_tests;
+mod inline_size_ignored_tests;
 #[cfg(test)]
 mod aspect_ratio_width_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -523,7 +525,15 @@ mod ua_control_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wrapped_span_strut_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ch_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
+#[cfg(all(test, feature = "headless"))]
+mod logical_size_tests;
+#[cfg(all(test, feature = "headless"))]
+mod window_event_path_tests;
+#[cfg(all(test, feature = "headless"))]
+mod flex_remeasure_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
 mod emoji_presentation_fallback_tests;
 #[cfg(all(test, feature = "headless", target_os = "macos"))]
@@ -612,6 +622,8 @@ mod sheet_reuse_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
+#[cfg(test)]
+mod load_virtual_frame_tests;
 #[cfg(all(test, feature = "headless"))]
 mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -896,6 +908,8 @@ mod chrome_bridge_tests;
 #[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
 #[cfg(test)]
+mod wasm_engine_tests;
+#[cfg(test)]
 mod clock_live_timer_tests;
 #[cfg(test)]
 mod clock_flag_tests;
@@ -1023,6 +1037,8 @@ mod inline_svg_prepass_tests;
 thread_local! {
     /// Inline svg markups serialized on this thread (LAT4b's tests).
     pub(crate) static INLINE_SVG_MARKUP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Svg elements whose author paint style was computed afresh (SVG-PREPASS-CACHE's tests).
+    pub(crate) static SVG_PAINT_COMPUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(all(test, feature = "headless"))]
 mod drag_drop_tests;
@@ -1278,6 +1294,12 @@ pub enum EngineEvent {
 /// microsoft, shopify and walmart failed as "Unknown image format").
 /// Add `image/avif` back when a decoder lands.
 const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+/// Frame spares built in this process and the time spent building them
+/// (`Engine::refill_spare`), logged at INFO on each build for the stress
+/// harness's record (SPARE-COST). Process-wide: a stress run is one engine.
+static SPARES_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPARE_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// View state.
 #[allow(dead_code)]
@@ -2128,6 +2150,13 @@ pub struct EngineConfig {
     /// every run, however long its turns take in real time. Frame callbacks' timestamps and
     /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
     pub grid_frame_stamps: bool,
+    /// The load's timer horizon is cut into frames of virtual time (LOAD-VIRTUAL-TIME): the page is
+    /// laid out and its observers are told between timers of different 16 ms frames of the timers'
+    /// clock, never inside one. Off, a slice ends once 16 ms of real time has passed, so where the
+    /// layouts and observer callbacks fall among the timers depends on how fast the engine runs
+    /// (walmart: a faster layout put more timers in a slice, and the page opened a dialog it did not
+    /// open at the slower speed). Off by default: a window publishes frames on the real clock.
+    pub virtual_load_frames: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -2177,6 +2206,12 @@ pub struct EngineConfig {
     /// unless `HIWAVE_WEBASSEMBLY=1`: defining it changes what real pages do
     /// (they take their wasm path), and W1 has stated gaps (no memory grow).
     pub webassembly: bool,
+    /// With nested contexts on: pre-built spare frames, so a frame inserted
+    /// by script has its about:blank document at once (JETSTREAM-IFRAME-SYNC).
+    /// On unless `HIWAVE_FRAME_SPARES=0`: the switch for the cost gate's
+    /// spares-on/off comparison, and a way back. Off, a script-inserted
+    /// frame attaches at the next drain, as before.
+    pub frame_spares: bool,
     /// Optional replay proxy URL (test-only, for deterministic HAR replay).
     pub replay_proxy: Option<Url>,
     /// Stop a page script that is still running when `script_budget_ms` is
@@ -2251,6 +2286,7 @@ impl Default for EngineConfig {
             disable_animations: false,
             deterministic_page_clock: false,
             grid_frame_stamps: false,
+            virtual_load_frames: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -2262,6 +2298,7 @@ impl Default for EngineConfig {
             // frames in a built app or parity-capture before the flip.
             nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
             webassembly: std::env::var("HIWAVE_WEBASSEMBLY").ok().as_deref() == Some("1"),
+            frame_spares: std::env::var("HIWAVE_FRAME_SPARES").ok().as_deref() != Some("0"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
             live_turn_budget_ms: 5_000,
@@ -2770,6 +2807,17 @@ pub struct LivePump {
     /// millisecond, and the content loop aims its wake at that instant.
     pub next_timer_exact_us: Option<u64>,
 }
+
+/// The bindings of view `id`'s document (the drain's `parent_of`, outside it).
+fn parent_of_view(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
+    engine.views.get(&id).and_then(|v| v.doc.bindings.as_ref())
+}
+
+/// How many frames deep a page may nest (JETSTREAM-IFRAME-SYNC phase 2a: a
+/// frame's own frames are browsing contexts, so a chain must stop). JetStream
+/// needs 2, Speedometer 1. A stated deviation from Chrome, which caps the
+/// number of frames instead.
+pub(crate) const MAX_FRAME_DEPTH: usize = 16;
 
 /// What a frame's response becomes, by its MIME type (IFR-CT), as Chrome
 /// for Testing 148 renders a same-origin frame's response: only HTML types
@@ -6924,6 +6972,26 @@ impl Engine {
     /// layout and paint of the frame, the child's timers and network
     /// (`fetch`/XHR), module scripts, nested frames, the parent's `load`
     /// waiting for its frames.
+    /// The URLs of view `id`'s document and of each document above it, from
+    /// `id` up to the top page (frames are found through their parents'
+    /// `frames`). Its length less one is `id`'s nesting depth.
+    fn frame_ancestry_urls(&self, id: EngineViewId) -> Vec<Option<Url>> {
+        let mut out = Vec::new();
+        let mut cur = Some(id);
+        while let Some(at) = cur {
+            out.push(self.views.get(&at).and_then(|v| v.doc.url.clone()));
+            cur = self
+                .views
+                .iter()
+                .find(|(_, v)| v.frames.values().any(|f| f.view == at))
+                .map(|(pid, _)| *pid);
+            if out.len() > MAX_FRAME_DEPTH + 1 {
+                break;
+            }
+        }
+        out
+    }
+
     async fn drive_frames(&mut self, id: EngineViewId) {
         let loader = self.loader.clone();
         let referrer = self.subresource_referrer(id);
@@ -6947,9 +7015,39 @@ impl Engine {
             out
         };
         let mut changed = false;
+        // What decides whether a frame of this document may load at all: its
+        // nesting depth and the URLs above it (the requesting document first).
+        let ancestry = self.frame_ancestry_urls(id);
+        // An idle frames turn: nothing to drain. Spares are built only on one
+        // (Atlas ruling C): never inside a drain on the load path.
+        let idle = requests.is_empty();
         for request in requests {
             changed |= self.drop_frame(id, request.node);
-            let Some(target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            let Some(mut target) = request.url.as_deref().and_then(|u| Url::parse(u).ok()) else { continue };
+            // A nesting cap, so a chain of frames cannot recurse without end
+            // (a stated deviation: Chrome caps the frame count, not the
+            // depth). Past it, the floor: no document, no window, one `load`.
+            if ancestry.len() > MAX_FRAME_DEPTH {
+                if let Some(parent) = parent_of_view(self, id) {
+                    let _ = parent.frame_loaded(request.node, false);
+                }
+                continue;
+            }
+            // Chrome's recursion check (Blink allows one level of
+            // self-reference): a frame whose URL is already the URL of two of
+            // the documents above it, fragment aside, is left blank.
+            if target.scheme() != "about" {
+                let unfragmented = |u: &Url| {
+                    let mut u = u.clone();
+                    u.set_fragment(None);
+                    u
+                };
+                let wanted = unfragmented(&target);
+                let seen = ancestry.iter().flatten().filter(|u| unfragmented(u) == wanted).count();
+                if seen >= 2 {
+                    target = Url::parse("about:blank").expect("about:blank");
+                }
+            }
             let blank = target.scheme() == "about";
             let same_origin = page_url.as_ref().is_some_and(|page| page.origin() == target.origin());
             fn parent_of(engine: &Engine, id: EngineViewId) -> Option<&DomBindings> {
@@ -6966,6 +7064,30 @@ impl Engine {
                 }
                 continue;
             }
+            // A spare the page half attached inside the insertion
+            // (JETSTREAM-IFRAME-SYNC): adopt it instead of making a child. It
+            // is already bound to its about:blank document and is the frame's
+            // window; what is left is its size, and the view below.
+            let adopted = if request.prebuilt && blank {
+                parent_of(self, id).and_then(|parent| parent.take_spare().map(|child| (child, parent.frame_size(request.node))))
+            } else {
+                None
+            };
+            // An adopted spare's document was never parsed from a response:
+            // it is the blank document plus what script wrote into it since
+            // the insertion, and `document.write` already ran those scripts.
+            let was_adopted = adopted.is_some();
+            let (child, document, target, width, height) = if let Some((child, (width, height))) = adopted {
+                let document = child.document();
+                let held = parent_of(self, id).is_some_and(|parent| parent.frame_holds_window(request.node));
+                let Some(document) = document.filter(|_| held && child.set_dimensions(width, height).is_ok()) else {
+                    if let Some(parent) = parent_of(self, id) {
+                        parent.drop_child(child);
+                    }
+                    continue;
+                };
+                (child, document, target, width, height)
+            } else {
             // The document's URL is the response's, after redirects; it is
             // same-origin only when every URL of the chain is the page's
             // origin (one that left and came back is not).
@@ -7021,13 +7143,22 @@ impl Engine {
             }) else {
                 continue;
             };
+            // A frame's own frames are browsing contexts too (with nested
+            // contexts on, as the top page's are): a frame made inside a
+            // frame gets a window, as in Chrome (JetStream's `magicframe`).
             let bound = child
                 .set_document(document.clone())
                 .and_then(|_| child.set_location(&target))
                 .and_then(|_| child.set_dimensions(width, height))
                 .and_then(|_| child.enable_net_bridge())
+                .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) })
                 // A frame's realm has WebAssembly too, with the flag on.
                 .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
+            if bound.is_ok() && blank {
+                if let Some(parent) = parent_of(self, id) {
+                    child.inherit_origin_from(parent);
+                }
+            }
             let attached = bound.is_ok()
                 && parent_of(self, id).is_some_and(|parent| matches!(parent.attach_frame(request.node, &child), Ok(true)));
             if !attached {
@@ -7036,6 +7167,8 @@ impl Engine {
                 }
                 continue;
             }
+            (child, document, target, width, height)
+            };
             // The frame's own page state, offscreen, at its viewport.
             let bounds = Bounds { x: 0, y: 0, width: width.round().max(1.0) as u32, height: height.round().max(1.0) as u32 };
             let Ok(fid) = self.insert_offscreen_view(bounds) else {
@@ -7073,6 +7206,10 @@ impl Engine {
                 frame.doc.document = Some(document.clone());
                 frame.doc.script_policy = policy.clone();
                 frame.announced_viewport = Some((bounds.width, bounds.height));
+                // Not yet scanned for its markup frames: the first turn of
+                // this view scans (`drive_frames` scans when the two differ),
+                // so a frame's own `<iframe>` in its markup is requested.
+                frame.frames_nav = frame.nav_id.wrapping_add(1);
             }
             // The frame's linked stylesheets, before its scripts and its
             // `load`, as a page's are before its own: what the parent's
@@ -7095,14 +7232,19 @@ impl Engine {
                 // The live turn's link check asks for them again.
                 Err(e) => debug!(error = %e, "frames: the frame's stylesheets were not loaded before its scripts"),
             }
-            // The child's classic scripts, in document order.
+            // The child's classic scripts, in document order: none for an
+            // adopted spare (above), whose written scripts ran in `write`.
             // The engine's own question (not a page script: nothing of it
             // is announced to the frame's page).
-            let listed = child.evaluate(
+            let listed = if was_adopted {
+                Ok(rustkit_js::JsValue::String("[]".into()))
+            } else {
+                child.evaluate(
                 "JSON.stringify(Array.prototype.map.call(document.querySelectorAll('script'), function (s) { \
                    var t = (s.getAttribute('type') || '').trim().toLowerCase(); \
                    return [s.getAttribute('src'), s.textContent, t === 'module' ? 'module' : (t === '' || /javascript|ecmascript/.test(t)) ? 'classic' : '']; }))",
-            );
+                )
+            };
             let scripts: Vec<(Option<String>, String, String)> = match listed {
                 Ok(rustkit_js::JsValue::String(json)) => serde_json::from_str(&json).unwrap_or_default(),
                 _ => Vec::new(),
@@ -7217,6 +7359,94 @@ impl Engine {
             if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
                 debug!(error = %e, "frames: the parent's layout after a frame change failed");
             }
+        }
+        if idle {
+            self.refill_spare(id);
+        }
+    }
+
+    /// Give view `id`'s document a spare child if it should hold one and does
+    /// not (JETSTREAM-IFRAME-SYNC [R1]): a document that has frames, or is
+    /// itself a frame, within the nesting cap. Built OFF the load path (Atlas
+    /// ruling C, after the [R5] measurement: one spare is ~134 ms and ~13 MB):
+    /// only on an idle frames turn (no request drained in it) after the
+    /// document's window `load`, so never inside a load-path drain. A frame
+    /// inserted by script before then attaches late (pinned by a test); a
+    /// frameless page never pays for one. The spare is a
+    /// child exactly as the drain makes one for an about:blank frame, and it
+    /// belongs to this document: a navigation replaces the document's
+    /// bindings, and the spare goes with them ([R2]).
+    ///
+    /// Every outcome is one `debug!` line on target `frames_spare`
+    /// (`RUST_LOG=frames_spare=debug`), with `outcome` = `built`, or the
+    /// early return's reason: what shows a page's spare work, or that it
+    /// had none.
+    fn refill_spare(&mut self, id: EngineViewId) {
+        if !self.config.frame_spares {
+            debug!(target: "frames_spare", outcome = "off");
+            return;
+        }
+        let Some(view) = self.views.get(&id) else { return };
+        let Some(parent) = view.doc.bindings.as_ref() else { return };
+        if parent.has_spare() {
+            debug!(target: "frames_spare", outcome = "held");
+            return;
+        }
+        if !parent.window_loaded() {
+            debug!(target: "frames_spare", outcome = "before_load");
+            return;
+        }
+        let ancestry = self.frame_ancestry_urls(id);
+        let depth = ancestry.len();
+        // SPARE-COST: a frame document gets one only while it shows
+        // about:blank (JetStream's `#magic`, filled by script and read at
+        // once; a spare's own spare). A URL document gets one once it has
+        // frames, as a top-level page does: before that, its first frame
+        // attaches at the drain. Every Speedometer workload is a frameless
+        // URL document in a frame, and built a spare it never used.
+        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
+        if !wanted {
+            debug!(target: "frames_spare", outcome = "not_wanted");
+            return;
+        }
+        if depth >= MAX_FRAME_DEPTH {
+            debug!(target: "frames_spare", outcome = "too_deep");
+            return;
+        }
+        let started = std::time::Instant::now();
+        let Ok(child) = parent.new_child() else { return };
+        let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
+            .ok()
+            .zip(Url::parse("about:blank").ok());
+        let Some((document, blank)) = built else {
+            parent.drop_child(child);
+            return;
+        };
+        let bound = child
+            .set_document(Rc::new(document))
+            .and_then(|_| child.set_location(&blank))
+            .and_then(|_| child.enable_net_bridge())
+            .and_then(|_| child.enable_frames())
+            // As the drain's frames do: a spare becomes a frame's realm.
+            .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
+        if bound.is_err() {
+            parent.drop_child(child);
+            return;
+        }
+        child.inherit_origin_from(parent);
+        match parent.offer_spare(child) {
+            Ok(true) => {
+                debug!(target: "frames_spare", outcome = "built");
+                use std::sync::atomic::Ordering::Relaxed;
+                let built = SPARES_BUILT.fetch_add(1, Relaxed) + 1;
+                let took = started.elapsed().as_micros() as u64;
+                let us = SPARE_BUILD_US.fetch_add(took, Relaxed) + took;
+                // Running totals, the stress harness's `frame_spares` (tools/stress/run.py, log_spares).
+                info!("frames spare built: total {} in {:.1} ms", built, us as f64 / 1000.0);
+            }
+            Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
+            Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
     }
 
@@ -10202,6 +10432,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // Slices of virtual time, not real time (LOAD-VIRTUAL-TIME).
+            let virtual_frames = self.config.virtual_load_frames;
             // The script time of every slice, for the errors the timers reported (H19c).
             let mut timers_ms: u64 = 0;
             loop {
@@ -10213,7 +10445,11 @@ impl Engine {
                 let (caught, stopped) = with_script_js(bindings, || {
                     let _job = rustkit_js::DiagJob::enter("timer");
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        if virtual_frames {
+                            bindings.run_timers_for_virtual_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        } else {
+                            bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        }
                     }))
                 });
                 let slice_ms = step_started.elapsed().as_millis() as u64;
@@ -18463,7 +18699,7 @@ impl layout_ctx::LayoutCtx {
 
         // The font is final now; `ch` lengths that the cascade dropped for
         // want of a font can finally be applied.
-        self.resolve_ch_lengths(&mut style, &ch_pending);
+        self.resolve_ch_lengths(&mut style, parent_style, &ch_pending);
 
         // MEDIA-AVF (#1332 R1): Chrome's UA sheet has `audio:not([controls]) { display:
         // none !important }`, which no author declaration beats (an `!important` UA
@@ -18697,6 +18933,16 @@ impl layout_ctx::LayoutCtx {
         value: &str,
     ) {
         if value.trim().eq_ignore_ascii_case("inherit") {
+            // A flow-relative size inherits as its physical property (LOGICAL-SIZE):
+            // `inline-size: inherit` is `width: inherit`.
+            let property = match (property, logical_to_physical(property)) {
+                (
+                    "inline-size" | "block-size" | "min-inline-size" | "min-block-size" | "max-inline-size"
+                    | "max-block-size",
+                    Some(LogicalMapping::Side(physical)),
+                ) => physical,
+                _ => property,
+            };
             if let Some(parent) = parent_style {
                 if Engine::inherit_property(style, parent, property) {
                     return;
@@ -18724,11 +18970,22 @@ impl layout_ctx::LayoutCtx {
     /// `margin: 1ch` followed by a later `margin-left: 2px` re-applies the
     /// shorthand and clobbers the longhand. Both are dropped entirely today,
     /// so this is strictly less wrong — but it is not the cascade.
-    fn resolve_ch_lengths(&self, style: &mut ComputedStyle, ch_pending: &ChPending) {
+    fn resolve_ch_lengths(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        ch_pending: &ChPending,
+    ) {
         if ch_pending.is_empty() {
             return;
         }
-        let advance = ch_advance_px(style);
+        // The parent's font-size as it computes: handed down in px, or a root-relative size.
+        let parent_font_px = match parent_style.map(|p| &p.font_size) {
+            Some(rustkit_css::Length::Px(px)) => *px,
+            Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
+            _ => 16.0,
+        };
+        let advance = ch_advance_px(style, parent_font_px);
         for (property, value) in ch_pending.winners() {
             let substituted = substitute_ch_units(value, advance);
             self.apply_style_property(style, property, &substituted);
@@ -21763,6 +22020,8 @@ impl layout_ctx::LayoutCtx {
         let _state = WalkCheckedScope::enter_for_svg_paint(state);
         let checked = &state.checked;
         let compute = |n: &Rc<Node>| -> Option<SvgPaintStyle> {
+            #[cfg(test)]
+            SVG_PAINT_COMPUTES.with(|c| c.set(c.get() + 1));
             let NodeType::Element { tag_name, attributes, .. } = &n.node_type else { return None };
             let keyed = KeyedElement::of(tag_name, attributes);
             // (important, specificity, order, property, value)
@@ -21876,13 +22135,21 @@ impl layout_ctx::LayoutCtx {
         viewport: Option<(f32, f32)>,
     ) -> Rc<SvgPaintRules> {
         let viewport_bits = viewport.map(|(w, h)| (w.to_bits(), h.to_bits()));
-        if let Some(kept) = self.svg_prepass.borrow().paint_rules.clone() {
-            let same = kept.inline.len() == inline.len()
-                && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
-                && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
-                && kept.viewport == viewport_bits
-                && kept.order == sheet_order;
-            if same {
+        {
+            let mut prepass = self.svg_prepass.borrow_mut();
+            // A set whose `<link>` sheets are gone can never match again.
+            prepass.paint_rules_kept.retain(|kept| kept.external.strong_count() > 0);
+            let found = prepass.paint_rules_kept.iter().position(|kept| {
+                kept.inline.len() == inline.len()
+                    && kept.inline.iter().zip(&inline).all(|(a, b)| Rc::ptr_eq(a, b))
+                    && std::ptr::eq(kept.external.as_ptr(), Rc::as_ptr(external))
+                    && kept.viewport == viewport_bits
+                    && kept.order == sheet_order
+            });
+            if let Some(at) = found {
+                let kept = prepass.paint_rules_kept.remove(at);
+                prepass.paint_rules_kept.push(kept.clone());
+                prepass.paint_rules = Some(kept.clone());
                 return kept;
             }
         }
@@ -21958,10 +22225,20 @@ impl layout_ctx::LayoutCtx {
             local,
             reads_state,
         });
-        self.svg_prepass.borrow_mut().paint_rules = Some(rules.clone());
+        let mut prepass = self.svg_prepass.borrow_mut();
+        prepass.paint_rules = Some(rules.clone());
+        // SVG_PAINT_RULES_KEPT sets: a page, its frames and a few more.
+        prepass.paint_rules_kept.push(rules.clone());
+        let over = prepass.paint_rules_kept.len().saturating_sub(SVG_PAINT_RULES_KEPT);
+        prepass.paint_rules_kept.drain(..over);
+        drop(prepass);
         rules
     }
 }
+
+/// How many sets of svg paint rules are kept (SVG-PREPASS-CACHE): enough for a page and its
+/// frames laid out in turn; each holds its `<style>` sheets, so not unbounded.
+const SVG_PAINT_RULES_KEPT: usize = 4;
 
 /// Where a rule of `SvgPaintRules` is: the n-th `<style>` sheet or the
 /// n-th `<link>` sheet.
@@ -29498,9 +29775,17 @@ fn substitute_ch_units(value: &str, advance: f32) -> String {
 /// The spec's fallback when the font has no "0" glyph is 0.5em; we use the
 /// same fallback if measurement returns nothing, so a missing font degrades
 /// to a defined value instead of collapsing the length to zero.
-fn ch_advance_px(style: &ComputedStyle) -> f32 {
+fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
+    // CH-REM-FONT-SIZE: the cascade has not absolutized this element's font-size yet, so a rem,
+    // em or % size is resolved here the way it will compute (rem against the root font, em and %
+    // against the parent's). Reading only px and falling back to 16px measured `16ch` at
+    // `font-size: 3.5rem` with a 16px "0" (GitHub's hero heading, Chrome 148: equal widths).
     let font_size = match style.font_size {
         rustkit_css::Length::Px(px) => px,
+        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
+        rustkit_css::Length::Em(v) => v * parent_font_px,
+        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
+        rustkit_css::Length::Zero => 0.0,
         _ => 16.0,
     };
     let measured = rustkit_layout::measure_text_advanced(
@@ -30131,8 +30416,9 @@ enum LogicalMapping {
 }
 
 
-/// css-logical-1 flow-relative margin / padding / inset / border names,
-/// mapped for horizontal-tb, ltr: inline-start = left, block-start = top.
+/// css-logical-1 flow-relative margin / padding / inset / border / size names,
+/// mapped for horizontal-tb, ltr: inline-start = left, block-start = top,
+/// inline-size = width.
 fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
     use LogicalMapping::{Both, Pair, Side};
     Some(match property {
@@ -30178,6 +30464,14 @@ fn logical_to_physical(property: &str) -> Option<LogicalMapping> {
         "inset-block-end" => Side("bottom"),
         "inset-inline" => Pair("left", "right"),
         "inset-block" => Pair("top", "bottom"),
+        // The flow-relative sizes (LOGICAL-SIZE, css-logical-1 §4.1). One property with the
+        // physical one for the cascade: mapped at the declaration, the later of the two wins.
+        "inline-size" => Side("width"),
+        "block-size" => Side("height"),
+        "min-inline-size" => Side("min-width"),
+        "min-block-size" => Side("min-height"),
+        "max-inline-size" => Side("max-width"),
+        "max-block-size" => Side("max-height"),
         _ => return None,
     })
 }

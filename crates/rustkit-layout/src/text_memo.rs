@@ -148,6 +148,17 @@ impl<K: Hash + Eq, V: Clone> TextMemo<K, V> {
     }
 
     pub(crate) fn get(&mut self, key: &K) -> Option<V> {
+        // `Rc<K>: Borrow<K>`: one lookup body, so the two can't drift.
+        self.get_by(key)
+    }
+
+    /// [`Self::get`] by a borrowed form of the key (TEXT-MEMO-KEY): a lookup
+    /// that builds no owned key. Same answer, same promotion.
+    pub(crate) fn get_by<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        Q: ?Sized + Hash + Eq,
+        Rc<K>: std::borrow::Borrow<Q>,
+    {
         if memos_off() {
             return None;
         }
@@ -157,7 +168,6 @@ impl<K: Hash + Eq, V: Clone> TextMemo<K, V> {
         }
         let (value, weight) = self.recent.get(key)?;
         let (value, weight) = (value.clone(), *weight);
-        // Promote it when that costs no used entry its place.
         if self.used + weight <= self.budget || self.slot_under_hand_is_unused() {
             let (key, (v, w)) = self.recent.remove_entry(key).expect("just found");
             self.recent_used -= w;

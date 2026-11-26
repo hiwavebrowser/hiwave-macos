@@ -1306,6 +1306,25 @@ pub(crate) fn shape_memo_misses() -> usize {
     MISSES.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: characters passed to `TextShaper::shape` on this thread (WRAP-WINDOW).
+    static SHAPED_CHARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: characters passed to `TextShaper::shape` on this thread so far.
+#[cfg(test)]
+pub(crate) fn shaped_chars() -> usize {
+    SHAPED_CHARS.with(|c| c.get())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: wrap against the whole rest of a paragraph, as before WRAP-WINDOW (the
+    /// differential test's reference).
+    pub(crate) static WRAP_WINDOW_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Bytes the per-thread shaped-text memo of [`TextShaper::shape`] may hold
 /// (SHAPED-CAP), its queue of turned-away strings included; past it, entries
 /// are evicted one at a time (`text_memo`), never all at once. Each entry is
@@ -1750,6 +1769,8 @@ impl TextShaper {
         stretch: FontStretch,
         size: f32,
     ) -> Result<ShapedRun, TextError> {
+        #[cfg(test)]
+        SHAPED_CHARS.with(|c| c.set(c.get() + text.chars().count()));
         // `font-size: 0`: no glyph, no advance, no extent. Core Text is not
         // asked: it answers a size of 0 with its default size, so text that
         // a page had hidden this way was measured about 12px tall.
@@ -2870,11 +2891,12 @@ impl TextShaper {
                 max_width
             };
 
-            // Shape the remaining text to find where we need to break
+            // Shape the remaining text to find where we need to break: a window of it that is
+            // sure to overflow the line (WRAP-WINDOW), or all of it when it is shorter.
             let remaining = &text[line_start..];
-            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+            let (window, shaped) = self.overflowing_window(remaining, font_chain, weight, style, stretch, size, cur_max)?;
 
-            if shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
+            if window.len() == remaining.len() && shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -2886,10 +2908,10 @@ impl TextShaper {
                 break;
             }
 
-            // Need to find a break point
-            // Binary search for the right break point
+            // Need to find a break point. Within the window: a break past it cannot fit, since
+            // the window alone overflows the line.
             let break_offset = self.find_line_break(
-                remaining,
+                window,
                 font_chain,
                 weight,
                 style,
@@ -2898,6 +2920,7 @@ impl TextShaper {
                 cur_max,
                 breaker,
                 !preserve_spaces,
+                window.len() < remaining.len(),
             )?;
 
             if break_offset == 0 {
@@ -2928,7 +2951,7 @@ impl TextShaper {
                     // does not break after the first character). Minimum one
                     // grapheme so the loop always advances.
                     let boundaries =
-                        rustkit_text::segmentation::grapheme_boundaries(remaining);
+                        rustkit_text::segmentation::grapheme_boundaries(window);
                     let mut fitted = 0usize;
                     for &offset in boundaries.iter().skip(1) {
                         let shaped_prefix = self.shape(
@@ -3004,6 +3027,42 @@ impl TextShaper {
     }
 
     /// Find the best line break point within max_width.
+    /// WRAP-WINDOW: the start of `remaining` that a line of `max_width` cannot hold, shaped:
+    /// grown (512 characters, doubling) until its width passes twice the line plus four ems, or
+    /// all of `remaining` when that is shorter. Shaping the whole rest of a paragraph for every
+    /// line made wrapping it cost the square of its length (Speedometer Editor-TipTap's 270 KB
+    /// document: ~2.6 s a layout). The margin keeps the answers the whole text would give: a
+    /// break opportunity past the window cannot fit, and the line-break rules and the shaping
+    /// around the cut look only a few characters ahead, well inside it.
+    #[allow(clippy::too_many_arguments)]
+    fn overflowing_window<'t>(
+        &self,
+        remaining: &'t str,
+        font_chain: &FontFamilyChain,
+        weight: FontWeight,
+        style: FontStyle,
+        stretch: FontStretch,
+        size: f32,
+        max_width: f32,
+    ) -> Result<(&'t str, ShapedRun), TextError> {
+        let enough = 2.0 * max_width.max(0.0) + 4.0 * size.max(1.0);
+        #[cfg(test)]
+        if WRAP_WINDOW_OFF.with(|w| w.get()) {
+            let shaped = self.shape(remaining, font_chain, weight, style, stretch, size)?;
+            return Ok((remaining, shaped));
+        }
+        let mut chars = 512usize;
+        loop {
+            let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
+            let window = &remaining[..end];
+            let shaped = self.shape(window, font_chain, weight, style, stretch, size)?;
+            if end == remaining.len() || shaped.metrics.width > enough {
+                return Ok((window, shaped));
+            }
+            chars *= 2;
+        }
+    }
+
     fn find_line_break(
         &self,
         text: &str,
@@ -3015,16 +3074,21 @@ impl TextShaper {
         max_width: f32,
         breaker: &LineBreaker,
         hang_trailing_spaces: bool,
+        truncated: bool,
     ) -> Result<usize, TextError> {
-        // Get all break opportunities
-        let break_offsets = breaker.break_offsets(text);
-
         // Find the last break that fits
         let mut best_break = 0;
 
-        for &offset in &break_offsets {
+        for opportunity in breaker.break_opportunities(text) {
+            let offset = opportunity.offset;
             if offset == 0 {
                 continue;
+            }
+            // WRAP-WINDOW (Prometheus's R1 nit): the end of a truncated window is not a break
+            // opportunity of the whole text; inside a run of preserved spaces it would close the
+            // line mid-run.
+            if truncated && offset >= text.len() {
+                break;
             }
 
             // css-text-3 §4.1.3: collapsible spaces at the end of a line are
@@ -3393,6 +3457,105 @@ impl Default for FontLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WRAP-WINDOW (STRESS-SPEED, Speedometer Editor-TipTap): wrapping one long paragraph shaped
+    /// the whole rest of it for every line (to ask whether it fits) and listed the break
+    /// opportunities of the whole rest too, so its cost grew with the square of its length (on
+    /// Windows, one paragraph's full layout: 5k chars 26.6 ms, 10k 76.5, 20k 237, 40k 732;
+    /// docs/diagnostics/2026-11-24/STRESS-SPEED-editor-tiptap.md). A line needs only a window of
+    /// text that is sure to overflow it.
+    /// WRAP-WINDOW (Prometheus's R1 nit 2): the window changes how much is shaped, not where the
+    /// lines break. Each case is wrapped against the window and against the whole rest of the
+    /// paragraph (`WRAP_WINDOW_OFF`, the code before WRAP-WINDOW), and the lines must be the same:
+    /// prose, pre-wrap with long runs of spaces (a window can end inside one), break-spaces, one
+    /// word longer than the window under break-all and under overflow-wrap: anywhere, and a narrow
+    /// first line.
+    #[test]
+    fn wrapping_against_the_window_breaks_where_the_whole_text_does() {
+        let prose: String = (0..2400).map(|i| ["Longtemps,", "je", "me", "suis", "couché", "de", "bonne", "heure."][i % 8]).collect::<Vec<_>>().join(" ");
+        let spaced: String = (0..60).map(|i| format!("word{i}{}", " ".repeat(40 + (i * 37) % 1200))).collect();
+        let long_word = format!("{} b c {} d", "a".repeat(3000), "e".repeat(900));
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        // (label, text, first line width, white-space, word-break, overflow-wrap)
+        let cases: Vec<(&str, &str, f32, WhiteSpace, CssWordBreak, CssOverflowWrap)> = vec![
+            ("prose", &prose, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("pre-wrap space runs", &spaced, 780.0, WhiteSpace::PreWrap, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("break-spaces space runs", &spaced, 780.0, WhiteSpace::BreakSpaces, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("a long word, break-all", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::BreakAll, CssOverflowWrap::Normal),
+            ("a long word, anywhere", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Anywhere),
+            ("a long word, normal", &long_word, 780.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+            ("a narrow first line", &prose, 90.0, WhiteSpace::Normal, CssWordBreak::Normal, CssOverflowWrap::Normal),
+        ];
+        let wrap = |text: &str, first: f32, ws: WhiteSpace, wb: CssWordBreak, ow: CssOverflowWrap, off: bool| {
+            WRAP_WINDOW_OFF.with(|w| w.set(off));
+            let lines = shaper
+                .wrap_text_mid_line_white_space(
+                    text,
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    13.0,
+                    first,
+                    780.0,
+                    wb,
+                    ow,
+                    ws,
+                )
+                .expect("wrap");
+            WRAP_WINDOW_OFF.with(|w| w.set(false));
+            lines.iter().map(|l| (l.start_offset, l.end_offset, (l.width * 64.0).round() as i64)).collect::<Vec<_>>()
+        };
+        for (label, text, first, ws, wb, ow) in cases {
+            let windowed = wrap(text, first, ws, wb, ow, false);
+            let whole = wrap(text, first, ws, wb, ow, true);
+            assert!(windowed.len() > 3, "{label}: {} lines", windowed.len());
+            assert_eq!(windowed, whole, "{label}: the window breaks where the whole text does");
+        }
+    }
+
+    #[test]
+    fn wrapping_a_long_paragraph_shapes_each_part_of_it_a_bounded_number_of_times() {
+        let words = ["Longtemps,", "je", "me", "suis", "couché", "de", "bonne", "heure.", "Parfois,", "à",
+            "peine", "ma", "bougie", "éteinte,", "mes", "yeux", "se", "fermaient", "si", "vite"];
+        let mut text = String::new();
+        let mut i = 0;
+        while text.chars().count() < 20_000 {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(words[(i * 7 + i / 3) % words.len()]);
+            i += 1;
+        }
+        let n = text.chars().count();
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let before = shaped_chars();
+        let lines = shaper
+            .wrap_text_white_space(
+                &text,
+                &chain,
+                FontWeight::NORMAL,
+                FontStyle::Normal,
+                FontStretch::Normal,
+                13.0,
+                780.0,
+                CssWordBreak::Normal,
+                CssOverflowWrap::Normal,
+                WhiteSpace::Normal,
+            )
+            .expect("wrap");
+        let shaped = shaped_chars() - before;
+        assert!(lines.len() > 50, "{} lines", lines.len());
+        assert!(lines.iter().all(|l| l.width <= 780.0 + 0.5), "every line fits");
+        assert!(
+            shaped < 30 * n,
+            "wrapping {n} characters into {} lines shaped {shaped} characters ({}x)",
+            lines.len(),
+            shaped / n
+        );
+    }
 
     #[test]
     fn a_fallback_face_taller_than_the_line_sets_both_extents() {

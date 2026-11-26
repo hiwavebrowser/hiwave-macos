@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import re
 import shutil
 import signal
@@ -362,9 +363,48 @@ def unobserved(engine, log_text, runner):
     return why
 
 
+# STRESS-WINDOWS: the parts of a run that differ on Windows. There is no load average, no
+# sandbox-exec and no lsof; the load is read from the processors' current use, the engine runs
+# without a sandbox (its request log and the socket watch still say whether anything left the
+# machine), and the socket watch reads `netstat -ano`.
+WINDOWS = sys.platform == "win32"
+SANDBOXED = sys.platform == "darwin"
+
+
+def load_avg():
+    """The (1, 5, 15)-minute load average. Windows has none: there it is the processors' current
+    use (Win32_Processor LoadPercentage, averaged over the processors) times the logical CPU
+    count, the same figure three times: an instantaneous load, comparable in scale."""
+    if hasattr(os, "getloadavg"):
+        return os.getloadavg()
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average"],
+            capture_output=True, text=True, timeout=30)
+        pct = float(r.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return (float("inf"),) * 3  # unknown: never read as idle
+    load = round(pct / 100.0 * (os.cpu_count() or 1), 2)
+    return (load, load, load)
+
+
+def finite_load(load):
+    """A load for the record: an unreadable one (inf) is null, which strict JSON readers take."""
+    return [round(x, 2) if x != float("inf") else None for x in load]
+
+
+def host_info():
+    u = platform.uname()
+    return {"cpus": os.cpu_count(), "machine": u.machine, "os": (u.system + " " + u.version) if WINDOWS else u.release}
+
+
 def sandboxed(binary, work):
     """A launcher for `binary` under SANDBOX_PROFILE. It `exec`s, so the
-    process the caller starts and stops is the engine itself."""
+    process the caller starts and stops is the engine itself. Off macOS there
+    is no sandbox-exec: the binary itself (see SANDBOXED)."""
+    if not SANDBOXED:
+        return binary
     profile = work / "loopback-only.sb"
     profile.write_text(SANDBOX_PROFILE)
     launcher = work / ("sandboxed-" + pathlib.Path(binary).name)
@@ -396,7 +436,7 @@ class SocketWatch:
     def loop(self):
         while not self.stop.is_set():
             for pid in list(self.pids):
-                out = lsof_sockets(pid)
+                out = netstat_sockets(pid) if WINDOWS else lsof_sockets(pid)
                 if out is None:
                     self.failed += 1  # not an answer: never read as "no sockets"
                     continue
@@ -422,6 +462,32 @@ def lsof_sockets(pid):
     if r.returncode == 0 or (r.returncode == 1 and not r.stderr.strip()):
         return r.stdout
     return None
+
+
+def netstat_sockets(pid):
+    """`pid`'s TCP connections from `netstat -ano`, as `lsof -Fn` name lines
+    (`n127.0.0.1:50000->127.0.0.1:443`), or None when netstat did not answer.
+    Listening sockets and UDP have no remote end and are left out."""
+    try:
+        r = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return parse_netstat(r.stdout, pid)
+
+
+def parse_netstat(text, pid):
+    lines = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 5 or not parts[0].upper().startswith("TCP") or parts[4] != str(pid):
+            continue
+        remote = parts[2]
+        if remote in ("0.0.0.0:0", "[::]:0", "*:*"):
+            continue
+        lines.append("n%s->%s" % (parts[1], remote))
+    return "\n".join(lines)
 
 
 def is_loopback(host):
@@ -474,7 +540,7 @@ def off_machine(engine, sink, watch_peers, log_hosts, events):
 def wait_for_load(limit, wait_s):
     """Block until the 1-minute load is below `limit`; False if it never was."""
     end = time.time() + wait_s
-    while os.getloadavg()[0] >= limit:
+    while load_avg()[0] >= limit:
         if time.time() >= end:
             return False
         time.sleep(15)
@@ -482,6 +548,11 @@ def wait_for_load(limit, wait_s):
 
 
 def hid_idle_seconds():
+    # The real-window arm reads the HID idle time from ioreg, which is macOS's: off macOS the run
+    # is refused (exit 2) rather than ending in a traceback.
+    if sys.platform != "darwin":
+        raise SystemExit("the real-window arm (--engine hiwave, or --headed) needs macOS: the HID idle "
+                         "time is read with ioreg")
     r = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True)
     m = re.search(r'"HIDIdleTime" = (\d+)', r.stdout)
     return int(m.group(1)) / 1e9 if m else 0.0
@@ -838,6 +909,26 @@ def scores(suite, record):
     return r.get("score"), r.get("tests") or {}, {"failedTest": r.get("failedTest")}
 
 
+# The engine's running totals of frame spares (rustkit-engine refill_spare, SPARE-COST): one INFO line
+# per spare built, "frames spare built: total N in M ms". The last one is the run's total.
+SPARE_LINE = re.compile(r"frames spare built: total (\d+) in ([0-9.]+) ms")
+
+
+def log_spares(path):
+    """The record's `frame_spares`: {"built": N, "ms": M} from the engine log's last spare line, zeros when
+    the log has none (no spare was built), None when there is no log to read."""
+    try:
+        text = pathlib.Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    last = None
+    for m in SPARE_LINE.finditer(text):
+        last = m
+    if last is None:
+        return {"built": 0, "ms": 0.0}
+    return {"built": int(last.group(1)), "ms": round(float(last.group(2)), 1)}
+
+
 def log_findings(path):
     """Lines of the app's log that say why a page stopped (shapes only)."""
     try:
@@ -1000,8 +1091,14 @@ def main():
         sys.exit("no binary at %s" % binary)
     max_load = min(args.max_load, START_LOAD)
     if not wait_for_load(max_load, args.load_wait):
-        print("1-minute load %.1f stayed at or above %.1f for %d s; not run"
-              % (os.getloadavg()[0], max_load, args.load_wait), file=sys.stderr)
+        now = load_avg()[0]
+        if now == float("inf"):
+            # Windows: Win32_Processor.LoadPercentage gave no number (some VMs do not report it).
+            print("the load is unreadable on this host (no Win32_Processor.LoadPercentage); not run",
+                  file=sys.stderr)
+        else:
+            print("1-minute load %.1f stayed at or above %.1f for %d s; not run"
+                  % (now, max_load, args.load_wait), file=sys.stderr)
         return 2
     root, pin = check_pin(args.suite)
     limit = args.timeout or SUITE[args.suite]["timeout"]
@@ -1044,15 +1141,16 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, bail)
-    signal.signal(signal.SIGHUP, bail)
-    load_before = os.getloadavg()
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, bail)
+    load_before = load_avg()
     started = time.time()
     try:
         with (WindowLock(limit + 60, args.lock_wait) if visible else NoLock()) as lock:
             try:
                 refused = None
                 if not wait_for_load(max_load, args.load_wait):
-                    refused = "load rose to %.1f while waiting for the window" % os.getloadavg()[0]
+                    refused = "load rose to %.1f while waiting for the window" % load_avg()[0]
                 else:
                     try:
                         lock.clear_to_launch()
@@ -1063,7 +1161,7 @@ def main():
                     httpd.shutdown()
                     shutil.rmtree(work, ignore_errors=True)
                     sys.exit(2)  # the lock is released on the way out
-                load_before = os.getloadavg()
+                load_before = load_avg()
                 started = time.time()
                 record.t0 = record.last = started
                 if args.engine != "chrome":
@@ -1166,9 +1264,9 @@ def main():
         "sub_scores": sub,
         "detail": detail,
         "wall_s": wall,
-        "load_avg_before": [round(x, 2) for x in load_before],
+        "load_avg_before": finite_load(load_before),
         "load_valid": load_before[0] < SCORE_LOAD,
-        "load_avg_after": [round(x, 2) for x in os.getloadavg()],
+        "load_avg_after": finite_load(load_avg()),
         "started": datetime.datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "exit_code": exit_code,
         "errors": record.errors,
@@ -1182,6 +1280,7 @@ def main():
         "log_findings": findings,
         # Uncaught exceptions and rejections in the engine's own log (the app's console log).
         "engine_errors": log_uncaught(work / "app.log") if handle is not None else [],
+        "frame_spares": log_spares(work / "app.log") if handle is not None and args.engine != "chrome" else None,
         # Console lines that read like such a record but not behind the engine's own prefix: left out
         # of `engine_errors`, counted here. Not zero = a record was dropped or imitated; read the log.
         "engine_errors_refused": log_console_refused(work / "app.log") if handle is not None else 0,
@@ -1194,11 +1293,12 @@ def main():
         # Set only when the run raised the live-turn watchdog (HIWAVE_STRESS_TURN_BUDGET_MS).
         "live_turn_budget_ms": turn_budget,
         "offline_checks": (["sink_proxy"] if sink is not None else
-                           ["loopback-only sandbox",
+                           (["loopback-only sandbox"] if SANDBOXED else [])
+                           + [
                             "sockets (%d samples, %d failed)" % ((watch.samples, watch.failed) if watch else (0, 0)),
                             "engine_log_urls"]
                            + (["event_log_origins"] if events else [])),
-        "host": {"cpus": os.cpu_count(), "machine": os.uname().machine, "os": os.uname().release},
+        "host": host_info(),
     }
     if status not in ("ok",):
         run["log_tail"] = tail

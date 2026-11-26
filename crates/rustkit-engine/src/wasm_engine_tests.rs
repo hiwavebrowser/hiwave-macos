@@ -73,3 +73,28 @@ fn a_page_that_used_webassembly_is_released_after_navigation() {
     boa_gc::force_collect();
     assert_eq!(first.strong_count(), 0, "the replaced document is still held after a collection");
 }
+
+/// On, with spares (#1440): a frame a script inserts takes a pre-built spare
+/// and has its window inside the insertion; that realm has `WebAssembly` too,
+/// as a frame the drain attaches does (every frame has it in Chrome).
+#[test]
+fn on_a_script_inserted_frame_from_a_spare_has_it() {
+    let config = EngineConfig { webassembly: true, nested_contexts: true, post_load_requests_live: true, ..EngineConfig::default() };
+    let mut engine = Engine::new(config).expect("engine");
+    let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
+    engine.load_html(view, "<html><body><iframe id=magic></iframe></body></html>").expect("load");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    for _ in 0..6 {
+        rt.block_on(engine.pump_live(view, 20));
+    }
+    assert_eq!(
+        engine
+            .execute_script(
+                view,
+                "var f = document.createElement('iframe'); document.body.appendChild(f); \
+                 [f.contentWindow !== null, f.contentWindow && typeof f.contentWindow.WebAssembly].join()"
+            )
+            .expect("js"),
+        r#"String("true,object")"#
+    );
+}

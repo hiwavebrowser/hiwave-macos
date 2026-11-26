@@ -77,10 +77,36 @@ def test_a_run_started_under_load_keeps_its_record_but_not_its_score(tmp_path):
 
 
 def test_nothing_starts_at_or_above_the_load_limit(monkeypatch):
-    monkeypatch.setattr(run.os, "getloadavg", lambda: (6.5, 6.0, 6.0))
+    monkeypatch.setattr(run, "load_avg", lambda: (6.5, 6.0, 6.0))
     assert run.wait_for_load(run.START_LOAD, 0) is False
-    monkeypatch.setattr(run.os, "getloadavg", lambda: (2.9, 6.0, 6.0))
+    monkeypatch.setattr(run, "load_avg", lambda: (2.9, 6.0, 6.0))
     assert run.wait_for_load(run.SCORE_LOAD, 0) is True
+
+
+def test_the_load_is_read_on_every_platform():
+    # STRESS-WINDOWS: macOS / Linux read the load average; Windows has none and reads the
+    # processors' use times the CPU count. Either way three finite numbers.
+    load = run.load_avg()
+    assert len(load) == 3 and all(0 <= x < float("inf") for x in load), load
+
+
+def test_windows_netstat_lines_read_as_lsof_names():
+    # STRESS-WINDOWS: `netstat -ano` stands in for `lsof -i`: this process's TCP connections,
+    # listening sockets and other processes left out.
+    text = "\n".join([
+        "Active Connections",
+        "  Proto  Local Address          Foreign Address        State           PID",
+        "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       123",
+        "  TCP    127.0.0.1:5000         127.0.0.1:6000         ESTABLISHED     123",
+        "  TCP    192.168.1.5:50000      203.0.113.7:443        ESTABLISHED     123",
+        "  TCP    192.168.1.5:50001      198.51.100.9:443       ESTABLISHED     999",
+        "  TCP    [::1]:7000             [::1]:7001             ESTABLISHED     123",
+        "  UDP    0.0.0.0:5353           *:*                                    123",
+    ])
+    names = run.parse_netstat(text, 123)
+    assert names.splitlines() == ["n127.0.0.1:5000->127.0.0.1:6000", "n192.168.1.5:50000->203.0.113.7:443",
+                                  "n[::1]:7000->[::1]:7001"], names
+    assert run.off_machine_peers(names) == {"203.0.113.7:443"}
 
 
 def test_the_server_adds_the_reporter_and_takes_the_result(tmp_path):
@@ -929,3 +955,34 @@ def test_the_chrome_reader_splits_main_thread_self_time_and_counts_other_threads
     assert s["main_other"] == 1.1  # BeginMainFrame's own time: 5.0 - 3.9
     assert (s["compositor"], s["gpu_main"]) == (0.8, 0.3), out  # whole tasks, children once
     assert out["frame_interval_ms"] == 16.0 and out["frames"] >= 4
+
+
+def test_an_unreadable_load_is_null_in_the_record():
+    # Prometheus's R1 nit on #1445: json.dumps writes inf as Infinity, which strict readers reject.
+    assert run.finite_load((float("inf"), 1.234, 2.0)) == [None, 1.23, 2.0]
+    assert json.loads(json.dumps(run.finite_load((float("inf"),) * 3))) == [None, None, None]
+
+
+def test_the_real_window_arm_is_refused_off_macos(monkeypatch):
+    # Prometheus's R1 nit on #1445: off macOS there is no ioreg; the run is refused, not a traceback.
+    monkeypatch.setattr(run.sys, "platform", "win32")
+    try:
+        run.hid_idle_seconds()
+    except SystemExit as e:
+        assert "needs macOS" in str(e)
+    else:
+        raise AssertionError("hid_idle_seconds did not refuse off macOS")
+
+
+def test_frame_spares_read_the_engines_last_running_total(tmp_path):
+    # SPARE-COST: the engine logs running totals per spare built; the record keeps the last.
+    log = tmp_path / "app.log"
+    log.write_text(
+        "2026-11-26T02:00:00.000Z  INFO rustkit_engine: frames spare built: total 1 in 134.2 ms\n"
+        "2026-11-26T02:00:01.000Z  INFO rustkit_engine: frames spare built: total 2 in 270.04 ms\n"
+        "2026-11-26T02:00:02.000Z  INFO rustkit_engine: something else\n")
+    assert run.log_spares(log) == {"built": 2, "ms": 270.0}
+    none = tmp_path / "quiet.log"
+    none.write_text("no spares here\n")
+    assert run.log_spares(none) == {"built": 0, "ms": 0.0}
+    assert run.log_spares(tmp_path / "missing.log") is None
