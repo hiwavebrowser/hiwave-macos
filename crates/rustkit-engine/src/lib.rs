@@ -1291,6 +1291,12 @@ pub enum EngineEvent {
 /// Add `image/avif` back when a decoder lands.
 const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
 
+/// Frame spares built in this process and the time spent building them
+/// (`Engine::refill_spare`), logged at INFO on each build for the stress
+/// harness's record (SPARE-COST). Process-wide: a stress run is one engine.
+static SPARES_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPARE_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// View state.
 #[allow(dead_code)]
 /// The document side of a subresource request (see
@@ -7389,6 +7395,7 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "too_deep");
             return;
         }
+        let started = std::time::Instant::now();
         let Ok(child) = parent.new_child() else { return };
         let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
             .ok()
@@ -7408,7 +7415,15 @@ impl Engine {
         }
         child.inherit_origin_from(parent);
         match parent.offer_spare(child) {
-            Ok(true) => debug!(target: "frames_spare", outcome = "built"),
+            Ok(true) => {
+                debug!(target: "frames_spare", outcome = "built");
+                use std::sync::atomic::Ordering::Relaxed;
+                let built = SPARES_BUILT.fetch_add(1, Relaxed) + 1;
+                let took = started.elapsed().as_micros() as u64;
+                let us = SPARE_BUILD_US.fetch_add(took, Relaxed) + took;
+                // Running totals, the stress harness's `frame_spares` (tools/stress/run.py, log_spares).
+                info!("frames spare built: total {} in {:.1} ms", built, us as f64 / 1000.0);
+            }
             Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
             Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }

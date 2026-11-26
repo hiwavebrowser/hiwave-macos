@@ -972,3 +972,17 @@ def test_the_real_window_arm_is_refused_off_macos(monkeypatch):
         assert "needs macOS" in str(e)
     else:
         raise AssertionError("hid_idle_seconds did not refuse off macOS")
+
+
+def test_frame_spares_read_the_engines_last_running_total(tmp_path):
+    # SPARE-COST: the engine logs running totals per spare built; the record keeps the last.
+    log = tmp_path / "app.log"
+    log.write_text(
+        "2026-11-26T02:00:00.000Z  INFO rustkit_engine: frames spare built: total 1 in 134.2 ms\n"
+        "2026-11-26T02:00:01.000Z  INFO rustkit_engine: frames spare built: total 2 in 270.04 ms\n"
+        "2026-11-26T02:00:02.000Z  INFO rustkit_engine: something else\n")
+    assert run.log_spares(log) == {"built": 2, "ms": 270.0}
+    none = tmp_path / "quiet.log"
+    none.write_text("no spares here\n")
+    assert run.log_spares(none) == {"built": 0, "ms": 0.0}
+    assert run.log_spares(tmp_path / "missing.log") is None
