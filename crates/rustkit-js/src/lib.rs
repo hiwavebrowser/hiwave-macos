@@ -2263,7 +2263,19 @@ impl JsRuntime {
                     }
                     // SCRIPT-SPLIT: timed from here (conversions included) when on.
                     let mut call = host_calls::enter(slot);
-                    let args: Vec<JsValue> = args.iter().map(from_boa_value).collect();
+                    // Stack-allocated argument conversion for <= 8 args (avoids a heap Vec
+                    // allocation on every DOM/CSSOM/Canvas host call).
+                    let mut inline_buf: [JsValue; 8] = std::array::from_fn(|_| JsValue::Undefined);
+                    let heap_buf: Vec<JsValue>;
+                    let args: &[JsValue] = if args.len() <= 8 {
+                        for (dst, src) in inline_buf.iter_mut().zip(args.iter()) {
+                            *dst = from_boa_value(src);
+                        }
+                        &inline_buf[..args.len()]
+                    } else {
+                        heap_buf = args.iter().map(from_boa_value).collect();
+                        &heap_buf
+                    };
                     // The operation key only for a timed call: off, nothing more than the flag.
                     if let Some(i) = op_arg.filter(|_| call.timed()) {
                         call.op(host_calls::op_key(match args.get(i) {
@@ -2288,6 +2300,268 @@ impl JsRuntime {
             let _ = (name, length, function, with_caller, op_arg);
             Err(JsError::NotInitialized)
         }
+    }
+
+    /// Register a global factory `name(proto, gen, id)` that creates a `JsObject` with
+    /// prototype `proto` and an internal native slot `(tag, gen, id)` invisible to JS.
+    /// Direct native methods registered with [`register_slot_f64_method`] downcast `this`
+    /// to this slot in O(1) without a JS `WeakMap` or JS wrapper function.
+    pub fn register_slot_factory(&mut self, name: &str, tag: u32) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsNativeError, JsString, JsValue as BoaValue, NativeFunction};
+            let native = NativeFunction::from_copy_closure(move |_this, args, context| {
+                let proto = args.first().and_then(|v| v.as_object());
+                let gen = args
+                    .get(1)
+                    .map(|v| v.to_number(context))
+                    .transpose()?
+                    .unwrap_or(0.0) as u64;
+                let id = args
+                    .get(2)
+                    .map(|v| v.to_number(context))
+                    .transpose()?
+                    .unwrap_or(0.0) as usize;
+                let Some(proto) = proto else {
+                    return Err(JsNativeError::typ().with_message("prototype must be an object").into());
+                };
+                let obj = boa_engine::object::ObjectInitializer::with_native_data_and_proto(
+                    HostSlot { tag, gen, id },
+                    proto,
+                    context,
+                )
+                .build();
+                Ok(BoaValue::from(obj))
+            });
+            self.context
+                .register_global_callable(JsString::from(name), 3, native)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (name, tag);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Register a direct native method `global_name` for objects created by
+    /// [`register_slot_factory`] with `tag`. Validates `this`, checks `args.len() >= min_args`,
+    /// converts `min_args` arguments left-to-right via ECMAScript `ToNumber` into a stack
+    /// `[f64; 6]` buffer (zero heap allocation, zero JS wrapper bytecode), and invokes `f`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_slot_f64_method(
+        &mut self,
+        global_name: &str,
+        tag: u32,
+        min_args: usize,
+        iface_name: &'static str,
+        member_name: &'static str,
+        timing_slot_name: &'static str,
+        op_name: &'static str,
+        f: Box<dyn Fn(u64, usize, &[f64])>,
+    ) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsNativeError, JsValue as BoaValue, NativeFunction};
+            let slot = host_calls::slot(timing_slot_name);
+            let deadline = self.deadline.clone();
+            // SAFETY: `f` holds only Rust state (no GC-managed Boa objects).
+            let native = unsafe {
+                NativeFunction::from_closure(move |this, args, context| {
+                    check_host_deadline(&deadline, context)?;
+                    let mut call = host_calls::enter(slot);
+                    if call.timed() {
+                        call.op(host_calls::op_key(Some(op_name)));
+                    }
+                    let Some(host_slot) = this
+                        .as_object()
+                        .and_then(|o| o.downcast_ref::<HostSlot>().map(|s| *s))
+                        .filter(|s| s.tag == tag)
+                    else {
+                        return Err(JsNativeError::typ().with_message("Illegal invocation").into());
+                    };
+                    if args.len() < min_args {
+                        let s = if min_args == 1 { "" } else { "s" };
+                        return Err(JsNativeError::typ()
+                            .with_message(format!(
+                                "Failed to execute '{member_name}' on '{iface_name}': {min_args} argument{s} required, but only {} present.",
+                                args.len()
+                            ))
+                            .into());
+                    }
+                    let mut nums = [0.0f64; 6];
+                    for (dst, arg) in nums[..min_args].iter_mut().zip(args.iter()) {
+                        *dst = arg.to_number(context)?;
+                    }
+                    f(host_slot.gen, host_slot.id, &nums[..min_args]);
+                    Ok(BoaValue::undefined())
+                })
+            };
+            self.define_global_method(global_name, member_name, min_args, native)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (global_name, tag, min_args, iface_name, member_name, timing_slot_name, op_name, f);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Direct native `CanvasRenderingContext2D.prototype.arc(x, y, r, a0, a1, ccw?)`.
+    pub fn register_slot_arc_method(
+        &mut self,
+        global_name: &str,
+        tag: u32,
+        timing_slot_name: &'static str,
+        f: Box<dyn Fn(u64, usize, [f64; 5], bool) -> bool>,
+    ) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsError as BoaErr, JsNativeError, JsString, JsValue as BoaValue, NativeFunction};
+            let slot = host_calls::slot(timing_slot_name);
+            let deadline = self.deadline.clone();
+            // SAFETY: `f` holds only Rust state (no GC-managed Boa objects).
+            let native = unsafe {
+                NativeFunction::from_closure(move |this, args, context| {
+                    check_host_deadline(&deadline, context)?;
+                    let mut call = host_calls::enter(slot);
+                    if call.timed() {
+                        call.op(host_calls::op_key(Some("arc")));
+                    }
+                    let Some(host_slot) = this
+                        .as_object()
+                        .and_then(|o| o.downcast_ref::<HostSlot>().map(|s| *s))
+                        .filter(|s| s.tag == tag)
+                    else {
+                        return Err(JsNativeError::typ().with_message("Illegal invocation").into());
+                    };
+                    if args.len() < 5 {
+                        return Err(JsNativeError::typ()
+                            .with_message(format!(
+                                "Failed to execute 'arc' on 'CanvasRenderingContext2D': 5 arguments required, but only {} present.",
+                                args.len()
+                            ))
+                            .into());
+                    }
+                    let mut nums = [0.0f64; 5];
+                    for (dst, arg) in nums.iter_mut().zip(args.iter()) {
+                        *dst = arg.to_number(context)?;
+                    }
+                    let ccw = args.get(5).is_some_and(|v| v.to_boolean());
+                    if !f(host_slot.gen, host_slot.id, nums, ccw) {
+                        let msg = "Failed to execute 'arc' on 'CanvasRenderingContext2D': The radius provided is negative.";
+                        if let Ok(ctor) = context.global_object().get(JsString::from("DOMException"), context) {
+                            if let Some(ctor) = ctor.as_constructor() {
+                                if let Ok(err) = ctor.construct(
+                                    &[BoaValue::from(JsString::from(msg)), BoaValue::from(JsString::from("IndexSizeError"))],
+                                    Some(&ctor),
+                                    context,
+                                ) {
+                                    return Err(BoaErr::from_opaque(err.into()));
+                                }
+                            }
+                        }
+                        return Err(JsNativeError::error().with_message(msg).into());
+                    }
+                    Ok(BoaValue::undefined())
+                })
+            };
+            self.define_global_method(global_name, "arc", 5, native)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (global_name, tag, timing_slot_name, f);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Direct native `CanvasRenderingContext2D.prototype.fill(fillRule?)`.
+    pub fn register_slot_fill_method(
+        &mut self,
+        global_name: &str,
+        tag: u32,
+        timing_slot_name: &'static str,
+        f: Box<dyn Fn(u64, usize, bool)>,
+    ) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsNativeError, JsValue as BoaValue, NativeFunction};
+            let slot = host_calls::slot(timing_slot_name);
+            let deadline = self.deadline.clone();
+            // SAFETY: `f` holds only Rust state (no GC-managed Boa objects).
+            let native = unsafe {
+                NativeFunction::from_closure(move |this, args, context| {
+                    check_host_deadline(&deadline, context)?;
+                    let mut call = host_calls::enter(slot);
+                    if call.timed() {
+                        call.op(host_calls::op_key(Some("fill")));
+                    }
+                    let Some(host_slot) = this
+                        .as_object()
+                        .and_then(|o| o.downcast_ref::<HostSlot>().map(|s| *s))
+                        .filter(|s| s.tag == tag)
+                    else {
+                        return Err(JsNativeError::typ().with_message("Illegal invocation").into());
+                    };
+                    let even_odd = match args.first() {
+                        None => false,
+                        Some(v) if v.is_undefined() => false,
+                        Some(v) => {
+                            let s = v.to_string(context)?.to_std_string_escaped();
+                            match s.as_str() {
+                                "nonzero" => false,
+                                "evenodd" => true,
+                                _ => {
+                                    return Err(JsNativeError::typ()
+                                        .with_message(format!(
+                                            "The provided value '{s}' is not a valid enum value of type CanvasFillRule."
+                                        ))
+                                        .into());
+                                }
+                            }
+                        }
+                    };
+                    f(host_slot.gen, host_slot.id, even_odd);
+                    Ok(BoaValue::undefined())
+                })
+            };
+            self.define_global_method(global_name, "fill", 0, native)
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = (global_name, tag, timing_slot_name, f);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    #[cfg(feature = "boa")]
+    fn define_global_method(
+        &mut self,
+        global_name: &str,
+        js_name: &str,
+        length: usize,
+        body: boa_engine::NativeFunction,
+    ) -> Result<(), JsError> {
+        use boa_engine::{
+            object::FunctionObjectBuilder, property::PropertyDescriptor, JsString,
+        };
+        let function = FunctionObjectBuilder::new(self.context.realm(), body)
+            .name(JsString::from(js_name))
+            .length(length)
+            .constructor(false)
+            .build();
+        self.context
+            .global_object()
+            .define_property_or_throw(
+                JsString::from(global_name),
+                PropertyDescriptor::builder()
+                    .value(function)
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                &mut self.context,
+            )
+            .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+        Ok(())
     }
 
     /// Register `name` in the current realm: a function that runs its first
@@ -2554,6 +2828,55 @@ fn host_object(
     // lookup through the realm's `Object.prototype`.
     host.set_prototype(None);
     host
+}
+
+#[cfg(feature = "boa")]
+#[derive(Debug, Clone, Copy)]
+struct HostSlot {
+    tag: u32,
+    gen: u64,
+    id: usize,
+}
+
+#[cfg(feature = "boa")]
+impl boa_engine::JsData for HostSlot {}
+
+#[cfg(feature = "boa")]
+impl boa_engine::Finalize for HostSlot {}
+
+#[cfg(feature = "boa")]
+unsafe impl boa_engine::Trace for HostSlot {
+    #[inline]
+    unsafe fn trace(&self, _tracer: &mut boa_engine::gc::Tracer) {}
+    #[inline]
+    unsafe fn trace_non_roots(&self) {}
+    #[inline]
+    fn run_finalizer(&self) {}
+}
+
+#[cfg(feature = "boa")]
+#[inline]
+fn check_host_deadline(
+    deadline: &std::rc::Rc<ExecutionDeadline>,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<()> {
+    let passed = deadline.at.get().and_then(|at| {
+        let now = std::time::Instant::now();
+        (now >= at).then(|| now - at)
+    });
+    let passed = passed.filter(|_| !context.stop_finally_running());
+    if let Some(late) = passed {
+        if !deadline.hit.replace(true) {
+            deadline.late.set(Some(late));
+            note_deadline_trip();
+            tracing::warn!(
+                late_ms = late.as_millis() as u64,
+                "Script budget spent: host calls are refused until the script has unwound"
+            );
+        }
+        return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "boa")]

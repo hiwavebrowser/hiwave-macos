@@ -64,6 +64,7 @@
             h.pixelsOut = host.pixelsOut;
             h.pixelsIn = host.pixelsIn;
             h.canvasCall = host.canvasCall;
+            h.canvasNatives = host.canvasNatives;
             h.canvasSlot = host.canvasSlot;
             h.builtins = builtins;
         }

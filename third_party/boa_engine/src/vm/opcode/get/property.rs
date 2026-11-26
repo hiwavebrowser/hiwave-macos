@@ -233,6 +233,64 @@ fn get_by_value<const PUSH_KEY: bool>(
     Ok(())
 }
 
+/// HIWAVE PATCH (zero-clone-ic): fast path for `GetPropertyByName` / `GetLengthProperty` when the
+/// base register already holds a `JsObject` (or string for `LENGTH`), avoiding cloning the base
+/// `JsValue` and calling `base_class()` on every inline-cache hit.
+#[inline(always)]
+fn get_by_name_reg<const LENGTH: bool>(
+    (dst, object_reg, index): (RegisterOperand, RegisterOperand, IndexOperand),
+    context: &mut Context,
+) -> JsResult<()> {
+    let reg = context.vm.get_register(object_reg.into());
+    if LENGTH {
+        if let Some(obj) = reg.as_object()
+            && obj.is_array()
+        {
+            let value = obj.borrow().properties().storage[0].clone();
+            context.vm.set_register(dst.into(), value);
+            return Ok(());
+        } else if let Some(string) = reg.as_string() {
+            let len = string.len() as u32;
+            context.vm.set_register(dst.into(), len.into());
+            return Ok(());
+        }
+    }
+    if let Some(obj) = reg.as_object() {
+        let ic = &context.vm.frame().code_block().ic[usize::from(index)];
+        if ic.hit_is_get(&obj) {
+            let obj_borrowed = obj.borrow();
+            if let Some(hit) = ic.get_with_slot_offset(obj_borrowed.shape(), 0) {
+                let (slot, cached) = match hit {
+                    crate::vm::inline_cache::CacheHit::Prototype(slot, val) => (slot, Some(val)),
+                    crate::vm::inline_cache::CacheHit::Own(slot) => (
+                        slot,
+                        obj_borrowed
+                            .properties()
+                            .storage
+                            .get(slot.index as usize)
+                            .cloned(),
+                    ),
+                };
+                if let Some(mut result) = cached {
+                    drop(obj_borrowed);
+                    if slot.attributes.has_get() && result.is_object() {
+                        let receiver = context.vm.get_register(object_reg.into()).clone();
+                        result = result.as_object().expect("should contain getter").call(
+                            &receiver,
+                            &[],
+                            context,
+                        )?;
+                    }
+                    context.vm.set_register(dst.into(), result);
+                    return Ok(());
+                }
+            }
+        }
+    }
+    let object = reg.clone();
+    get_by_name::<LENGTH>((dst, &object, &object, index), context)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GetLengthProperty;
 
@@ -242,8 +300,7 @@ impl GetLengthProperty {
         (dst, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
-        let object = context.vm.get_register(object.into()).clone();
-        get_by_name::<true>((dst, &object, &object, index), context)
+        get_by_name_reg::<true>((dst, object, index), context)
     }
 }
 
@@ -266,8 +323,7 @@ impl GetPropertyByName {
         (dst, object, index): (RegisterOperand, RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
-        let object = context.vm.get_register(object.into()).clone();
-        get_by_name::<false>((dst, &object, &object, index), context)
+        get_by_name_reg::<false>((dst, object, index), context)
     }
 }
 

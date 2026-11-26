@@ -1258,7 +1258,11 @@ impl CanvasRenderingContext2D {
         }
         let style = self.state.fill_style.with_alpha(self.state.global_alpha);
         let t = self.state.transform;
-        // An opaque axis-aligned fill hides what is wholly under it.
+        let gpu = self.raster.get_mut().gpu_on();
+        let d = draw_ctx!(self);
+        self.raster.get_mut().push(raster::Op::Fill { d, path: vec![PathCommand::Rect(x, y, w, h)], even_odd: false, style: style.clone() });
+        // An opaque axis-aligned fill hides what is wholly under it (including text drawn
+        // underneath when GPU canvas is active).
         let opaque = matches!(style, CanvasStyle::Color(c) if c.a >= 1.0)
             && self.state.global_composite_operation == CompositeOperation::SourceOver
             && (self.state.shadow_color.a == 0.0 || self.state.shadow_blur == 0.0 && self.state.shadow_offset_x == 0.0 && self.state.shadow_offset_y == 0.0);
@@ -1267,8 +1271,10 @@ impl CanvasRenderingContext2D {
                 self.occlude(region);
             }
         }
-        let d = draw_ctx!(self);
-        self.raster.get_mut().push(raster::Op::Fill { d, path: vec![PathCommand::Rect(x, y, w, h)], even_odd: false, style: style.clone() });
+        if gpu {
+            self.generation = next_generation();
+            return;
+        }
         self.record(DrawCommand::FillRect { x, y, w, h, style, transform: t });
     }
 
@@ -1277,7 +1283,12 @@ impl CanvasRenderingContext2D {
         if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
             return;
         }
+        let gpu = self.raster.get_mut().gpu_on();
         self.raster_stroke(vec![PathCommand::Rect(x, y, w, h)]);
+        if gpu {
+            self.generation = next_generation();
+            return;
+        }
         self.record(DrawCommand::StrokeRect {
             x, y, w, h,
             style: self.state.stroke_style.with_alpha(self.state.global_alpha),
@@ -1369,13 +1380,22 @@ impl CanvasRenderingContext2D {
 
     /// Fill the current path under the even-odd rule or non-zero.
     pub fn fill_with_rule(&mut self, even_odd: bool) {
+        if self.path.commands().is_empty() {
+            return;
+        }
+        let gpu = self.raster.get_mut().gpu_on();
+        let style = self.state.fill_style.with_alpha(self.state.global_alpha);
+        let d = draw_ctx!(self);
+        let path = self.path.commands().to_vec();
+        if gpu {
+            self.raster.get_mut().push(raster::Op::Fill { d, path, even_odd, style });
+            self.generation = next_generation();
+            return;
+        }
         let segments = self.path.to_line_segments();
         if segments.is_empty() {
             return;
         }
-        let style = self.state.fill_style.with_alpha(self.state.global_alpha);
-        let d = draw_ctx!(self);
-        let path = self.path.commands().to_vec();
         self.raster.get_mut().push(raster::Op::Fill { d, path, even_odd, style: style.clone() });
         self.record(DrawCommand::FillPath {
             segments,
@@ -1387,6 +1407,15 @@ impl CanvasRenderingContext2D {
 
     /// Stroke the current path.
     pub fn stroke(&mut self) {
+        if self.path.commands().is_empty() {
+            return;
+        }
+        let gpu = self.raster.get_mut().gpu_on();
+        if gpu {
+            self.raster_stroke(self.path.commands().to_vec());
+            self.generation = next_generation();
+            return;
+        }
         let segments = self.path.to_line_segments();
         if segments.is_empty() {
             return;

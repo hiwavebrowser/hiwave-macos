@@ -13,7 +13,7 @@
 // not listed are absent, not stubbed: no shadows, globalCompositeOperation,
 // isPointInPath, toDataURL. getContext of any other kind is null.
 (function (g) {
-    var C = __rk.canvasCall, slot = __rk.canvasSlot;
+    var C = __rk.canvasCall, slot = __rk.canvasSlot, CN = __rk.canvasNatives;
     var Canvas = g.HTMLCanvasElement;
     if (typeof C !== 'function' || typeof slot !== 'function' || typeof Canvas !== 'function') return;
 
@@ -128,7 +128,7 @@
         var have = CTX.get(this);
         if (String(kind) !== '2d') return null;
         if (have) return have;
-        var ctx = Object.create(Ctx2D.prototype);
+        var ctx = CN && CN.makeCtx ? CN.makeCtx(Ctx2D.prototype, s[0], s[1]) : Object.create(Ctx2D.prototype);
         DATA.set(ctx, { el: this, gen: s[0], id: s[1], st: initial(), stack: [] });
         CTX.set(this, ctx);
         C(s[0], s[1], 'create', this.width, this.height);
@@ -454,6 +454,13 @@
         if (d === undefined) illegalCall();
         C(d.gen, d.id, 'stroke');
     });
+    if (CN) {
+        ['beginPath', 'closePath', 'stroke', 'moveTo', 'lineTo', 'quadraticCurveTo', 'bezierCurveTo',
+            'rect', 'fillRect', 'strokeRect', 'clearRect', 'scale', 'rotate', 'translate', 'transform',
+            'arc', 'fill'].forEach(function (name) {
+            if (typeof CN[name] === 'function') method(P, name, CN[name]);
+        });
+    }
     method(P, 'clip', function clip(r) { var d = data(this); call(d, 'clip', rule(r)); });
 
     // ---- Pixels: the bitmap rasterized behind the recording (STR-7).

@@ -820,6 +820,11 @@ impl DomHost {
         host.borrow().node(args).map(|n| n.id.raw())
     }
 
+    #[inline]
+    pub(crate) fn has_generation(&self, gen: u64) -> bool {
+        u64::from(self.generation) == gen
+    }
+
     /// The `src` and `srcset` attributes of the bound document's node
     /// `node` as they are now, when it is an `<img>` element.
     pub(crate) fn img_sources(&self, node: usize) -> Option<(Option<String>, Option<String>)> {
@@ -1493,6 +1498,10 @@ fn node_label(host: &DomHost, args: &[JsValue], index: usize) -> String {
     let Some(node) = host.node_at(args, index) else {
         return String::new();
     };
+    element_label(&node)
+}
+
+fn element_label(node: &Node) -> String {
     let NodeType::Element {
         tag_name,
         attributes,
@@ -1591,6 +1600,51 @@ fn paint_style_reads(host: &DomHost, old: Option<&str>, new: Option<&str>) -> Op
         }
         let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| property == name)?;
         reads |= bits;
+    }
+    (reads != 0).then_some(reads)
+}
+
+/// Zero-allocation version of `paint_style_reads` for `__rustkit_style_write`, which already holds
+/// the parsed `old_decls` and `new_decls` lists.
+fn paint_style_reads_from_decls(
+    host: &DomHost,
+    old_raw: &str,
+    new_raw: &str,
+    old_decls: &[crate::inline_style::Decl],
+    new_decls: &[crate::inline_style::Decl],
+) -> Option<u8> {
+    if host.style_attr_rules.as_ref().is_none_or(|rules| rules()) {
+        return None;
+    }
+    if old_raw.contains(['"', '\'', '\\', '{', '}'])
+        || old_raw.contains("/*")
+        || new_raw.contains(['"', '\'', '\\', '{', '}'])
+        || new_raw.contains("/*")
+    {
+        return None;
+    }
+    let mut reads = 0;
+    for d in old_decls {
+        if d.value.bytes().filter(|&b| b == b'(').count() != d.value.bytes().filter(|&b| b == b')').count() {
+            return None;
+        }
+        let same = new_decls
+            .iter()
+            .find(|n| n.name == d.name)
+            .is_some_and(|n| n.value == d.value && n.important == d.important);
+        if !same {
+            let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| *property == d.name)?;
+            reads |= bits;
+        }
+    }
+    for n in new_decls {
+        if n.value.bytes().filter(|&b| b == b'(').count() != n.value.bytes().filter(|&b| b == b')').count() {
+            return None;
+        }
+        if !old_decls.iter().any(|d| d.name == n.name) {
+            let (_, bits) = PAINT_STYLE_PROPERTIES.iter().find(|(property, _)| *property == n.name)?;
+            reads |= bits;
+        }
     }
     (reads != 0).then_some(reads)
 }
@@ -2366,6 +2420,29 @@ pub(crate) fn install(
     )?;
 
     let h = host.clone();
+    runtime.register_host_function(
+        "__rustkit_dom_rel",
+        3,
+        Box::new(move |args| {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
+                return JsValue::Undefined;
+            };
+            match args.get(2) {
+                Some(JsValue::Number(n)) => match *n as u32 {
+                    0 => node_id(node.parent()),
+                    1 => node_id(node.first_child()),
+                    2 => node_id(node.last_child()),
+                    3 => node_id(node.next_sibling()),
+                    4 => node_id(node.previous_sibling()),
+                    _ => JsValue::Null,
+                },
+                _ => JsValue::Null,
+            }
+        }),
+    )?;
+
+    let h = host.clone();
     let d = dirty.clone();
     runtime.register_host_function_by_op(
         "__rustkit_dom_info",
@@ -2875,22 +2952,22 @@ pub(crate) fn install(
         "__rustkit_style_write",
         6,
         Box::new(move |args| {
-            let found = h.borrow().node(args).map(|node| {
-                let raw = node.get_attribute("style");
-                (node.id.raw(), h.borrow().style_decls(node.id.raw(), raw.as_deref().unwrap_or("")))
-            });
-            let Some((id, decls)) = found else {
+            let host = h.borrow();
+            let Some(node) = host.node(args) else {
                 return JsValue::Number(-1.0);
             };
+            let id = node.id.raw();
+            let old_raw = node.get_attribute("style").unwrap_or("");
+            let old_decls = host.style_decls(id, old_raw);
             let name = string_arg(args, 3).unwrap_or("");
             let (answer, written) = match string_arg(args, 2).unwrap_or("") {
                 "remove" => {
-                    let (old, written) = crate::inline_style::remove_property(&decls, name);
+                    let (old, written) = crate::inline_style::remove_property(&old_decls, name);
                     (JsValue::String(old), written)
                 }
                 _ => {
                     let written = crate::inline_style::set_property(
-                        &decls,
+                        &old_decls,
                         name,
                         string_arg(args, 4).unwrap_or(""),
                         string_arg(args, 5).unwrap_or(""),
@@ -2898,18 +2975,69 @@ pub(crate) fn install(
                     (JsValue::Boolean(written.is_some()), written)
                 }
             };
-            if let Some(decls) = written {
-                let text = crate::inline_style::serialize_decls(&decls);
+            if let Some(new_decls) = written {
+                let text = crate::inline_style::serialize_decls(&new_decls);
+                let Some(document) = args.first().and_then(|g| host.document_for(g)) else {
+                    return JsValue::Number(-1.0);
+                };
+                let NodeType::Element {
+                    tag_name,
+                    namespace,
+                    attributes,
+                } = &node.node_type
+                else {
+                    return JsValue::Number(-1.0);
+                };
+                let changed = attributes.get("style").map(String::as_str) != Some(text.as_str());
+                let reach = if !changed {
+                    Reach::Seen
+                } else if !rendered_connected(&node, document) || under_hidden(&host, &node, &d) {
+                    Reach::Unseen
+                } else if is_html_element(&node) {
+                    match paint_style_reads_from_decls(&host, old_raw, &text, &old_decls, &new_decls) {
+                        Some(reads) => Reach::Paint(reads),
+                        None => Reach::Seen,
+                    }
+                } else {
+                    Reach::Seen
+                };
                 // The next read or write of this text needs no parse, when the list reads back as itself
                 // (the JS copy's `exactOf`). Kept before the write: a write the page's own code changes
                 // again (a custom element's callback) leaves other text, which is parsed.
-                if crate::inline_style::reads_back_as_itself(&decls) {
-                    h.borrow().keep_style_decls(id, &text, decls);
+                if crate::inline_style::reads_back_as_itself(&new_decls) {
+                    host.keep_style_decls(id, &text, new_decls);
                 }
-                let write_args =
-                    [args[0].clone(), JsValue::String("setAttr".into()), JsValue::Number(id as f64), JsValue::String("style".into()), JsValue::String(text)];
-                if let JsValue::String(_) = dom_write(&h, &d, &m, &l, &write_args) {
-                    return JsValue::Number(-1.0);
+                if changed {
+                    let mut new_attrs = attributes.clone();
+                    new_attrs.insert("style".to_string(), text);
+                    document.replace_node_data(
+                        node.id,
+                        NodeType::Element {
+                            tag_name: tag_name.clone(),
+                            namespace: namespace.clone(),
+                            attributes: new_attrs,
+                        },
+                    );
+                    l.borrow_mut().push(MutationRecord {
+                        node: id,
+                        kind: MutationKind::Style,
+                        attr: Some("style".to_string()),
+                        old: None,
+                        child: None,
+                    });
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        let connected = is_connected(&node, document);
+                        tracing::trace!(
+                            op = "setAttr",
+                            tag = %tag_name,
+                            connected,
+                            detail = "style",
+                            bucket = ?DomDirty::Style,
+                            "DOM write dirtied the page"
+                        );
+                    }
+                    note_mutation(&m, DomDirty::Style, MutationKind::Style, || element_label(&node));
+                    reach.mark(&d, DomDirty::Style, "style", crate::Logged::Yes);
                 }
             }
             answer
@@ -3123,7 +3251,7 @@ const WRAPPERS_JS: &str = r#"
 (function (g) {
     var N = {
         root: __rustkit_dom_root, byId: __rustkit_dom_by_id,
-        collect: __rustkit_dom_collect, info: __rustkit_dom_info,
+        collect: __rustkit_dom_collect, info: __rustkit_dom_info, rel: __rustkit_dom_rel,
         attr: __rustkit_dom_attr, mutate: __rustkit_dom_mutate,
         write: __rustkit_dom_write, matches: __rustkit_dom_matches,
         value: __rustkit_dom_value, resolve: __rustkit_dom_resolve,
@@ -3141,7 +3269,7 @@ const WRAPPERS_JS: &str = r#"
     };
     delete g.__rustkit_style_read;
     delete g.__rustkit_style_write;
-    ['root', 'by_id', 'collect', 'info', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
+    ['root', 'by_id', 'collect', 'info', 'rel', 'attr', 'mutate', 'write', 'matches', 'value', 'resolve', 'checked', 'submit', 'navigate',
         'inserted_script', 'hit', 'svg_hit', 'note_wheel', 'wheel_attribute', 'range_text_rects', 'set_adopted', 'set_sheet_disabled', 'register_property', 'scroll_element', 'animate', 'css_animations', 'css_control', 'animated'].forEach(function (n) {
         delete g['__rustkit_dom_' + n];
     });
@@ -3620,7 +3748,9 @@ const WRAPPERS_JS: &str = r#"
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = objCreate(proto);
-        defineOwn(w, SLOT, { value: slotRecord(id) });
+        var r = slotRecord(id);
+        r.t = t;
+        defineOwn(w, SLOT, { value: r });
         cache.set(id, w);
         return w;
     }
@@ -3707,8 +3837,20 @@ const WRAPPERS_JS: &str = r#"
     NodeList.prototype.keys = Array.prototype.keys;
     NodeList.prototype.values = Array.prototype.values;
 
-    getter(Node.prototype, 'nodeType', function () { return info(this, 'type'); });
-    getter(Node.prototype, 'nodeName', function () { return info(this, 'name'); });
+    getter(Node.prototype, 'nodeType', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var t = s.t;
+        if (t === undefined) { t = N.info(s.gen, s.id, 'type'); s.t = t; }
+        return t;
+    });
+    getter(Node.prototype, 'nodeName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var nm = s.nm;
+        if (nm === undefined) { nm = N.info(s.gen, s.id, 'name'); s.nm = nm; }
+        return nm;
+    });
     function accessor(proto, name, get, set) {
         Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true });
     }
@@ -3754,14 +3896,38 @@ const WRAPPERS_JS: &str = r#"
     function text(v) { return v === null ? '' : String(v); }
     accessor(Node.prototype, 'textContent', function () { return info(this, 'text'); },
         function (v) { setData(this, 'setText', text(v), null, 'textContent'); });
-    getter(Node.prototype, 'parentNode', function () { return related(this, 'parent'); });
-    getter(Node.prototype, 'parentElement', function () {
-        var p = related(this, 'parent'); return p && p.nodeType === 1 ? p : null;
+    getter(Node.prototype, 'parentNode', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 0)) : null;
     });
-    getter(Node.prototype, 'firstChild', function () { return related(this, 'first'); });
-    getter(Node.prototype, 'lastChild', function () { return related(this, 'last'); });
-    getter(Node.prototype, 'nextSibling', function () { return related(this, 'next'); });
-    getter(Node.prototype, 'previousSibling', function () { return related(this, 'prev'); });
+    getter(Node.prototype, 'parentElement', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        if (s.gen !== gen) return null;
+        var p = wrap(N.rel(s.gen, s.id, 0));
+        return p && p[SLOT].t === 1 ? p : null;
+    });
+    getter(Node.prototype, 'firstChild', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 1)) : null;
+    });
+    getter(Node.prototype, 'lastChild', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 2)) : null;
+    });
+    getter(Node.prototype, 'nextSibling', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 3)) : null;
+    });
+    getter(Node.prototype, 'previousSibling', function () {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s.gen === gen ? wrap(N.rel(s.gen, s.id, 4)) : null;
+    });
     getter(Node.prototype, 'childNodes', function () { return cachedKids(this, false).list; });
     // A node in a DOMParser document is owned by it; every other node by
     // the global document.
@@ -4016,7 +4182,13 @@ const WRAPPERS_JS: &str = r#"
     });
     getter(CharacterData.prototype, 'length', function () { return (info(this, 'text') || '').length; });
 
-    getter(Element.prototype, 'tagName', function () { return info(this, 'name'); });
+    getter(Element.prototype, 'tagName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var nm = s.nm;
+        if (nm === undefined) { nm = N.info(s.gen, s.id, 'name'); s.nm = nm; }
+        return nm;
+    });
     accessor(Element.prototype, 'innerHTML', function () { return info(this, 'innerHTML'); },
         function (v) { setData(this, 'setHTML', text(v), null, 'innerHTML'); });
     // The outerHTML setter: the markup, parsed in the context of the
@@ -4043,7 +4215,13 @@ const WRAPPERS_JS: &str = r#"
         Array.prototype.slice.call(holder.childNodes).forEach(function (n) { parent.insertBefore(n, self); });
         parent.removeChild(self);
     });
-    getter(Element.prototype, 'localName', function () { return info(this, 'local'); });
+    getter(Element.prototype, 'localName', function () {
+        var s = slotOf(this);
+        if (s.gen !== gen) return undefined;
+        var ln = s.ln;
+        if (ln === undefined) { ln = N.info(s.gen, s.id, 'local'); s.ln = ln; }
+        return ln;
+    });
     accessor(HTMLElement.prototype, 'innerText', function () { return info(this, 'innerText'); },
         function (v) { setData(this, 'setInnerText', text(v), null, 'innerText'); });
     // `id` and `className` read the attribute with the engine native and write it with the same
@@ -5661,7 +5839,16 @@ const WRAPPERS_JS: &str = r#"
         },
         setProperty: function (name, value, priority) {
             if (styleNative) {
-                styleWrite(this[OWNER], 'set', styleString(name), value == null ? '' : styleString(value), styleString(priority || ''));
+                var n = typeof name === 'string' ? name : styleString(name);
+                var sv = typeof value === 'string' ? value : (value == null ? '' : styleString(value));
+                var sp = !priority ? '' : (typeof priority === 'string' ? priority : styleString(priority));
+                if (!HOOKS.mutation && (!HOOKS.attrs || HOOKS.watched.style !== true)) {
+                    var s = this[OWNER][SLOT];
+                    var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', n, sv, sp);
+                    if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+                } else {
+                    styleWrite(this[OWNER], 'set', n, sv, sp);
+                }
                 return;
             }
             name = propertyName(name);
@@ -5712,19 +5899,36 @@ const WRAPPERS_JS: &str = r#"
     function styleFor(el) {
         var st = styles.get(el);
         if (st) return st;
+        var s = el[SLOT];
         var target = Object.create(CSSStyleDeclaration.prototype);
         Object.defineProperty(target, OWNER, { value: el });
         st = new Proxy(target, {
             get: function (t, p) {
                 if (typeof p !== 'string' || p in t) return Reflect.get(t, p, st);
-                if (/^\d+$/.test(p)) return t.item(Number(p)) || undefined;
-                return t.getPropertyValue(cssName(p));
+                var c = p.charCodeAt(0);
+                if (c >= 48 && c <= 57 && /^\d+$/.test(p)) return t.item(Number(p)) || undefined;
+                var n = cssNames[p] || cssName(p);
+                if (styleNative) {
+                    var r = N.styleRead(s.gen, s.id, 'value', n);
+                    return r === -1 ? '' : r;
+                }
+                return t.getPropertyValue(n);
             },
             set: function (t, p, v) {
                 if (typeof p !== 'string' || p in t) return Reflect.set(t, p, v, st);
                 // `setProperty(name, v)` with no priority, without the method call (NATIVE-SETPROPERTY).
-                if (styleNative) styleWrite(t[OWNER], 'set', cssName(p), v == null ? '' : styleString(v), '');
-                else t.setProperty(cssName(p), v);
+                var n = cssNames[p] || cssName(p);
+                if (styleNative) {
+                    var sv = typeof v === 'string' ? v : (v == null ? '' : styleString(v));
+                    if (!HOOKS.mutation && (!HOOKS.attrs || HOOKS.watched.style !== true)) {
+                        var r = N.styleWrite(gen, s.gen === gen ? s.id : -1, 'set', n, sv, '');
+                        if (r === -1) throw new DOMException("Failed to execute 'setAttribute'.", 'NotFoundError');
+                    } else {
+                        styleWrite(el, 'set', n, sv, '');
+                    }
+                } else {
+                    t.setProperty(n, v);
+                }
                 return true;
             }
         });

@@ -831,6 +831,120 @@ pub(crate) fn install(
     // The host function is the canvas script's alone: moved to the host
     // object now, before any page script, and never on the window again.
     runtime.evaluate_with_host("__rk.canvasCall = globalThis.__rustkit_canvas; delete globalThis.__rustkit_canvas;")?;
+
+    // Direct native methods for hot CanvasRenderingContext2D operations: zero JS wrapper
+    // bytecode, zero WeakMap.get, zero string op-name allocation, zero JsValue conversion.
+    const CANVAS_SLOT_TAG: u32 = 0x4341_4E56; // "CANV"
+    runtime.register_slot_factory("__rk_c_makeCtx", CANVAS_SLOT_TAG)?;
+    let resolve_ctx = |store: &mut CanvasStore, h: &SharedDomHost, gen: u64, id: usize| -> Option<usize> {
+        let host = h.borrow();
+        if !host.has_generation(gen) {
+            return None;
+        }
+        store.contexts.contains_key(&id).then_some(id)
+    };
+    macro_rules! reg_f64 {
+        ($global:expr, $min:expr, $member:expr, $op:expr, $draws:expr, |$ctx:ident, $a:ident| $body:expr) => {{
+            let (s, h) = (store.clone(), host.clone());
+            runtime.register_slot_f64_method(
+                $global,
+                CANVAS_SLOT_TAG,
+                $min,
+                "CanvasRenderingContext2D",
+                $member,
+                "__rustkit_canvas",
+                $op,
+                Box::new(move |gen, id, $a| {
+                    let mut store = s.borrow_mut();
+                    let Some(node) = resolve_ctx(&mut store, &h, gen, id) else { return };
+                    let Some($ctx) = store.contexts.get_mut(&node) else { return };
+                    $body;
+                    if $draws {
+                        store.painted = true;
+                    }
+                }),
+            )?;
+        }};
+    }
+    let finite = |a: &[f64]| a.iter().all(|v| (*v as f32).is_finite());
+    reg_f64!("__rk_c_beginPath", 0, "beginPath", "beginPath", false, |ctx, _a| ctx.begin_path());
+    reg_f64!("__rk_c_closePath", 0, "closePath", "closePath", false, |ctx, _a| ctx.close_path());
+    reg_f64!("__rk_c_stroke", 0, "stroke", "stroke", true, |ctx, _a| ctx.stroke());
+    reg_f64!("__rk_c_moveTo", 2, "moveTo", "moveTo", false, |ctx, a| {
+        if finite(a) { ctx.move_to(a[0] as f32, a[1] as f32); }
+    });
+    reg_f64!("__rk_c_lineTo", 2, "lineTo", "lineTo", false, |ctx, a| {
+        if finite(a) { ctx.line_to(a[0] as f32, a[1] as f32); }
+    });
+    reg_f64!("__rk_c_quadraticCurveTo", 4, "quadraticCurveTo", "quadraticCurveTo", false, |ctx, a| {
+        if finite(a) { ctx.quadratic_curve_to(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32); }
+    });
+    reg_f64!("__rk_c_bezierCurveTo", 6, "bezierCurveTo", "bezierCurveTo", false, |ctx, a| {
+        if finite(a) { ctx.bezier_curve_to(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32, a[4] as f32, a[5] as f32); }
+    });
+    reg_f64!("__rk_c_rect", 4, "rect", "rect", false, |ctx, a| {
+        if finite(a) { ctx.rect(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32); }
+    });
+    reg_f64!("__rk_c_fillRect", 4, "fillRect", "fillRect", true, |ctx, a| {
+        if finite(a) { ctx.fill_rect(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32); }
+    });
+    reg_f64!("__rk_c_strokeRect", 4, "strokeRect", "strokeRect", true, |ctx, a| {
+        if finite(a) { ctx.stroke_rect(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32); }
+    });
+    reg_f64!("__rk_c_clearRect", 4, "clearRect", "clearRect", true, |ctx, a| {
+        if finite(a) { ctx.clear_rect(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32); }
+    });
+    reg_f64!("__rk_c_scale", 2, "scale", "scale", false, |ctx, a| {
+        if finite(a) { ctx.scale(a[0] as f32, a[1] as f32); }
+    });
+    reg_f64!("__rk_c_rotate", 1, "rotate", "rotate", false, |ctx, a| {
+        if finite(a) { ctx.rotate(a[0] as f32); }
+    });
+    reg_f64!("__rk_c_translate", 2, "translate", "translate", false, |ctx, a| {
+        if finite(a) { ctx.translate(a[0] as f32, a[1] as f32); }
+    });
+    reg_f64!("__rk_c_transform", 6, "transform", "transform", false, |ctx, a| {
+        if finite(a) { ctx.transform(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32, a[4] as f32, a[5] as f32); }
+    });
+    {
+        let (s, h) = (store.clone(), host.clone());
+        runtime.register_slot_arc_method(
+            "__rk_c_arc",
+            CANVAS_SLOT_TAG,
+            "__rustkit_canvas",
+            Box::new(move |gen, id, a, ccw| {
+                let mut store = s.borrow_mut();
+                let Some(node) = resolve_ctx(&mut store, &h, gen, id) else { return true };
+                let Some(ctx) = store.contexts.get_mut(&node) else { return true };
+                if !a.iter().all(|v| (*v as f32).is_finite()) {
+                    return true;
+                }
+                if a[2] < 0.0 {
+                    return false;
+                }
+                ctx.arc(a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32, a[4] as f32, ccw);
+                true
+            }),
+        )?;
+    }
+    {
+        let (s, h) = (store.clone(), host.clone());
+        runtime.register_slot_fill_method(
+            "__rk_c_fill",
+            CANVAS_SLOT_TAG,
+            "__rustkit_canvas",
+            Box::new(move |gen, id, even_odd| {
+                let mut store = s.borrow_mut();
+                let Some(node) = resolve_ctx(&mut store, &h, gen, id) else { return };
+                let Some(ctx) = store.contexts.get_mut(&node) else { return };
+                ctx.fill_with_rule(even_odd);
+                store.painted = true;
+            }),
+        )?;
+    }
+    runtime.evaluate_with_host(
+        "(function(g){var n=Object.create(null);['makeCtx','beginPath','closePath','stroke','moveTo','lineTo','quadraticCurveTo','bezierCurveTo','rect','fillRect','strokeRect','clearRect','scale','rotate','translate','transform','arc','fill'].forEach(function(k){n[k]=g['__rk_c_'+k];delete g['__rk_c_'+k];});__rk.canvasNatives=n;})(globalThis);",
+    )?;
     if !script {
         return Ok(());
     }
