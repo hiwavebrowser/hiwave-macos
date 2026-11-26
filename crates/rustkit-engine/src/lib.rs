@@ -7371,8 +7371,16 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "before_load");
             return;
         }
-        let depth = self.frame_ancestry_urls(id).len();
-        let wanted = !view.frames.is_empty() || depth > 1;
+        let ancestry = self.frame_ancestry_urls(id);
+        let depth = ancestry.len();
+        // SPARE-COST: a frame document gets one only while it shows
+        // about:blank (JetStream's `#magic`, filled by script and read at
+        // once; a spare's own spare). A URL document gets one once it has
+        // frames, as a top-level page does: before that, its first frame
+        // attaches at the drain. Every Speedometer workload is a frameless
+        // URL document in a frame, and built a spare it never used.
+        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
         if !wanted {
             debug!(target: "frames_spare", outcome = "not_wanted");
             return;
