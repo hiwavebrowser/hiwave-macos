@@ -1418,3 +1418,33 @@ returns each class's exact source text, and `true` for the Polymer test.
 constructor and a `}` inside a comment; a class without a constructor; an anonymous, a named and a
 parenthesized class expression; a class nested in a method; a class from direct `eval`; and the
 Polymer test. All four tests fail without the patch (`function Rect() { [native code] }`).
+
+## Patch: the legacy RegExp statics (`regexp-legacy-statics`)
+
+**Why.** JetStream 2.2's first test, WSL, stopped at 5.2 s with `TypeError: cannot convert 'null'
+or 'undefined' to object`: its lexer does `this._index += RegExp.lastMatch.length` after each
+`test`, and Boa 0.22 has none of the legacy RegExp statics. JetStream also reads
+`RegExp.rightContext`, `RegExp.$1` and `RegExp.leftContext` (WSL, Basic, mandreel,
+code-first-load). Every shipping engine has them (TC39 "RegExp legacy features", Annex B in
+practice).
+
+**What.** `src/builtins/regexp/legacy_statics.rs`: `input`/`$_`, `lastMatch`/`$&`,
+`lastParen`/`$+`, `leftContext`/`` $` ``, `rightContext`/`$'`, `$1`..`$9` as configurable,
+non-enumerable accessors on the `RegExp` constructor. A successful `RegExpBuiltinExec` records the
+input, the match range and the captures (`mod.rs`, before step 17); a failed one leaves them. Each
+has a setter; only `input`/`$_` changes anything. Before any match every value is `""`; an
+unmatched capture reads `""`.
+
+**Where it differs from the proposal, following Chrome.** No TypeError when the `this` value is
+not `%RegExp%`, and every static has a setter (Chrome 148, measured).
+
+**Per realm.** The state lives in the current realm's host-defined slot: a match updates the realm
+that is current when it runs, and the getters read their own realm's, so realms on one thread
+(frames) do not share it. Pinned by `a_match_in_one_realm_is_not_visible_from_another`.
+
+**Gap (stated).** Subclass instances update the statics too (the proposal skips them).
+
+**Receipt.** Chrome for Testing 148.0.7778.216, `docs/diagnostics/2026-11-24/regexp_legacy_statics_cft148.txt`.
+
+**Pin.** `crates/rustkit-js/tests/regexp_legacy_statics.rs`: the Chrome values, the descriptor
+shape, and the WSL lexer's own pattern; all three tests fail without the patch.

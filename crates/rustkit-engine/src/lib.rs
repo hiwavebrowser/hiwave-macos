@@ -525,6 +525,8 @@ mod ua_control_margin_tests;
 #[cfg(all(test, feature = "headless"))]
 mod wrapped_span_strut_tests;
 #[cfg(all(test, feature = "headless"))]
+mod ch_font_size_tests;
+#[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless"))]
 mod logical_size_tests;
@@ -1291,6 +1293,12 @@ pub enum EngineEvent {
 /// microsoft, shopify and walmart failed as "Unknown image format").
 /// Add `image/avif` back when a decoder lands.
 const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+/// Frame spares built in this process and the time spent building them
+/// (`Engine::refill_spare`), logged at INFO on each build for the stress
+/// harness's record (SPARE-COST). Process-wide: a stress run is one engine.
+static SPARES_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPARE_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// View state.
 #[allow(dead_code)]
@@ -7372,8 +7380,16 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "before_load");
             return;
         }
-        let depth = self.frame_ancestry_urls(id).len();
-        let wanted = !view.frames.is_empty() || depth > 1;
+        let ancestry = self.frame_ancestry_urls(id);
+        let depth = ancestry.len();
+        // SPARE-COST: a frame document gets one only while it shows
+        // about:blank (JetStream's `#magic`, filled by script and read at
+        // once; a spare's own spare). A URL document gets one once it has
+        // frames, as a top-level page does: before that, its first frame
+        // attaches at the drain. Every Speedometer workload is a frameless
+        // URL document in a frame, and built a spare it never used.
+        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
         if !wanted {
             debug!(target: "frames_spare", outcome = "not_wanted");
             return;
@@ -7382,6 +7398,7 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "too_deep");
             return;
         }
+        let started = std::time::Instant::now();
         let Ok(child) = parent.new_child() else { return };
         let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
             .ok()
@@ -7401,7 +7418,15 @@ impl Engine {
         }
         child.inherit_origin_from(parent);
         match parent.offer_spare(child) {
-            Ok(true) => debug!(target: "frames_spare", outcome = "built"),
+            Ok(true) => {
+                debug!(target: "frames_spare", outcome = "built");
+                use std::sync::atomic::Ordering::Relaxed;
+                let built = SPARES_BUILT.fetch_add(1, Relaxed) + 1;
+                let took = started.elapsed().as_micros() as u64;
+                let us = SPARE_BUILD_US.fetch_add(took, Relaxed) + took;
+                // Running totals, the stress harness's `frame_spares` (tools/stress/run.py, log_spares).
+                info!("frames spare built: total {} in {:.1} ms", built, us as f64 / 1000.0);
+            }
             Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
             Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
@@ -18640,7 +18665,7 @@ impl layout_ctx::LayoutCtx {
 
         // The font is final now; `ch` lengths that the cascade dropped for
         // want of a font can finally be applied.
-        self.resolve_ch_lengths(&mut style, &ch_pending);
+        self.resolve_ch_lengths(&mut style, parent_style, &ch_pending);
 
         // MEDIA-AVF (#1332 R1): Chrome's UA sheet has `audio:not([controls]) { display:
         // none !important }`, which no author declaration beats (an `!important` UA
@@ -18911,11 +18936,22 @@ impl layout_ctx::LayoutCtx {
     /// `margin: 1ch` followed by a later `margin-left: 2px` re-applies the
     /// shorthand and clobbers the longhand. Both are dropped entirely today,
     /// so this is strictly less wrong — but it is not the cascade.
-    fn resolve_ch_lengths(&self, style: &mut ComputedStyle, ch_pending: &ChPending) {
+    fn resolve_ch_lengths(
+        &self,
+        style: &mut ComputedStyle,
+        parent_style: Option<&ComputedStyle>,
+        ch_pending: &ChPending,
+    ) {
         if ch_pending.is_empty() {
             return;
         }
-        let advance = ch_advance_px(style);
+        // The parent's font-size as it computes: handed down in px, or a root-relative size.
+        let parent_font_px = match parent_style.map(|p| &p.font_size) {
+            Some(rustkit_css::Length::Px(px)) => *px,
+            Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
+            _ => 16.0,
+        };
+        let advance = ch_advance_px(style, parent_font_px);
         for (property, value) in ch_pending.winners() {
             let substituted = substitute_ch_units(value, advance);
             self.apply_style_property(style, property, &substituted);
@@ -29705,9 +29741,17 @@ fn substitute_ch_units(value: &str, advance: f32) -> String {
 /// The spec's fallback when the font has no "0" glyph is 0.5em; we use the
 /// same fallback if measurement returns nothing, so a missing font degrades
 /// to a defined value instead of collapsing the length to zero.
-fn ch_advance_px(style: &ComputedStyle) -> f32 {
+fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
+    // CH-REM-FONT-SIZE: the cascade has not absolutized this element's font-size yet, so a rem,
+    // em or % size is resolved here the way it will compute (rem against the root font, em and %
+    // against the parent's). Reading only px and falling back to 16px measured `16ch` at
+    // `font-size: 3.5rem` with a 16px "0" (GitHub's hero heading, Chrome 148: equal widths).
     let font_size = match style.font_size {
         rustkit_css::Length::Px(px) => px,
+        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
+        rustkit_css::Length::Em(v) => v * parent_font_px,
+        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
+        rustkit_css::Length::Zero => 0.0,
         _ => 16.0,
     };
     let measured = rustkit_layout::measure_text_advanced(
