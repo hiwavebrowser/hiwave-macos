@@ -1261,11 +1261,8 @@ impl CanvasRenderingContext2D {
         let gpu = self.raster.get_mut().gpu_on();
         let d = draw_ctx!(self);
         self.raster.get_mut().push(raster::Op::Fill { d, path: vec![PathCommand::Rect(x, y, w, h)], even_odd: false, style: style.clone() });
-        if gpu {
-            self.generation = next_generation();
-            return;
-        }
-        // An opaque axis-aligned fill hides what is wholly under it.
+        // An opaque axis-aligned fill hides what is wholly under it (including text drawn
+        // underneath when GPU canvas is active).
         let opaque = matches!(style, CanvasStyle::Color(c) if c.a >= 1.0)
             && self.state.global_composite_operation == CompositeOperation::SourceOver
             && (self.state.shadow_color.a == 0.0 || self.state.shadow_blur == 0.0 && self.state.shadow_offset_x == 0.0 && self.state.shadow_offset_y == 0.0);
@@ -1273,6 +1270,10 @@ impl CanvasRenderingContext2D {
             if let Some(region) = self.visible(quad_bounds(&quad(&t, x, y, w, h))) {
                 self.occlude(region);
             }
+        }
+        if gpu {
+            self.generation = next_generation();
+            return;
         }
         self.record(DrawCommand::FillRect { x, y, w, h, style, transform: t });
     }

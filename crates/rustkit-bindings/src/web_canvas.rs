@@ -866,7 +866,7 @@ pub(crate) fn install(
             )?;
         }};
     }
-    let finite = |a: &[f64]| a.iter().all(|v| v.is_finite());
+    let finite = |a: &[f64]| a.iter().all(|v| (*v as f32).is_finite());
     reg_f64!("__rk_c_beginPath", 0, "beginPath", "beginPath", false, |ctx, _a| ctx.begin_path());
     reg_f64!("__rk_c_closePath", 0, "closePath", "closePath", false, |ctx, _a| ctx.close_path());
     reg_f64!("__rk_c_stroke", 0, "stroke", "stroke", true, |ctx, _a| ctx.stroke());
@@ -916,7 +916,7 @@ pub(crate) fn install(
                 let mut store = s.borrow_mut();
                 let Some(node) = resolve_ctx(&mut store, &h, gen, id) else { return true };
                 let Some(ctx) = store.contexts.get_mut(&node) else { return true };
-                if !a.iter().all(|v| v.is_finite()) {
+                if !a.iter().all(|v| (*v as f32).is_finite()) {
                     return true;
                 }
                 if a[2] < 0.0 {
