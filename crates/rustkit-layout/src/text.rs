@@ -3076,13 +3076,11 @@ impl TextShaper {
         hang_trailing_spaces: bool,
         truncated: bool,
     ) -> Result<usize, TextError> {
-        // Get all break opportunities
-        let break_offsets = breaker.break_offsets(text);
-
         // Find the last break that fits
         let mut best_break = 0;
 
-        for &offset in &break_offsets {
+        for opportunity in breaker.break_opportunities(text) {
+            let offset = opportunity.offset;
             if offset == 0 {
                 continue;
             }
