@@ -10398,6 +10398,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // Slices of virtual time, not real time (LOAD-VIRTUAL-TIME).
+            let virtual_frames = self.config.virtual_load_frames;
             // The script time of every slice, for the errors the timers reported (H19c).
             let mut timers_ms: u64 = 0;
             loop {
@@ -10409,7 +10411,11 @@ impl Engine {
                 let (caught, stopped) = with_script_js(bindings, || {
                     let _job = rustkit_js::DiagJob::enter("timer");
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        if virtual_frames {
+                            bindings.run_timers_for_virtual_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        } else {
+                            bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        }
                     }))
                 });
                 let slice_ms = step_started.elapsed().as_millis() as u64;
