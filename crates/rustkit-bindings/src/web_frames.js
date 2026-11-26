@@ -26,9 +26,10 @@
 // `srcdoc`, `name` targeting and `window.frames[i]` are not here.
 (function (g) {
     var HOOKS = __rk.domHooks;
-    var request = g.__rustkit_frame_request;
+    var request = g.__rustkit_frame_request, prebuild = g.__rustkit_frame_prebuild;
     // Taken off the window first, whatever follows.
     delete g.__rustkit_frame_request;
+    delete g.__rustkit_frame_prebuild;
     if (!HOOKS || !HOOKS.nodeId || typeof request !== 'function' || __rk.frames) return;
     // Taken now, before page script: the engine's side below (the scan,
     // a frame's size) calls only these and plain loops.
@@ -77,13 +78,16 @@
     // returns: what would hear it is recorded now (`HOOKS.loadSnapshot`)
     // and the `load` is replayed to that record (`loaded`), or not asked
     // for at all when the record is empty.
-    var NORMAL = 0, QUIET = 1, INITIAL = 2, PREBUILT = 4;
+    var NORMAL = 0, QUIET = 1, INITIAL = 2;
     // The document's spare child (JETSTREAM-IFRAME-SYNC): `{ win, become }`,
     // a realm the engine built at a drain, bound to an about:blank document.
     // A frame this document's script inserts with no `src` (or about:blank)
-    // takes it at once: `contentWindow` / `contentDocument` answer inside the
-    // insertion, as in Chrome, and the engine adopts it at the drain. One at a
-    // time; the engine offers the next.
+    // can take it: `contentWindow` / `contentDocument` answer inside the
+    // insertion, as in Chrome, and the engine adopts it at the drain. It is
+    // attached at the first such read before the drain (SPARE-COST): a frame
+    // nobody reads first (Speedometer's runner, each iteration) is built at the
+    // drain as with spares off, and the spare stays. One at a time; the
+    // engine offers the next.
     var spare = null;
     var heardAt = create(null); // node id -> what could hear the blank load
     function navigate(el, inserted, parsed) {
@@ -97,21 +101,28 @@
             var snap = HOOKS.loadSnapshot(el, !!parsed);
             if (snap) { heardAt[id] = snap; mode = INITIAL; } else { delete heardAt[id]; mode = QUIET; }
         }
-        // The spare, for the insertion's blank document. Not for a sandboxed
-        // frame (the engine leaves it blank: the floor).
-        var s = null;
-        if ((inserted || parsed) && url === 'about:blank' && spare && getAttr(el, 'sandbox') === null) {
-            s = spare;
-            mode |= PREBUILT;
-        }
-        // Attached only once the engine kept the request: a refused one
-        // (past the bound) leaves the spare with the document.
+        // The spare may serve the insertion's blank document (`attach`, at
+        // the first read). Not for a sandboxed frame (the engine leaves it
+        // blank: the floor). Only once the engine kept the request: a
+        // refused one (past the bound) leaves the spare with the document.
         var kept = request(id, url, mode) === true;
-        if (s && kept) {
+        if (kept && (inserted || parsed) && url === 'about:blank' && getAttr(el, 'sandbox') === null) {
+            frames[id].lazy = true;
+        }
+    }
+    // The frame's record, with the spare attached first if the frame may
+    // take it and its blank request is still waiting for the drain.
+    function attach(el) {
+        var r = frames[HOOKS.nodeId(el)];
+        if (!r || r.win || !r.lazy) return r;
+        r.lazy = false;
+        if (spare && isConnected(el) && typeof prebuild === 'function' && prebuild(HOOKS.nodeId(el)) === true) {
+            var s = spare;
             spare = null;
-            frames[id].win = s.win;
+            r.win = s.win;
             s.become(g, __rk.realTop, el);
         }
+        return r;
     }
     function gone(el) {
         var id = HOOKS.nodeId(el);
@@ -225,11 +236,11 @@
     var F = g.HTMLIFrameElement && g.HTMLIFrameElement.prototype;
     if (F) {
         Object.defineProperty(F, 'contentWindow', {
-            get: function () { var r = frames[HOOKS.nodeId(this)]; return r && r.win || null; },
+            get: function () { var r = attach(this); return r && r.win || null; },
             enumerable: true, configurable: true
         });
         Object.defineProperty(F, 'contentDocument', {
-            get: function () { var r = frames[HOOKS.nodeId(this)]; return r && r.win ? r.win.document : null; },
+            get: function () { var r = attach(this); return r && r.win ? r.win.document : null; },
             enumerable: true, configurable: true
         });
     }
