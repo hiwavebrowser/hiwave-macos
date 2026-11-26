@@ -1,0 +1,5 @@
+{
+ "three_deep": "101|1,10,100",
+ "unbounded": "RangeError|Maximum call stack size exceeded|true",
+ "after": 42
+}

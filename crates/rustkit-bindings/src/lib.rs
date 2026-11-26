@@ -2040,6 +2040,13 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Install `WebAssembly` in this realm (WASM W1; the engine's
+    /// `webassembly` flag, docs/design/WASM-W1.md).
+    pub fn enable_webassembly(&self) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().enable_webassembly()?;
+        Ok(())
+    }
+
     /// Turn on the page half of `<iframe>` (web_frames.js): frame requests
     /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
     /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
