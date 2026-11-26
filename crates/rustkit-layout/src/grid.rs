@@ -2548,7 +2548,14 @@ pub fn layout_grid_container(
                                 ),
                                 ..Default::default()
                             };
-                            grandchild.calculate_block_width(&item_box);
+                            // With the item's percentage base (GR6 above): a
+                            // percentage height gives an aspect-ratio width. A
+                            // definite base makes the pre-pass's `auto` mark
+                            // stale, as for the flex and nested passes below.
+                            if percent_base.is_some() {
+                                grandchild.percent_height_is_auto = false;
+                            }
+                            grandchild.calculate_block_width_based(&item_box, percent_base);
                         }
                         // A percentage width is a share of the ITEM, which the
                         // block pre-pass did not have: it sized the image

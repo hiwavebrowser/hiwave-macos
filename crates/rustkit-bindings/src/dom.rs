@@ -2308,18 +2308,7 @@ pub(crate) fn install(
                 if arg.is_empty() {
                     return JsValue::String(String::new());
                 }
-                let (mut all, mut frame) = (Vec::new(), false);
-                document.traverse(|n| {
-                    let Some(tag) = n.tag_name() else { return };
-                    let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
-                    if n.get_attribute("id") == Some(arg)
-                        || (n.get_attribute("name") == Some(arg) && is(&["embed", "form", "img", "object"]))
-                    {
-                        all.push(n.clone());
-                    } else if n.get_attribute("name") == Some(arg) && is(&["iframe", "frame"]) {
-                        frame = true;
-                    }
-                });
+                let (all, frame) = named_lookup(document, arg);
                 if all.is_empty() && frame {
                     return JsValue::String("frame".into());
                 }
@@ -3279,6 +3268,8 @@ const WRAPPERS_JS: &str = r#"
         own('top', top, false);
         own('frameElement', el, false);
         __rk.realTop = top;
+        // A frame's document has open/write/close (JETSTREAM-IFRAME-SYNC).
+        if (__rk.installFrameWrite) __rk.installFrameWrite(el);
     };
     // An interface's own fields (`[name, default]` pairs), its parent and
     // a finishing step (a direct call; WheelEvent's legacy deltas).
@@ -5030,9 +5021,32 @@ const WRAPPERS_JS: &str = r#"
         if (inline) {
             var stale = !!info(el, 'stale');
             var slot = inline.length ? slotOf(el) : null;
+            // A flow-relative size and its physical property are one property (LOGICAL-SIZE):
+            // the later of the two declarations is the one that counts, under the physical name.
+            // Only when the inline style holds a flow-relative size does this change anything.
+            var lastOf = null;
+            for (var i = 0; i < inline.length; i++) {
+                if (hasOwn(LOGICAL_SIZES, inline.item(i))) { lastOf = {}; break; }
+            }
+            if (lastOf) {
+                for (var i = 0; i < inline.length; i++) {
+                    var nm = inline.item(i);
+                    if (hasOwn(LOGICAL_SIZES, nm)) lastOf[LOGICAL_SIZES[nm]] = i;
+                    else if (hasOwn(PHYSICAL_SIZES, nm)) lastOf[nm] = i;
+                }
+            }
             for (var i = 0; i < inline.length; i++) {
                 var name = inline.item(i);
                 var v = inline.getPropertyValue(name);
+                if (lastOf) {
+                    // An earlier declaration of the same size is overridden; a flow-relative one
+                    // stands in for its physical property from here on.
+                    var physical = hasOwn(LOGICAL_SIZES, name) ? LOGICAL_SIZES[name] : name;
+                    if (hasOwn(lastOf, physical)) {
+                        if (lastOf[physical] !== i) continue;
+                        name = physical;
+                    }
+                }
                 if (!v) continue;
                 // An animated property (Web Animations' layer, a CSS
                 // animation or transition) reads the engine's row: the
@@ -5089,6 +5103,13 @@ const WRAPPERS_JS: &str = r#"
         if (named) return '::' + named[1];
         return /^::(marker|selection|backdrop|placeholder)$/.test(p) ? p : null;
     }
+    // css-logical-1 §4.1 in horizontal-tb: the flow-relative sizes are the physical ones.
+    var LOGICAL_SIZES = {
+        'inline-size': 'width', 'block-size': 'height',
+        'min-inline-size': 'min-width', 'min-block-size': 'min-height',
+        'max-inline-size': 'max-width', 'max-block-size': 'max-height'
+    };
+    var PHYSICAL_SIZES = { 'width': 1, 'height': 1, 'min-width': 1, 'min-height': 1, 'max-width': 1, 'max-height': 1 };
     function makeComputed(el, pseudo) {
         var m = pseudo === null ? {} : computedMap(el, pseudo);
         // Listed on demand: a read of one property should not pay for the
@@ -5122,7 +5143,8 @@ const WRAPPERS_JS: &str = r#"
         function read(n) {
             var v = cache[n];
             if (v !== undefined) return v;
-            v = computedValue(m, n);
+            // A flow-relative size reads its physical property (horizontal-tb; LOGICAL-SIZE).
+            v = computedValue(m, hasOwn(LOGICAL_SIZES, n) ? LOGICAL_SIZES[n] : n);
             if (v === undefined) return customValue(n);
             return (cache[n] = v);
         }
@@ -7257,12 +7279,32 @@ const WRAPPERS_JS: &str = r#"
     //      global document, attached to it or not (`createElement('body')`
     //      forwards too; the spec never asks whether it is THE body element).
     function isBodyOrFrameset(t) {
-        if (t.nodeType !== 1) return false;
+        // The Window is not a node: asking it for `nodeType` would be named access on the
+        // Window, a walk of the whole document per event (STRESS-SPEED).
+        if (t === g || t.nodeType !== 1) return false;
         var n = t.localName;
         return n === 'body' || n === 'frameset';
     }
     function windowHandlerTarget(t) {
         return isBodyOrFrameset(t) ? (t.ownerDocument === doc ? g : null) : t;
+    }
+    // `name` on the Window, its prototypes and EventTarget's, but never named access on the
+    // Window (web_named_access.js's WindowProperties, which walks the whole document): an
+    // element an id or name picks out is not an event handler. Every event that reaches the
+    // Window asks for its `on<type>` (STRESS-SPEED: `ontodo-add` and friends on Speedometer).
+    // The helpers of install time: a page that replaces them (or `Function.prototype.call`)
+    // does not change what dispatch reads.
+    var winProtoOf = Object.getPrototypeOf, winOwnDesc = Object.getOwnPropertyDescriptor;
+    var winTag = Function.prototype.bind.bind(Function.prototype.call)(Object.prototype.toString);
+    var winBindCall = Function.prototype.bind.bind(Function.prototype.call);
+    function windowProperty(name) {
+        var W = g.Window, named = W && winProtoOf(W.prototype);
+        for (var o = g; o; o = winProtoOf(o)) {
+            if (o === named && winTag(o) === '[object WindowProperties]') continue;
+            var d = winOwnDesc(o, name);
+            if (d) return d.get ? winBindCall(d.get)(g) : d.value;
+        }
+        return undefined;
     }
     function handlerOf(t, type) {
         if (PLAIN.has(t)) return undefined;
@@ -7272,6 +7314,7 @@ const WRAPPERS_JS: &str = r#"
         if (WINDOW_HANDLER_TYPES[type] && isBodyOrFrameset(t)) return undefined;
         var a = ASSIGNED.get(t);
         if (a && type in a) return a[type];
+        if (t === g) return windowProperty('on' + type);
         if (!t[SLOT] || t.nodeType !== 1) return t['on' + type];
         // A type with no accessor (a custom event) is still a data property.
         if (!HANDLER_TYPES[type]) {
@@ -8396,4 +8439,59 @@ fn layer_reads<'a>(props: impl Iterator<Item = &'a str>) -> Option<u8> {
         };
     }
     Some(reads)
+}
+
+/// A document's named-access index: each id, and each name on an embed/form/img/object, to its
+/// elements in tree order; `true` where an iframe/frame carries the name (and no id says it).
+type NamedIndex = HashMap<String, (Vec<std::rc::Weak<Node>>, bool)>;
+
+thread_local! {
+    /// How many times named access on the Window walked a whole document (WINDOW-NAMED-INDEX).
+    static NAMED_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The last index built: for which document, at which DOM mutation generation. Weak nodes, so
+    /// it keeps no node (and no document) alive.
+    static NAMED_INDEX: RefCell<Option<(usize, u64, NamedIndex)>> = const { RefCell::new(None) };
+}
+
+/// Named access on the Window object (HTML §7.2.2.3): the elements whose id is `name`, or whose
+/// name is `name` on an embed, form, img or object, in tree order, and whether an iframe/frame
+/// carries the name. WINDOW-NAMED-INDEX: answered from an index of the whole document built in
+/// one walk and kept until any DOM tree on this thread changes (`mutation_generation`), so a page
+/// that reads missing globals (or the engine's own dispatch, before STRESS-SPEED's fix) no longer
+/// walks the document per read. The answers are the walk's: same matches, same order.
+fn named_lookup(document: &Document, name: &str) -> (Vec<Rc<Node>>, bool) {
+    let key = (document as *const Document as usize, rustkit_dom::mutation_generation());
+    NAMED_INDEX.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if !matches!(&*slot, Some((p, g, _)) if (*p, *g) == key) {
+            NAMED_WALKS.with(|w| w.set(w.get() + 1));
+            let mut index = NamedIndex::new();
+            document.traverse(|n| {
+                let Some(tag) = n.tag_name() else { return };
+                let is = |names: &[&str]| names.iter().any(|k| tag.eq_ignore_ascii_case(k));
+                let id = n.get_attribute("id").filter(|v| !v.is_empty());
+                if let Some(id) = id {
+                    index.entry(id.to_string()).or_default().0.push(Rc::downgrade(n));
+                }
+                if let Some(nm) = n.get_attribute("name").filter(|v| !v.is_empty() && Some(*v) != id) {
+                    if is(&["embed", "form", "img", "object"]) {
+                        index.entry(nm.to_string()).or_default().0.push(Rc::downgrade(n));
+                    } else if is(&["iframe", "frame"]) {
+                        index.entry(nm.to_string()).or_default().1 = true;
+                    }
+                }
+            });
+            *slot = Some((key.0, key.1, index));
+        }
+        match slot.as_ref().and_then(|(_, _, index)| index.get(name)) {
+            Some((nodes, frame)) => (nodes.iter().filter_map(std::rc::Weak::upgrade).collect(), *frame),
+            None => (Vec::new(), false),
+        }
+    })
+}
+
+/// This thread's count of named-access document walks (a test's count).
+#[cfg(test)]
+pub(crate) fn named_walks() -> u64 {
+    NAMED_WALKS.with(|w| w.get())
 }
