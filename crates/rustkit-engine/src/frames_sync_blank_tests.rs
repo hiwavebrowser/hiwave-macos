@@ -12,7 +12,6 @@
 
 use super::*;
 use crate::script_net_tests::serve_routes;
-use std::time::Duration;
 
 struct Page {
     engine: Engine,
