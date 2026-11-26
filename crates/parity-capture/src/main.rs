@@ -2466,6 +2466,10 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     // timeline is on the grid; frame callbacks' timestamps and performance.now() flow as in a
     // --live-ms run.
     config.grid_frame_stamps = args.live_ms.is_none();
+    // The load's timer horizon in frames of virtual time whenever there is no --live-ms
+    // (LOAD-VIRTUAL-TIME): what the page's timers see of layout and observers then depends on the
+    // timers' clock, not on how fast this build or this machine runs them.
+    config.virtual_load_frames = args.live_ms.is_none();
     // The replay transport restricts sockets (including redirects) to this
     // loopback endpoint. The WPT interceptor also checks the requested origin.
     config.replay_proxy = if args.wpt {
