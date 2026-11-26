@@ -3628,7 +3628,9 @@ const WRAPPERS_JS: &str = r#"
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = objCreate(proto);
-        defineOwn(w, SLOT, { value: slotRecord(id) });
+        var r = slotRecord(id);
+        r.t = t;
+        defineOwn(w, SLOT, { value: r });
         cache.set(id, w);
         return w;
     }
@@ -4440,40 +4442,23 @@ const WRAPPERS_JS: &str = r#"
         if (arguments.length < 2) {
             throw new TypeError("Failed to execute 'setAttribute' on 'Element': 2 arguments required.");
         }
-        var n = typeof name === 'string' ? name : String(name);
-        var v = typeof value === 'string' ? value : String(value);
-        var c0 = n[0];
+        var n = String(name), c0 = n[0];
         // A name that begins with o, s or a (either case) may be one the steps after a write act on
         // (`on<type>`, `async`, `src`, `srcset`): those take the full write. Any other name is a plain write.
         if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
-            setData(this, 'setAttr', n, v, 'setAttribute');
+            setData(this, 'setAttr', n, String(value), 'setAttribute');
             imageWritten(this, n);
         } else {
-            var s = this[SLOT];
-            if (!s) throw new TypeError('Illegal invocation');
-            var m = HOOKS.mutation && HOOKS.mutation.data(this, 'setAttr', n);
-            var ar = HOOKS.attrs && HOOKS.attrs(this, 'setAttr', n);
-            var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, n, v);
-            if (typeof r === 'string') throw new DOMException("Failed to execute 'setAttribute'.", r);
-            if (m) m();
-            if (ar) ar();
+            putAttr(this, 'setAttr', n, String(value), 'setAttribute');
         }
     };
     Element.prototype.removeAttribute = function (name) {
-        var n = typeof name === 'string' ? name : String(name);
-        var c0 = n[0];
+        var n = String(name), c0 = n[0];
         if (c0 === 'o' || c0 === 's' || c0 === 'a' || c0 === 'O' || c0 === 'S' || c0 === 'A') {
             setData(this, 'removeAttr', n, null, 'removeAttribute');
             imageWritten(this, n);
         } else {
-            var s = this[SLOT];
-            if (!s) throw new TypeError('Illegal invocation');
-            var m = HOOKS.mutation && HOOKS.mutation.data(this, 'removeAttr', n);
-            var ar = HOOKS.attrs && HOOKS.attrs(this, 'removeAttr', n);
-            var r = N.write(gen, 'removeAttr', s.gen === gen ? s.id : -1, n, null);
-            if (typeof r === 'string') throw new DOMException("Failed to execute 'removeAttribute'.", r);
-            if (m) m();
-            if (ar) ar();
+            putAttr(this, 'removeAttr', n, null, 'removeAttribute');
         }
     };
     Element.prototype.toggleAttribute = function (name, force) {
