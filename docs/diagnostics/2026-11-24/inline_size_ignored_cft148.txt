@@ -1,0 +1,7 @@
+isi.html
+  plain: x=0 y=1 w=8 h=17
+  ib: x=0 y=20 w=300 h=30
+  img: x=0 y=50 w=40 h=30
+  fi: x=0 y=86 w=120 h=30
+  gi: x=0 y=116 w=120 h=30
+  pct: x=0 y=147 w=8 h=17

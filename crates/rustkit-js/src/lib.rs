@@ -663,6 +663,24 @@ impl Drop for JsRuntime {
     }
 }
 
+#[cfg(all(feature = "boa", not(feature = "script-phase-tracing")))]
+#[inline(always)]
+fn script_phase<T>(_phase: &'static str, _bytes: usize, run: impl FnOnce() -> T) -> T {
+    run()
+}
+
+#[cfg(feature = "script-phase-tracing")]
+fn script_phase<T>(phase: &'static str, bytes: usize, run: impl FnOnce() -> T) -> T {
+    if !tracing::enabled!(target: "rustkit_js::script_phases", tracing::Level::DEBUG) {
+        return run();
+    }
+    let start = std::time::Instant::now();
+    let result = run();
+    tracing::debug!(target: "rustkit_js::script_phases", phase, bytes,
+        elapsed_us = start.elapsed().as_micros() as u64);
+    result
+}
+
 impl JsRuntime {
     /// Create a new JavaScript runtime.
     pub fn new() -> Result<Self, JsError> {
@@ -1676,11 +1694,16 @@ impl JsRuntime {
             let source_path = std::path::Path::new(path.unwrap_or(diag::EMBEDDER_PATH));
             let compiled = {
                 let _detail = ErrorDetailScope::enter(detail);
-                boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
-                    .and_then(|script| script.codeblock(&mut self.context).map(|_| script))
+                script_phase("parse", source.len(), || {
+                    boa_engine::Script::parse(Source::from_bytes(source).with_path(source_path), None, &mut self.context)
+                }).and_then(|script| {
+                    script_phase("compile", source.len(), || script.codeblock(&mut self.context)).map(|_| script)
+                })
             };
-            let result = compiled.and_then(|script| script.evaluate(&mut self.context));
-            self.settle_evaluation(result, path)
+            let result = compiled.and_then(|script| {
+                script_phase("execute", source.len(), || script.evaluate(&mut self.context))
+            });
+            script_phase("settle", source.len(), || self.settle_evaluation(result, path))
         }
 
         #[cfg(not(feature = "boa"))]
@@ -2304,6 +2327,57 @@ impl JsRuntime {
         #[cfg(not(feature = "boa"))]
         {
             let _ = (name, length, function, with_caller, op_arg);
+            Err(JsError::NotInitialized)
+        }
+    }
+
+    /// Register `name` in the current realm: a function that runs its first
+    /// argument, synchronously, as a classic script of THIS realm (the one
+    /// current now), whatever realm calls it, and returns its completion
+    /// value. An exception the script throws propagates to the caller.
+    ///
+    /// For `document.write` (JETSTREAM-IFRAME-SYNC): a frame's written
+    /// scripts run inside the `write` call, in the frame's realm, as the
+    /// parser reaches them. A classic script, not an indirect `eval`: its
+    /// top-level `let`/`class` go to the realm's global lexical scope, shared
+    /// with the realm's other scripts. No job runs inside it (Boa runs jobs
+    /// only when asked), so no microtask checkpoint happens between written
+    /// scripts, as in Chrome. The running script's deadline applies: past it,
+    /// the call is refused like any host call.
+    pub fn register_script_runner(&mut self, name: &str) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            use boa_engine::{JsString, NativeFunction, Script, Source};
+            let deadline = self.deadline.clone();
+            // SAFETY: the closure captures only the deadline (no GC-managed
+            // data). It must NOT capture the realm: a `Realm` held by an
+            // untraced closure is a root the collector never releases, which
+            // kept every navigated-away document alive (navigation_release_tests,
+            // #1440). It needs none: Boa calls a native function in the realm it
+            // was created in (`NativeFunctionObject::realm`, swapped in by the
+            // call), so the context's realm here IS this function's realm.
+            let native = unsafe {
+                NativeFunction::from_closure(move |_this, args, context| {
+                    if deadline.at.get().is_some_and(|at| std::time::Instant::now() >= at)
+                        && !context.stop_finally_running()
+                    {
+                        return Err(boa_engine::error::RuntimeLimitError::LoopIteration.into());
+                    }
+                    let source = match args.first() {
+                        Some(v) => v.to_string(context)?.to_std_string_escaped(),
+                        None => return Ok(boa_engine::JsValue::undefined()),
+                    };
+                    Script::parse(Source::from_bytes(source.as_bytes()), None, context)
+                        .and_then(|script| script.evaluate(context))
+                })
+            };
+            self.context
+                .register_global_callable(JsString::from(name), 1, native)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))
+        }
+        #[cfg(not(feature = "boa"))]
+        {
+            let _ = name;
             Err(JsError::NotInitialized)
         }
     }
