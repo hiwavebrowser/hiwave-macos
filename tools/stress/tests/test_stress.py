@@ -993,8 +993,9 @@ def test_frame_spares_read_the_engines_last_running_total(tmp_path):
 
 
 # FRAME-FLOOR-HEADLESS: MotionMark's ramp score is the knee of a frame-time-vs-complexity fit around the
-# 60 fps target. An engine that never reaches the target, even at complexity 1, gives the fit nothing to
-# find, and the score lands at either end (1 or ~220 on the same binary). Such a run is not a score.
+# 60 fps target. When the ramp's lowest-complexity samples (reporter.js's first complexity bin) are already
+# below the target, the fit has no at-target segment, and the score lands at either end (1 or ~220 on the
+# same binary). Such a run is not a score.
 def test_a_motionmark_ramp_below_target_fps_is_not_a_score(tmp_path):
     for i, s in enumerate([1.0, 223.0, 210.0]):
         record(tmp_path, "motionmark", "base", s, i, low_fps=45.7)

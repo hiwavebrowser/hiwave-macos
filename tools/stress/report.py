@@ -37,8 +37,12 @@ import sys
 
 SCORE_LOAD = 3.0
 # FRAME-FLOOR-HEADLESS: MotionMark's ramp score is the knee of a frame-time-vs-complexity fit around its
-# 60 fps target. A run whose lowest complexity step is already below TARGET_FPS gives the fit no knee, and
-# the score lands at either end (Multiply: 1 and 223 from the same binary). Such a run is not a score.
+# 60 fps target. reporter.js sorts the ramp's samples by complexity and bins them (`frames[test].steps`),
+# so steps[0] is the run's lowest-complexity samples: the points the fit starts from. When those are
+# already below TARGET_FPS the fit has no at-target segment, its knee is ill-posed, and the score lands at
+# either end (Multiply: 1 and 223 from the same binary). Such a run is not a score. (Inside a ramp those
+# samples are mostly frames just after a big drop in complexity: on the Mac they average ~22 ms while a run
+# held at complexity 1 takes 16.7 ms, so this reads the ramp, not a steady per-frame floor.)
 TARGET_FPS = 58.0
 DEFAULT_DIR = pathlib.Path.home() / "zg-measure" / "stress-runs"
 
@@ -67,8 +71,8 @@ def load(dirs, partial, raised=False):
 
 
 def below_target_fps(r):
-    """A MotionMark ramp run (no fixed `complexity`) whose lowest step of any subtest ran below TARGET_FPS
-    (run.py's `frames`, from reporter.js)."""
+    """A MotionMark ramp run (no fixed `complexity`) whose lowest-complexity bin of samples, in any subtest,
+    ran below TARGET_FPS (run.py's `frames`: reporter.js's samples sorted by complexity, in 12 bins)."""
     if r.get("suite") != "motionmark" or r.get("complexity") is not None:
         return False
     for test in (r.get("frames") or {}).values():
