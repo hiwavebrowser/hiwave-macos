@@ -1015,6 +1015,19 @@ pub struct FloatExclusion {
     pub float_type: Float,
 }
 
+/// INLINE-MID-LINE: the line a non-atomic inline starts on, handed down by
+/// the block's inline loop (CSS2 §9.4.2: an inline box is split across line
+/// boxes). `left` and `width` are the line box's absolute left edge and
+/// width, `line_top` its absolute top, and `pen` how far along it the inline
+/// starts. Lines after the first start at `left`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct InlineFlow {
+    pub left: f32,
+    pub width: f32,
+    pub line_top: f32,
+    pub pen: f32,
+}
+
 /// Float context for tracking float exclusions.
 #[derive(Debug, Clone, Default)]
 pub struct FloatContext {
@@ -2073,6 +2086,16 @@ pub struct LayoutBox {
     /// visual line" — a mid-line first fragment must never be re-aligned
     /// as if it owned its whole line.
     pub text_flow_first_offset: Option<f32>,
+    /// INLINE-MID-LINE: set by a block's inline loop just before it lays out
+    /// a non-atomic inline, so the inline's text can start at the current
+    /// pen position and wrap at the line box's width (`layout_inline`).
+    /// Taken (cleared) by the layout that reads it.
+    pub(crate) inline_flow: Option<InlineFlow>,
+    /// INLINE-MID-LINE: what an inline laid out with `inline_flow` left
+    /// behind when its content wrapped: `(line boxes it spans, absolute x
+    /// where its last line ends, the last wrapped run's line height)`.
+    /// `None` when it stayed on one line (or was not laid out in flow).
+    pub(crate) inline_flow_end: Option<(usize, f32, f32)>,
     /// Set by the parent before it lays this box out: the parent's height
     /// depends on its content, so a percentage `height` here computes to
     /// `auto` (CSS 2.1 §10.5) instead of taking the viewport fallback. Only
@@ -2331,6 +2354,8 @@ impl LayoutBox {
             node_id: None,
             text_lines: None,
             text_flow_first_offset: None,
+            inline_flow: None,
+            inline_flow_end: None,
             percent_height_is_auto: false,
             children_laid_at: None,
             abspos_cb_hint: None,
@@ -2760,16 +2785,26 @@ impl LayoutBox {
         // box starts: `(line_count - 1) * line_height`, the largest over the
         // wrapped descendants. `reach` is the bottom of the last line box.
         // `frags` collects the horizontal extents only.
-        fn collect(b: &LayoutBox, frags: &mut Vec<Rect>, drop: &mut f32, reach: &mut f32) {
+        //
+        // A run laid out mid-line (INLINE-MID-LINE) can start on a later line
+        // than the inline's first, after a run before it wrapped, so its
+        // drop is counted from the top of the inline's first run, not its own.
+        fn collect(b: &LayoutBox, frags: &mut Vec<Rect>, drop: &mut f32, reach: &mut f32, top: &mut Option<f32>) {
+            if matches!(b.box_type, BoxType::Text(_)) {
+                top.get_or_insert(b.dimensions.content.y);
+            }
             if let Some(f) = b.text_line_fragments() {
+                let content = b.dimensions.content;
+                let first_top = top.unwrap_or(content.y);
                 if f.len() > 1 {
-                    let content = b.dimensions.content;
                     // The lines step by the run's pitch where SET2 gave it one (the strut union,
                     // taller than the run's own line-height); the last line is only the run's
                     // own, so the average of the content height undercounts the drop
-                    // (WRAPPED-SPAN-STRUT: 58.07 for Chrome's 59.375).
+                    // (WRAPPED-SPAN-STRUT: 58.07 for Chrome's 59.375). A run that starts mid-line
+                    // drops by its offset below the first fragment too (INLINE-MID-LINE).
                     let line_height = b.text_line_pitch.unwrap_or(content.height / f.len() as f32);
-                    *drop = drop.max((f.len() as f32 - 1.0) * line_height);
+                    let below = (content.y - first_top).max(0.0);
+                    *drop = drop.max(below + (f.len() as f32 - 1.0) * line_height);
                     *reach = reach.max(content.y + content.height);
                     frags.extend(f);
                 }
@@ -2780,7 +2815,7 @@ impl LayoutBox {
             // too-wide rect instead of removing a too-small one.
             for c in &b.children {
                 if matches!(c.box_type, BoxType::Inline | BoxType::Text(_)) {
-                    collect(c, frags, drop, reach);
+                    collect(c, frags, drop, reach, top);
                 }
             }
         }
@@ -2788,7 +2823,7 @@ impl LayoutBox {
         let mut frags = Vec::new();
         let mut drop = 0.0f32;
         let mut reach = f32::NEG_INFINITY;
-        collect(self, &mut frags, &mut drop, &mut reach);
+        collect(self, &mut frags, &mut drop, &mut reach, &mut None);
         if frags.is_empty() {
             return None;
         }
@@ -3207,10 +3242,78 @@ impl LayoutBox {
         let mut max_height = 0.0f32;
         let mut seam: Option<SeamEdge> = None;
 
+        // INLINE-MID-LINE (CSS2 §9.4.2): laid out on a line the block's
+        // inline loop described, the inline's text starts at the pen and
+        // wraps at the line box's width, and what follows a wrapped run
+        // starts where that run's last line ends. Without it a span that did
+        // not fit the rest of the line was moved whole to the next line
+        // (`<b>Lead</b> <span>long text</span>` one line taller than Chrome),
+        // and a run after a wrapped child started every line at the cursor.
+        let flow = self.inline_flow.take();
+        self.inline_flow_end = None;
+        let start_pen = flow.map_or(0.0, |f| self.dimensions.content.x - f.left);
+        let mut pen = start_pen;
+        let mut line_top = flow.map_or(0.0, |f| f.line_top);
+        let mut spanned = 1usize;
+        let mut last_lh = 0.0f32;
+        let mut first_line_end: Option<f32> = None;
+
         for child in &mut self.children {
             // Cross-node shaping inside the inline (`seam_kern`).
-            cursor_x += Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+            let kern = Self::seam_kern(seam.as_ref(), Self::seam_edge(child, false).as_ref());
+            cursor_x += kern;
             seam = Self::seam_edge(child, true);
+            if let Some(f) = flow {
+                pen += kern;
+                let mut cb = self.dimensions.clone();
+                cb.content.x = f.left + pen;
+                cb.content.y = line_top;
+                cb.content.width = available_width;
+                cb.content.height = 0.0;
+                if Self::text_splits_inline(child, pen) && child.text_single_line_width() > f.width - pen + 0.01 {
+                    let mut line_cb = cb.clone();
+                    line_cb.content.x = f.left;
+                    line_cb.content.width = f.width;
+                    let (n, last_w) =
+                        child.layout_text_in_flow(&line_cb, line_top, pen, &FloatContext::new(), (0.0, f.width));
+                    if n > 1 {
+                        let first = child.text_lines.as_ref().and_then(|l| l.first()).map_or(0.0, |l| l.width);
+                        first_line_end.get_or_insert(pen + first);
+                        let lh = child.get_line_height();
+                        spanned += n - 1;
+                        line_top += (n - 1) as f32 * lh;
+                        last_lh = lh;
+                        pen = last_w;
+                    } else {
+                        pen += last_w;
+                    }
+                    cursor_x = pen - start_pen;
+                    continue;
+                }
+                if matches!(child.box_type, BoxType::Inline)
+                    && child.style.display == rustkit_css::Display::Inline
+                    && !Self::stays_out_of_flow(child)
+                {
+                    child.inline_flow = Some(InlineFlow { left: f.left, width: f.width, line_top, pen });
+                }
+                child.layout_with_definite_height(&cb, 0.0);
+                if matches!(child.position, Position::Absolute | Position::Fixed) {
+                    continue;
+                }
+                match child.inline_flow_end {
+                    Some((n, end, lh)) => {
+                        let d = &child.dimensions;
+                        first_line_end.get_or_insert(d.content.x - f.left + d.content.width);
+                        spanned += n - 1;
+                        line_top += (n - 1) as f32 * lh;
+                        last_lh = lh;
+                        pen = end - f.left;
+                    }
+                    None => pen += child.dimensions.margin_box().width,
+                }
+                cursor_x = pen - start_pen;
+                continue;
+            }
             let mut cb = self.dimensions.clone();
             cb.content.x = self.dimensions.content.x + cursor_x;
             cb.content.width = available_width; // Pass parent's available width
@@ -3233,8 +3336,18 @@ impl LayoutBox {
         // 1. Use explicit CSS width if specified
         // 2. Otherwise use computed width from children
         // 3. Ensure minimum width for padding/border contribution
+        let wrapped_in_flow = flow.filter(|_| spanned > 1);
+        if let Some(f) = wrapped_in_flow {
+            let d = &self.dimensions;
+            let right = d.padding.right + d.border.right + d.margin.right;
+            self.inline_flow_end = Some((spanned, f.left + pen + right, last_lh));
+        }
         let computed_width = if let Some(w) = explicit_width {
             w
+        } else if let (Some(_), Some(end)) = (wrapped_in_flow, first_line_end) {
+            // The box is its FIRST fragment, as the block-path text it
+            // replaces was; `inline_fragment_union` adds the others.
+            (end - start_pen).max(0.0)
         } else if cursor_x > 0.0 {
             cursor_x
         } else {
@@ -3530,7 +3643,62 @@ impl LayoutBox {
         }
         let mut out = None;
         walk(inline, container_left, &mut out);
-        out
+        // Laid out in flow (INLINE-MID-LINE), the inline knows how many line
+        // boxes it spans and where its last line ends, across ALL its wrapped
+        // runs; the last run alone undercounts when two of them wrap. The
+        // pitch still comes from the last run (SET2 writes it there).
+        match inline.inline_flow_end {
+            Some((n, end, lh)) => Some((n, (end - container_left).max(0.0), out.map_or(lh, |o| o.2))),
+            None => out,
+        }
+    }
+
+    /// Whether the in-flow path (INLINE-MID-LINE) leaves `b` out: an inline that holds a
+    /// preserved newline or spaced text is laid out as before it, moved whole to the next line
+    /// when it does not fit the rest of this one.
+    fn stays_out_of_flow(b: &LayoutBox) -> bool {
+        Self::holds_preserved_newline(b) || Self::holds_spaced_text(b)
+    }
+
+    /// Whether `b` is, or holds among its inline content, text with a non-zero `letter-spacing`
+    /// or `word-spacing`. The in-flow path wraps text with the shaper's widths, which carry
+    /// neither spacing (`layout_text_in_flow`), so a spaced inline measured short there and
+    /// started on a line it did not fit (WPT css-text/letter-spacing/letter-spacing-200 box 3:
+    /// `1 2 三<span>456</span>` with `letter-spacing:1em` drew `456` on the `1 2 三` line, and
+    /// with Ahem the text after it on the span's own line). Such an inline is not laid out in
+    /// flow: if it does not fit the rest of the line it moves to the next line, as before
+    /// INLINE-MID-LINE.
+    fn holds_spaced_text(b: &LayoutBox) -> bool {
+        match &b.box_type {
+            BoxType::Text(_) => {
+                !is_zero_length(&b.style.letter_spacing) || !is_zero_length(&b.style.word_spacing)
+            }
+            BoxType::Inline => b.children.iter().any(Self::holds_spaced_text),
+            _ => false,
+        }
+    }
+
+    /// Whether `b` is, or holds among its inline content, a preserved newline (text whose
+    /// `white-space` keeps newlines). INLINE-MID-LINE's in-flow path does not carry a newline
+    /// across an inline's edge (`1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap lost a line: WPT
+    /// css-text/letter-spacing/letter-spacing-200, batch 124), so an inline that holds one is not
+    /// laid out in flow: if it does not fit the rest of the line it moves to the next line, as
+    /// before INLINE-MID-LINE. Other inlines in the same block still start mid-line. A `<br>` is
+    /// carried.
+    fn holds_preserved_newline(b: &LayoutBox) -> bool {
+        match &b.box_type {
+            BoxType::Text(text) => {
+                matches!(
+                    b.style.white_space,
+                    rustkit_css::WhiteSpace::Pre
+                        | rustkit_css::WhiteSpace::PreWrap
+                        | rustkit_css::WhiteSpace::PreLine
+                        | rustkit_css::WhiteSpace::BreakSpaces
+                ) && text.contains('\n')
+            }
+            BoxType::Inline => b.children.iter().any(Self::holds_preserved_newline),
+            _ => false,
+        }
     }
 
     /// Whether a text child that does NOT fit the remaining line space
@@ -6910,6 +7078,12 @@ impl LayoutBox {
         let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
+        // INLINE-MID-LINE: a non-atomic inline starts mid-line and wraps on
+        // left-aligned, left-to-right lines with no floats beside them. Centred
+        // and right-aligned lines, and lines beside floats, keep moving an
+        // inline that does not fit to the next line for now.
+        let inline_flows = matches!(text_align, TextAlign::Left)
+            && self.style.direction == rustkit_css::Direction::Ltr;
         let strut_descent = self.inline_strut_descent();
         let strut = Self::text_line_box_extents(&self.style);
         // A `<br>` on an otherwise empty line still produces a line box of
@@ -7139,6 +7313,20 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
+                if inline_flows
+                    && container_allows_wrap
+                    && floats.is_empty()
+                    && matches!(child.box_type, BoxType::Inline)
+                    && child.style.display == rustkit_css::Display::Inline
+                    && !Self::stays_out_of_flow(child)
+                {
+                    child.inline_flow = Some(InlineFlow {
+                        left: self.dimensions.content.x + line_left,
+                        width: line_avail,
+                        line_top: self.dimensions.content.y + cursor_y,
+                        pen: cursor_x,
+                    });
+                }
                 child.layout_with_percent_base(
                     &cb,
                     definite_height.or((cb.content.height > 0.0).then_some(cb.content.height)),
@@ -7156,7 +7344,13 @@ impl LayoutBox {
                 };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
+                // An inline that started here and wrapped in flow is already
+                // split across the lines (INLINE-MID-LINE).
+                if container_allows_wrap
+                    && cursor_x > 0.0
+                    && cursor_x + child_width > line_avail
+                    && child.inline_flow_end.is_none()
+                {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((
@@ -8130,6 +8324,12 @@ impl LayoutBox {
         let mut line_extents = (0.0_f32, 0.0_f32);
         let container_width = self.dimensions.content.width;
         let text_align = self.style.text_align;
+        // INLINE-MID-LINE: a non-atomic inline starts mid-line and wraps on
+        // left-aligned, left-to-right lines with no floats beside them. Centred
+        // and right-aligned lines, and lines beside floats, keep moving an
+        // inline that does not fit to the next line for now.
+        let inline_flows = matches!(text_align, TextAlign::Left)
+            && self.style.direction == rustkit_css::Direction::Ltr;
         let strut_descent = self.inline_strut_descent();
         let strut = Self::text_line_box_extents(&self.style);
         // See layout_block_children: a `<br>` on an empty line is a line box.
@@ -8412,6 +8612,20 @@ impl LayoutBox {
                 // Children self-position at cb.y + cb.height; the cursor is
                 // already baked into cb.y, so the height term must be zero.
                 cb.content.height = 0.0;
+                if inline_flows
+                    && container_allows_wrap
+                    && floats.is_empty()
+                    && matches!(child.box_type, BoxType::Inline)
+                    && child.style.display == rustkit_css::Display::Inline
+                    && !Self::stays_out_of_flow(child)
+                {
+                    child.inline_flow = Some(InlineFlow {
+                        left: self.dimensions.content.x + line_left,
+                        width: line_avail,
+                        line_top: self.dimensions.content.y + cursor_y,
+                        pen: cursor_x,
+                    });
+                }
                 child.layout_with_collapse_in(&cb, margin_context, float_context, definite_height);
 
                 let child_width = child.dimensions.margin_box().width;
@@ -8426,7 +8640,13 @@ impl LayoutBox {
                 };
 
                 // Check if child fits on current line (nowrap/pre never soft-wrap)
-                if container_allows_wrap && cursor_x > 0.0 && cursor_x + child_width > line_avail {
+                // An inline that started here and wrapped in flow is already
+                // split across the lines (INLINE-MID-LINE).
+                if container_allows_wrap
+                    && cursor_x > 0.0
+                    && cursor_x + child_width > line_avail
+                    && child.inline_flow_end.is_none()
+                {
                     // Record completed line for text-align
                     if let Some(start) = line_start_index {
                         lines.push((

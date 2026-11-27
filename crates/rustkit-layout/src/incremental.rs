@@ -600,6 +600,10 @@ fn own_inputs_equal(a: &LayoutBox, b: &LayoutBox) -> bool {
         // (`abspos_cb_hint`); never an input from the tree.
         children_laid_at: _,
         abspos_cb_hint: _,
+        // INLINE-MID-LINE: the line a parent hands an inline just before
+        // laying it out (taken by that layout), and what the layout left.
+        inline_flow: _,
+        inline_flow_end: _,
         root_element_height,
         table_span,
         table_caption_shift,

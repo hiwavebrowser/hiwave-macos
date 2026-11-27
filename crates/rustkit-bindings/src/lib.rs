@@ -2118,6 +2118,28 @@ impl DomBindings {
                 JsValue::Null
             }),
         )?;
+        // A frame's blank request still in the queue becomes `prebuilt`: the
+        // page half attached the spare at the first read of its window
+        // (SPARE-COST). False once the request has been drained (the engine
+        // gave the frame its own window) or when there is none.
+        let queue = self.frame_requests.clone();
+        runtime.register_host_function(
+            "__rustkit_frame_prebuild",
+            1,
+            Box::new(move |args| {
+                let Some(JsValue::Number(node)) = args.first() else { return JsValue::Boolean(false) };
+                let node = *node as usize;
+                let mut queue = queue.borrow_mut();
+                let pending = queue.iter_mut().rev().find(|r| r.node == node);
+                match pending {
+                    Some(r) if !r.prebuilt && r.sandbox.is_none() && r.url.as_deref() == Some("about:blank") => {
+                        r.prebuilt = true;
+                        JsValue::Boolean(true)
+                    }
+                    _ => JsValue::Boolean(false),
+                }
+            }),
+        )?;
         runtime.evaluate_with_host(include_str!("web_frames.js"))?;
         Ok(())
     }
