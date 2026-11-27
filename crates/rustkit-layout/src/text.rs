@@ -1337,16 +1337,61 @@ pub(crate) const SHAPED_TEXT_MEMO_BYTES: usize = 32 << 20;
 
 type ShapedKey = (String, String, Vec<String>, u16, u8, u8, u32);
 
+fn shaped_key(
+    text: &str, chain: &FontFamilyChain, weight: FontWeight, style: FontStyle,
+    stretch: FontStretch, size: f32,
+) -> ShapedKey {
+    (text.to_owned(), chain.primary.clone(), chain.fallbacks.clone(), weight.0,
+        style as u8, stretch as u8, size.to_bits())
+}
+
+fn shaped_key_heap_bytes(key: &ShapedKey) -> usize {
+    key.0.capacity() + key.1.capacity()
+        + key.2.capacity() * std::mem::size_of::<String>()
+        + key.2.iter().map(String::capacity).sum::<usize>()
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct WrapKey {
+    shape: ShapedKey,
+    first_width: u32,
+    width: u32,
+    word_break: u8,
+    overflow_wrap: u8,
+    starts_mid_line: bool,
+    preserve_spaces: bool,
+}
+
+struct LineSpan {
+    start: usize,
+    end: usize,
+    width: f32,
+}
+
+// Store offsets relative to the segment. Glyphs and faces are already held by the shape memo.
+type LineSpans = std::rc::Rc<[LineSpan]>;
+const WRAP_MEMO_BYTES: usize = 2 << 20;
+
+fn wrap_entry_bytes(key: &WrapKey, spans: &LineSpans) -> usize {
+    use std::mem::{size_of, size_of_val};
+    size_of::<WrapKey>() + shaped_key_heap_bytes(&key.shape)
+        + 2 * size_of::<usize>() + size_of_val(&**spans)
+        + crate::text_memo::bookkeeping_bytes::<WrapKey, LineSpans>()
+}
+
+thread_local! {
+    static WRAP_MEMO: std::cell::RefCell<crate::text_memo::TextMemo<WrapKey, LineSpans>> =
+        std::cell::RefCell::new(crate::text_memo::TextMemo::with_byte_budget(
+            WRAP_MEMO_BYTES, wrap_entry_bytes,
+        ));
+}
+
 /// What one shaped-memo entry costs: the key and the run with everything
 /// they own on the heap (texts, family names, glyphs, face name) and the
 /// memo's per-entry bookkeeping. Allocator rounding is not counted.
 fn shaped_entry_bytes(key: &ShapedKey, run: &std::rc::Rc<ShapedRun>) -> usize {
     use std::mem::size_of;
-    let key_bytes = size_of::<ShapedKey>()
-        + key.0.capacity()
-        + key.1.capacity()
-        + key.2.capacity() * size_of::<String>()
-        + key.2.iter().map(String::capacity).sum::<usize>();
+    let key_bytes = size_of::<ShapedKey>() + shaped_key_heap_bytes(key);
     let run_bytes = 2 * size_of::<usize>()
         + size_of::<ShapedRun>()
         + run.text.capacity()
@@ -1790,15 +1835,7 @@ impl TextShaper {
         }
 
         let generation = rustkit_text::webfonts::generation();
-        let key: ShapedKey = (
-            text.to_string(),
-            font_chain.primary.clone(),
-            font_chain.fallbacks.clone(),
-            weight.0,
-            style as u8,
-            stretch as u8,
-            size.to_bits(),
-        );
+        let key = shaped_key(text, font_chain, weight, style, stretch, size);
         let cached = SHAPED_MEMO.with(|m| {
             let mut m = m.borrow_mut();
             m.sync_generation(generation);
@@ -2864,6 +2901,44 @@ impl TextShaper {
         }
 
         let mut lines = Vec::new();
+        // Short strings already fit cheaply through the shape memo. Long paragraphs often
+        // repeat at identical widths in successive intrinsic and final layout passes.
+        let cacheable = (512..WRAP_MEMO_BYTES).contains(&text.len());
+        #[cfg(test)]
+        let cacheable = cacheable && !WRAP_WINDOW_OFF.with(|off| off.get());
+        let key = cacheable.then(|| WrapKey {
+            shape: shaped_key(text, font_chain, weight, style, stretch, size),
+            first_width: first_line_max_width.to_bits(),
+            width: max_width.to_bits(),
+            word_break: breaker.word_break as u8,
+            overflow_wrap: breaker.overflow_wrap as u8,
+            starts_mid_line,
+            preserve_spaces,
+        });
+        if let Some(key) = &key {
+            let spans = WRAP_MEMO.with(|memo| {
+                let mut memo = memo.borrow_mut();
+                memo.sync_generation(rustkit_text::webfonts::generation());
+                memo.get(key)
+            });
+            if let Some(spans) = spans {
+                lines.reserve_exact(spans.len());
+                for span in spans.iter() {
+                    let runs = if span.start == span.end {
+                        Vec::new() // Empty first line when the run begins mid-line.
+                    } else {
+                        vec![self.shape(&text[span.start..span.end], font_chain, weight,
+                            style, stretch, size)?]
+                    };
+                    lines.push(WrappedLine {
+                        runs, width: span.width,
+                        start_offset: base_offset + span.start,
+                        end_offset: base_offset + span.end,
+                    });
+                }
+                return Ok(lines);
+            }
+        }
         let mut line_start = 0;
         // Collapsible white space at a break point is consumed by the
         // break; a PRESERVED space (break-spaces) is content on the next
@@ -3023,6 +3098,16 @@ impl TextShaper {
             }
         }
 
+        if let Some(key) = key {
+            if lines.len() > 1 && lines.len() <= WRAP_MEMO_BYTES / std::mem::size_of::<LineSpan>() {
+                let spans = lines.iter().map(|line| LineSpan {
+                    start: line.start_offset - base_offset,
+                    end: line.end_offset - base_offset,
+                    width: line.width,
+                }).collect();
+                WRAP_MEMO.with(|memo| memo.borrow_mut().insert(key, spans));
+            }
+        }
         Ok(lines)
     }
 
@@ -3509,10 +3594,68 @@ mod tests {
         };
         for (label, text, first, ws, wb, ow) in cases {
             let windowed = wrap(text, first, ws, wb, ow, false);
+            let repeated = wrap(text, first, ws, wb, ow, false);
             let whole = wrap(text, first, ws, wb, ow, true);
             assert!(windowed.len() > 3, "{label}: {} lines", windowed.len());
             assert_eq!(windowed, whole, "{label}: the window breaks where the whole text does");
+            assert_eq!(repeated, whole, "{label}: reused breaks agree with the whole text");
         }
+    }
+
+    #[test]
+    fn repeated_paragraph_wrap_only_shapes_emitted_lines() {
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let text = "Une fenêtre ouverte sur le jardin. ".repeat(40);
+        let breaker = LineBreaker::default_rules();
+        let wrap = |base, width| shaper.wrap_segment(
+            &text, &chain, FontWeight::NORMAL, FontStyle::Normal, FontStretch::Normal,
+            16.0, 1.0, width, &breaker, base, true, false,
+        ).unwrap();
+
+        let cold = wrap(0, 180.0);
+        assert!(cold[0].runs.is_empty());
+        let before = shaped_chars();
+        let warm = wrap(31, 180.0);
+        let emitted_chars: usize = cold.iter().flat_map(|line| &line.runs)
+            .map(|run| run.text.chars().count()).sum();
+        assert_eq!(shaped_chars() - before, emitted_chars);
+        assert_eq!(cold.len(), warm.len());
+        for (first, second) in cold.iter().zip(&warm) {
+            assert_eq!(second.start_offset, first.start_offset + 31);
+            assert_eq!(second.end_offset, first.end_offset + 31);
+            assert_eq!(second.width.to_bits(), first.width.to_bits());
+            assert_eq!(second.runs.len(), first.runs.len());
+            if let Some(run) = second.runs.first() {
+                assert_eq!(run.text, first.runs[0].text);
+                assert_eq!(run.glyphs.len(), first.runs[0].glyphs.len());
+            }
+        }
+        assert!(wrap(0, 75.0).len() > cold.len());
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            rustkit_text::webfonts::install("wrap-memo-generation-test", &[]);
+            let before = shaped_chars();
+            let _ = wrap(0, 180.0);
+            assert!(shaped_chars() - before > emitted_chars, "new faces require new breaks");
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release timing"]
+    fn time_repeated_paragraph_wrap() {
+        use std::hint::black_box;
+        let shaper = TextShaper::new();
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let text = "Une fenêtre ouverte sur le jardin. ".repeat(80);
+        let breaker = LineBreaker::default_rules();
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            black_box(shaper.wrap_segment(black_box(&text), &chain, FontWeight::NORMAL,
+                FontStyle::Normal, FontStretch::Normal, 16.0, 400.0, 400.0,
+                &breaker, 0, false, false).unwrap());
+        }
+        eprintln!("200 paragraph wraps: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
     }
 
     #[test]

@@ -1,0 +1,471 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "label": "span starting at a line end, holding <br>s",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c><p id=p>1 2 3<span id=s><br>4 5<br></span>6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 80,
+      "span": [
+        0,
+        20,
+        40,
+        40
+      ],
+      "span_fragments": [
+        [
+          100,
+          0,
+          0,
+          20
+        ],
+        [
+          0,
+          20,
+          40,
+          20
+        ],
+        [
+          0,
+          40,
+          40,
+          20
+        ],
+        [
+          40,
+          40,
+          0,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "span starting at a line end, holding newlines (pre-wrap)",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c><p id=p class=pre>1 2 3<span id=s>\n4 5\n</span>6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 80,
+      "span": [
+        0,
+        20,
+        80,
+        40
+      ],
+      "span_fragments": [
+        [
+          100,
+          0,
+          0,
+          20
+        ],
+        [
+          0,
+          20,
+          40,
+          20
+        ],
+        [
+          40,
+          20,
+          40,
+          20
+        ],
+        [
+          0,
+          40,
+          40,
+          20
+        ],
+        [
+          40,
+          40,
+          0,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "span between <br>s",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c><p id=p>1 2 3<br><span id=s>4 5</span><br>6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 80,
+      "span": [
+        0,
+        20,
+        40,
+        40
+      ],
+      "span_fragments": [
+        [
+          0,
+          20,
+          40,
+          20
+        ],
+        [
+          0,
+          40,
+          40,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "the whole letter-spacing-200 internal-break box",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<span id=s><br>4 5<br></span>6 7 8</p><p class=\"pre\">1 2 3<span>\n4 5\n</span>6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 260,
+      "span": [
+        0,
+        120,
+        40,
+        40
+      ],
+      "span_fragments": [
+        [
+          100,
+          100,
+          0,
+          20
+        ],
+        [
+          0,
+          120,
+          40,
+          20
+        ],
+        [
+          0,
+          140,
+          40,
+          20
+        ],
+        [
+          40,
+          140,
+          0,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "span between newlines (pre-wrap)",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c><p id=p class=pre>1 2 3\n<span id=s>4 5</span>\n6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 80,
+      "span": [
+        0,
+        20,
+        80,
+        40
+      ],
+      "span_fragments": [
+        [
+          0,
+          20,
+          40,
+          20
+        ],
+        [
+          40,
+          20,
+          40,
+          20
+        ],
+        [
+          0,
+          40,
+          40,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "the whole letter-spacing-200 external-break box",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:5em} span{letter-spacing:1em} p{margin:0} .pre{white-space:pre-wrap}",
+      "body": "<div class=c id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<br><span id=s>4 5</span><br>6 7 8</p><p class=\"pre\">1 2 3\n<span>4 5</span>\n6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 260,
+      "span": [
+        0,
+        120,
+        40,
+        40
+      ],
+      "span_fragments": [
+        [
+          0,
+          120,
+          40,
+          20
+        ],
+        [
+          0,
+          140,
+          40,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "span after text, split by a block",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .cols{block-size:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{inline-size:8em;block-size:1em;background:black}",
+      "body": "<div class=c id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 120,
+      "span": [
+        0,
+        0,
+        320,
+        120
+      ],
+      "span_fragments": [
+        [
+          60,
+          0,
+          80,
+          20
+        ],
+        [
+          0,
+          20,
+          320,
+          20
+        ],
+        [
+          0,
+          40,
+          100,
+          20
+        ],
+        [
+          0,
+          60,
+          160,
+          20
+        ],
+        [
+          0,
+          80,
+          100,
+          20
+        ],
+        [
+          0,
+          100,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "span after text, split by a block, two columns",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .cols{block-size:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{inline-size:8em;block-size:1em;background:black}",
+      "body": "<div class=\"c cols\" id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 60,
+      "span": [
+        0,
+        0,
+        320,
+        60
+      ],
+      "span_fragments": [
+        [
+          60,
+          0,
+          80,
+          20
+        ],
+        [
+          0,
+          20,
+          160,
+          20
+        ],
+        [
+          0,
+          40,
+          100,
+          20
+        ],
+        [
+          160,
+          0,
+          160,
+          20
+        ],
+        [
+          160,
+          20,
+          100,
+          20
+        ],
+        [
+          160,
+          40,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "position-absolute-in-inline-007b as written (border, two columns)",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;inline-size:16em} .cols{block-size:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{inline-size:8em;block-size:1em;background:black} .wpt{border:5px solid gold}",
+      "body": "<div class=\"c cols wpt\" id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 70,
+      "span": [
+        5,
+        5,
+        320,
+        60
+      ],
+      "span_fragments": [
+        [
+          65,
+          5,
+          80,
+          20
+        ],
+        [
+          5,
+          25,
+          160,
+          20
+        ],
+        [
+          5,
+          45,
+          100,
+          20
+        ],
+        [
+          165,
+          5,
+          160,
+          20
+        ],
+        [
+          165,
+          25,
+          100,
+          20
+        ],
+        [
+          165,
+          45,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "007b with physical sizes (width/height for inline-size/block-size), two columns",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:16em} .cols{height:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{width:8em;height:1em;background:black} .wpt{border:5px solid gold}",
+      "body": "<div class=\"c cols wpt\" id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 70,
+      "span": [
+        5,
+        5,
+        320,
+        60
+      ],
+      "span_fragments": [
+        [
+          65,
+          5,
+          80,
+          20
+        ],
+        [
+          5,
+          25,
+          160,
+          20
+        ],
+        [
+          5,
+          45,
+          100,
+          20
+        ],
+        [
+          165,
+          5,
+          160,
+          20
+        ],
+        [
+          165,
+          25,
+          100,
+          20
+        ],
+        [
+          165,
+          45,
+          100,
+          20
+        ]
+      ]
+    },
+    {
+      "label": "007b with physical sizes, no columns",
+      "style": "body{margin:0} .c{font:20px/1 Ahem;width:16em} .cols{height:3em;columns:2;column-fill:auto;column-gap:0} .rel{position:relative} .block{width:8em;height:1em;background:black}",
+      "body": "<div class=c id=p>XX\n  <span id=s class=\"rel\">\n    XXXX<br>\n    <div class=\"block\"></div>\n    XXXXX<br>\n    XXXXXXXX<br>\n    XXXXX<br>\n    XXXXX\n  </span></div>",
+      "font_loaded": true,
+      "height": 120,
+      "span": [
+        0,
+        0,
+        320,
+        120
+      ],
+      "span_fragments": [
+        [
+          60,
+          0,
+          80,
+          20
+        ],
+        [
+          0,
+          20,
+          320,
+          20
+        ],
+        [
+          0,
+          40,
+          100,
+          20
+        ],
+        [
+          0,
+          60,
+          160,
+          20
+        ],
+        [
+          0,
+          80,
+          100,
+          20
+        ],
+        [
+          0,
+          100,
+          100,
+          20
+        ]
+      ]
+    }
+  ]
+}

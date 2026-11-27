@@ -529,6 +529,8 @@ mod ch_font_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inline_mid_line_tests;
+#[cfg(all(test, feature = "headless"))]
 mod logical_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod window_event_path_tests;
