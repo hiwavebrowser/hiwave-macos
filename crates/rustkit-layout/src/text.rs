@@ -3629,6 +3629,44 @@ mod tests {
         }
     }
 
+    /// LETTER-SPACING-BREAK and the wrap memo (#1487): a paragraph's breaks depend on its
+    /// letter-spacing and word-spacing, so the same paragraph wrapped at another spacing must not
+    /// reuse the breaks of the first. Each spaced wrap follows an unspaced wrap of the same text
+    /// (which fills the memo) and must break where an uncached wrap (`WRAP_WINDOW_OFF`) does.
+    #[test]
+    fn a_paragraph_at_another_spacing_does_not_reuse_its_breaks() {
+        let text = "1 2 3 4 5 6 7 8 9 ".repeat(40);
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let wrap = |shaper: &TextShaper, uncached: bool| {
+            WRAP_WINDOW_OFF.with(|w| w.set(uncached));
+            let lines = shaper
+                .wrap_text_mid_line_white_space(
+                    &text,
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    20.0,
+                    300.0,
+                    300.0,
+                    CssWordBreak::Normal,
+                    CssOverflowWrap::Normal,
+                    WhiteSpace::Normal,
+                )
+                .expect("wrap");
+            WRAP_WINDOW_OFF.with(|w| w.set(false));
+            lines.iter().map(|l| (l.start_offset, l.end_offset)).collect::<Vec<_>>()
+        };
+        for (label, letter, word) in [("letter-spacing 20px", 20.0, 0.0), ("word-spacing 30px", 0.0, 30.0)] {
+            let unspaced = wrap(&TextShaper::new(), false);
+            let spaced = TextShaper::new().with_spacing(letter, word);
+            let after_unspaced = wrap(&spaced, false);
+            let uncached = wrap(&spaced, true);
+            assert!(uncached.len() > unspaced.len(), "{label}: spacing should add lines");
+            assert_eq!(after_unspaced, uncached, "{label}: the spaced wrap reused the unspaced breaks");
+        }
+    }
+
     #[test]
     fn repeated_paragraph_wrap_only_shapes_emitted_lines() {
         let shaper = TextShaper::new();
