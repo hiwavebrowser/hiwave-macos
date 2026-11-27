@@ -1360,6 +1360,10 @@ struct WrapKey {
     overflow_wrap: u8,
     starts_mid_line: bool,
     preserve_spaces: bool,
+    /// The shaper's letter-spacing and word-spacing (bits): they move the breaks
+    /// (LETTER-SPACING-BREAK).
+    letter_spacing: u32,
+    word_spacing: u32,
 }
 
 struct LineSpan {
@@ -2943,6 +2947,8 @@ impl TextShaper {
             overflow_wrap: breaker.overflow_wrap as u8,
             starts_mid_line,
             preserve_spaces,
+            letter_spacing: self.spacing.0.to_bits(),
+            word_spacing: self.spacing.1.to_bits(),
         });
         if let Some(key) = &key {
             let spans = WRAP_MEMO.with(|memo| {

@@ -3528,9 +3528,6 @@ impl LayoutBox {
                 // still line-box text: the break character must not reach
                 // the single-line path's measurement.
                 if lines.len() > 1 || has_segment_breaks {
-                    // Known phase-1 gap: wrap_text shapes without letter/word-
-                    // spacing, so spaced text may break slightly late. Ledgered.
-                    //
                     // IFC Slice A: alignment is a property of the LINE, owned
                     // by the parent's apply_text_align_offset — leaves never
                     // self-align (x_offset stays 0 here; the parent pass sets
