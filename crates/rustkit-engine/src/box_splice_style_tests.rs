@@ -59,13 +59,40 @@ fn a_paint_write_on_the_first_of_3000_siblings_records_none_of_the_rest() {
 
 /// Atlas's check on the cut: a tile AFTER an earlier frame's cut, written in a later frame, still
 /// gets selectors that read its earlier siblings (`+`, `~`, `:nth-child`) and its later ones
-/// (`:nth-last-child`) right, the same as a full build gives (LPF1's restyle off: the other arm).
+/// (`:nth-last-child`, `:last-child`) right, the same as a full build gives (LPF1's restyle off:
+/// the other arm). The restyle arm took the restyle build for each write and recorded only the
+/// siblings before the written tile: none for t0, 1500 for t1500, 2999 for t2999.
 #[test]
 fn sibling_selectors_on_a_tile_after_an_earlier_cut_match_a_full_build() {
-    let rules = "#t1499 + div{outline:1px solid rgb(0,128,0)}#t1497 ~ div{border-left:2px solid rgb(0,0,128)}\
-                 #stage div:nth-last-child(1){outline:3px solid rgb(128,0,0)}#stage div:nth-child(odd){text-indent:7px}";
-    let read = "['t1500','t2999','t0'].map(function (id) { var s = getComputedStyle(document.getElementById(id)); \
-                return [id, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderLeftColor, s.textIndent].join(','); }).join('|')";
+    let full = sibling_selectors_after_the_cut("", 1500 + 2999);
+    assert!(row(&full, "t2999").contains(",dashed,"), "{full}");
+}
+
+/// The same with a `:has` rule reading the next sibling: the paint-only restyle declines writes on
+/// a page with one (no sibling skipped: every write builds in full), and the styles still match the
+/// full build.
+#[test]
+fn a_has_rule_reading_a_sibling_keeps_the_full_build() {
+    let full = sibling_selectors_after_the_cut("#stage div:has(+ #t2999){letter-spacing:5px}", 0);
+    assert!(row(&full, "t2998").ends_with(",5px"), "{full}");
+    assert!(row(&full, "t2999").ends_with(",normal"), "{full}");
+}
+
+fn row<'a>(rows: &'a str, id: &str) -> &'a str {
+    rows.split('|').find(|r| r.starts_with(&format!("{id},"))).unwrap_or_default()
+}
+
+/// Writes tile 0 twice (the cut lands after it), then tiles 1500 and 2999, with the restyle on and
+/// off; asserts both arms read the same styles and the restyle arm skipped `want_skipped` siblings.
+/// Returns the full build's styles.
+fn sibling_selectors_after_the_cut(extra: &str, want_skipped: usize) -> String {
+    let rules = format!(
+        "#t1499 + div{{outline:1px solid rgb(0,128,0)}}#t1497 ~ div{{border-left:2px solid rgb(0,0,128)}}\
+         #stage div:nth-last-child(1){{outline:3px solid rgb(128,0,0)}}#stage div:nth-child(odd){{text-indent:7px}}\
+         #stage div:last-child{{outline-style:dashed}}{extra}"
+    );
+    let read = "['t1500','t2998','t2999','t0'].map(function (id) { var s = getComputedStyle(document.getElementById(id)); \
+                return [id, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderLeftColor, s.textIndent, s.outlineStyle, s.letterSpacing].join(','); }).join('|')";
     let run = |restyle: bool| {
         set_script_restyle_for_test(restyle);
         let mut engine = Engine::new(EngineConfig::default()).expect("engine");
@@ -73,7 +100,6 @@ fn sibling_selectors_on_a_tile_after_an_earlier_cut_match_a_full_build() {
         let page = multiply_page(3000).replace("</style>", &format!("{rules}</style>"));
         engine.load_html(view, &page).expect("load");
         let skipped_before = skipped_siblings_for_test();
-        // Frame 1 writes tile 0 (the cut lands after it); later frames write tiles past it.
         for (i, id) in ["t0", "t0", "t1500", "t2999"].iter().enumerate() {
             engine
                 .execute_script(
@@ -83,16 +109,17 @@ fn sibling_selectors_on_a_tile_after_an_earlier_cut_match_a_full_build() {
                 .expect("js");
         }
         let out = engine.execute_script(view, read).expect("js");
+        // `execute_script` answers `String("...")`.
+        let out = out.trim_start_matches("String(\"").trim_end_matches("\")").to_string();
         set_script_restyle_for_test(true);
         (out, skipped_siblings_for_test() - skipped_before)
     };
     let ((restyled, skipped), (full, full_skipped)) = (run(true), run(false));
-    // The restyle arm took the restyle build for each write and recorded only the siblings before
-    // the written tile: none for t0, 1500 for t1500, 2999 for t2999. The other arm built in full.
-    assert_eq!(skipped, 1500 + 2999, "restyle arm skipped {skipped}");
+    assert_eq!(skipped, want_skipped, "restyle arm skipped {skipped}");
     assert_eq!(full_skipped, 0);
     assert_eq!(restyled, full, "the restyle path differs from a full build");
     // And the full build's answer is the selectors' (not two equal wrong answers).
-    assert!(full.contains("t1500,rgb(12, 1, 1),rgb(0, 128, 0)"), "{full}");
-    assert!(full.contains("t2999,rgb(13, 1, 1),rgb(128, 0, 0),3px"), "{full}");
+    assert!(row(&full, "t1500").starts_with("t1500,rgb(12, 1, 1),rgb(0, 128, 0)"), "{full}");
+    assert!(row(&full, "t2999").starts_with("t2999,rgb(13, 1, 1),rgb(128, 0, 0),3px"), "{full}");
+    full
 }
