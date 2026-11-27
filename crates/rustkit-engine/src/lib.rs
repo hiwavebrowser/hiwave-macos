@@ -318,6 +318,8 @@ mod text_input;
 pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_splice_style_tests;
 #[cfg(test)]
 mod button_background_tests;
 #[cfg(test)]
@@ -16548,6 +16550,8 @@ impl layout_ctx::LayoutCtx {
                         // earlier one (S22: a feed of hundreds of posts
                         // paid a selector path, a children clone and a
                         // placeholder style per post, twice per move).
+                        #[cfg(test)]
+                        SKIPPED_SIBLINGS.with(|n| n.set(n.get() + 1));
                         if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
                             let t = lower_tag(tag_name);
                             *type_seen.entry(t.clone()).or_insert(0) += 1;
@@ -50004,6 +50008,9 @@ thread_local! {
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Elements the builds on this thread walked into (the element arm of the build), for tests.
     static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Children a restyle build on this thread skipped and recorded as a later sibling's earlier
+    /// one (BOX-REBUILD-ON-STYLE), for tests.
+    static SKIPPED_SIBLINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Builds this thread spliced into a kept box tree (PR 3), for tests.
     static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
@@ -50032,6 +50039,12 @@ pub(crate) fn splice_mismatches_for_test() -> usize {
 #[cfg(test)]
 pub(crate) fn splices_for_test() -> (usize, String) {
     (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
+}
+
+/// Children this thread's restyle builds have skipped and recorded so far (tests).
+#[cfg(test)]
+pub(crate) fn skipped_siblings_for_test() -> usize {
+    SKIPPED_SIBLINGS.with(std::cell::Cell::get)
 }
 
 /// Elements this thread's builds have walked into so far (tests).
