@@ -2789,7 +2789,21 @@ impl LayoutBox {
         // A run laid out mid-line (INLINE-MID-LINE) can start on a later line
         // than the inline's first, after a run before it wrapped, so its
         // drop is counted from the top of the inline's first run, not its own.
-        fn collect(b: &LayoutBox, frags: &mut Vec<Rect>, drop: &mut f32, reach: &mut f32, top: &mut Option<f32>) {
+        //
+        // `skip` is how far the first run's leading EMPTY lines reach below the inline's top: a
+        // run that starts with a forced break at a line end (pre-wrap `1 2 3<span>\n4 5\n</span>`)
+        // has a zero-width fragment on that line, and Chrome's union skips empty rects
+        // (SPAN-UNION-SKIPS-EMPTY: 40 for the span's `4` and `5` lines, where counting the empty
+        // first line gave 60). Empty fragments add nothing horizontally either.
+        fn collect(
+            b: &LayoutBox,
+            frags: &mut Vec<Rect>,
+            drop: &mut f32,
+            reach: &mut f32,
+            top: &mut Option<f32>,
+            skip: &mut Option<f32>,
+        ) {
+            let first_run = matches!(b.box_type, BoxType::Text(_)) && top.is_none();
             if matches!(b.box_type, BoxType::Text(_)) {
                 top.get_or_insert(b.dimensions.content.y);
             }
@@ -2806,7 +2820,13 @@ impl LayoutBox {
                     let below = (content.y - first_top).max(0.0);
                     *drop = drop.max(below + (f.len() as f32 - 1.0) * line_height);
                     *reach = reach.max(content.y + content.height);
-                    frags.extend(f);
+                    if first_run {
+                        let lead = f.iter().take_while(|r| r.width <= 0.0).count();
+                        if lead < f.len() {
+                            *skip = Some(lead as f32 * line_height);
+                        }
+                    }
+                    frags.extend(f.into_iter().filter(|r| r.width > 0.0));
                 }
             }
             // Descend through inline formatting only. A block descendant has
@@ -2815,7 +2835,7 @@ impl LayoutBox {
             // too-wide rect instead of removing a too-small one.
             for c in &b.children {
                 if matches!(c.box_type, BoxType::Inline | BoxType::Text(_)) {
-                    collect(c, frags, drop, reach, top);
+                    collect(c, frags, drop, reach, top, skip);
                 }
             }
         }
@@ -2823,7 +2843,8 @@ impl LayoutBox {
         let mut frags = Vec::new();
         let mut drop = 0.0f32;
         let mut reach = f32::NEG_INFINITY;
-        collect(self, &mut frags, &mut drop, &mut reach, &mut None);
+        let mut skip = None;
+        collect(self, &mut frags, &mut drop, &mut reach, &mut None, &mut skip);
         if frags.is_empty() {
             return None;
         }
@@ -2853,6 +2874,22 @@ impl LayoutBox {
         // `pre > code`'s width by 1.5e-5px — nothing, but a second rect whose
         // unextended axes are merely almost the first one gives every reader
         // a difference to explain, and this one is avoidable.
+        // An inline whose own fragment is empty (it sits at a line end, its text after a forced
+        // break) is not part of Chrome's union: the rect starts at its first non-empty line and
+        // spans only its fragments (SPAN-UNION-SKIPS-EMPTY).
+        if bb.width <= 0.0 {
+            if let Some(skip) = skip.filter(|s| *s > 0.0) {
+                let left = frags.iter().map(|f| f.x).fold(f32::INFINITY, f32::min);
+                let right = frags.iter().map(|f| f.right()).fold(f32::NEG_INFINITY, f32::max);
+                return Some(Rect {
+                    x: left,
+                    y: bb.y + skip,
+                    width: right - left,
+                    height: bb.height + drop - skip,
+                });
+            }
+        }
+
         let mut left = bb.x;
         let mut right = bb.right();
         let mut widened = false;
@@ -3292,7 +3329,6 @@ impl LayoutBox {
                 }
                 if matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow { left: f.left, width: f.width, line_top, pen });
                 }
@@ -3651,33 +3687,6 @@ impl LayoutBox {
         }
     }
 
-    /// Whether the in-flow path (INLINE-MID-LINE) leaves `b` out: an inline that holds spaced
-    /// text is laid out as before it, moved whole to the next line when it does not fit the rest
-    /// of this one. An inline that holds a preserved newline flows: the line loops carry a newline
-    /// at its end as a break (`inline_ends_with_preserved_newline`, PRE-WRAP-NEWLINE-AT-INLINE-END),
-    /// which is what kept it out before (batch 124 lost a line at letter-spacing-200).
-    fn stays_out_of_flow(b: &LayoutBox) -> bool {
-        Self::holds_spaced_text(b)
-    }
-
-    /// Whether `b` is, or holds among its inline content, text with a non-zero `letter-spacing`
-    /// or `word-spacing`. The in-flow path wraps text with the shaper's widths, which carry
-    /// neither spacing (`layout_text_in_flow`), so a spaced inline measured short there and
-    /// started on a line it did not fit (WPT css-text/letter-spacing/letter-spacing-200 box 3:
-    /// `1 2 三<span>456</span>` with `letter-spacing:1em` drew `456` on the `1 2 三` line, and
-    /// with Ahem the text after it on the span's own line). Such an inline is not laid out in
-    /// flow: if it does not fit the rest of the line it moves to the next line, as before
-    /// INLINE-MID-LINE.
-    fn holds_spaced_text(b: &LayoutBox) -> bool {
-        match &b.box_type {
-            BoxType::Text(_) => {
-                !is_zero_length(&b.style.letter_spacing) || !is_zero_length(&b.style.word_spacing)
-            }
-            BoxType::Inline => b.children.iter().any(Self::holds_spaced_text),
-            _ => false,
-        }
-    }
-
     /// PRE-WRAP-NEWLINE-AT-INLINE-END: whether `b`, a non-atomic inline in the flow, ends with a
     /// preserved newline (its last content is text whose `white-space` keeps newlines and which
     /// ends with one, at any depth). That newline ends the line, so the content after the inline
@@ -3930,7 +3939,7 @@ impl LayoutBox {
                 .enumerate()
                 .map(|(i, l)| TextLine {
                     text: l.text(),
-                    width: l.width,
+                    width: shaper.spaced_width(l),
                     x_offset: if i == 0 {
                         first_left + first_line_offset
                     } else {
@@ -7352,7 +7361,6 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,
@@ -8677,7 +8685,6 @@ impl LayoutBox {
                     && floats.is_empty()
                     && matches!(child.box_type, BoxType::Inline)
                     && child.style.display == rustkit_css::Display::Inline
-                    && !Self::stays_out_of_flow(child)
                 {
                     child.inline_flow = Some(InlineFlow {
                         left: self.dimensions.content.x + line_left,

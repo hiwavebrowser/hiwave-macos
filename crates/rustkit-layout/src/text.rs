@@ -1468,6 +1468,15 @@ impl TextShaper {
         run.metrics.width + letter * run.glyphs.len() as f32 + word * spaces as f32
     }
 
+    /// `line`'s width with this shaper's spacing: what it takes on its line box. The wrap
+    /// functions fit lines with it but return their unspaced width (LETTER-SPACING-BREAK).
+    pub fn spaced_width(&self, line: &WrappedLine) -> f32 {
+        if self.spacing == (0.0, 0.0) {
+            return line.width;
+        }
+        line.width + line.runs.iter().map(|r| self.fit_width(r) - r.metrics.width).sum::<f32>()
+    }
+
     /// Whether `c`, a character the primary face lacks, takes the emoji
     /// presentation on Windows (Unicode TR51 ED-9, as Chrome's
     /// `SymbolsIterator`): U+FE0F after it asks for the emoji face if `c` can
