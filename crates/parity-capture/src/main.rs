@@ -605,11 +605,13 @@ impl LivePacing {
 const STEPPED_SETTLE_MS: u64 = 5_000;
 
 /// What one unit of JavaScript work (a function call or a loop back-edge, `js_work_units`) is charged
-/// as against the load's script budget (CAPTURE-SCRIPT-BUDGET): 1 us, so the 5 s budget is 5M units.
-/// Measured on walmart's offline replay (2026-11-26, release build, idle): 4.21M units in 3.75 s of
-/// script time, 0.89 us a unit with the native work between them. The units were the same within
-/// 0.05% with the memo on or off and with every core busy, where the script time ran 3.7 to 11 s.
-const SCRIPT_WORK_UNIT_NS: u64 = 1_000;
+/// as against the load's script budget (CAPTURE-SCRIPT-BUDGET): 0.5 us, so the 5 s budget is 10M
+/// units. Measured on Windows (2026-11-27, release build): the real-site board's top 20 ran their
+/// scripts at 0.24 to 3.5 us of script time a unit, median 0.60 (sites whose time goes to layout
+/// and native work, not counted, are dearer); walmart's offline replay at 0.89. The Mac is faster a
+/// unit, so the budget is set a little below the Windows median: on a median site it allows about
+/// what 5 s of real time did. The units of one page agree within 0.05% at any speed.
+const SCRIPT_WORK_UNIT_NS: u64 = 500;
 
 /// The most real time a stepped settle may take: the reference's own wait (5 s of real time). A settle
 /// whose turns are slow (a page that relays itself out on every step, at up to a second a turn) stops
