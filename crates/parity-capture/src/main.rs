@@ -3798,6 +3798,63 @@ Connection: close
         );
     }
 
+    /// CAPTURE-SCRIPT-BUDGET: whether a page's later scripts run must not depend on how fast the
+    /// machine is. Walmart (2026-11-26, offline HAR): its scripts took 3.7 s on an idle machine, so
+    /// its header scripts ran, and 5.3 to 11 s with the memo off or every core busy, so they were
+    /// over the 5 s budget and its frame changed. Here both pages run the same script, 40 style
+    /// writes each followed by a layout read, then a second script. On `/heavy` each layout is of
+    /// 1,500 paragraphs, so the first script takes far longer in real time while running the same
+    /// JavaScript, as a slower or busier machine takes longer for the same page. The second script
+    /// runs on both.
+    #[test]
+    fn whether_a_later_script_runs_does_not_depend_on_how_long_the_earlier_one_took() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let paragraphs = if line.contains("/heavy") { 1_500 } else { 1 };
+                    let body = format!(
+                        "<html><body>{}<script>var w = 0; for (var i = 0; i < 40; i++) {{ document.body.style.width = (600 + i % 2) + 'px'; w += document.body.offsetWidth; }}</script><script>document.title = 'second script ran';</script></body></html>",
+                        "<p>some words in a paragraph</p>".repeat(paragraphs)
+                    );
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let mut took = Vec::new();
+        for page in ["light", "heavy"] {
+            let url = format!("http://127.0.0.1:{port}/{page}");
+            let args =
+                Args::try_parse_from(["parity-capture", "--url", url.as_str(), "--script-budget-ms", "300"]).unwrap();
+            let result = run_capture(&args);
+            assert_eq!(result.status, "ok", "{page}: {:?}", result.error);
+            let stats = result.script_stats.as_ref().expect("a URL capture reports its scripts");
+            took.push((page, stats.elapsed_ms));
+            assert_eq!(
+                (stats.ran, stats.over_budget),
+                (2, 0),
+                "{page}: the second script's fate depended on the first one's real time ({took:?})"
+            );
+        }
+    }
+
     /// A settle cut short must not freeze a page part-way through its own reveal (batch 75's A/B:
     /// squarespace's settle ran one 3.7 s turn, whose scripts hid the content, and was cut before the
     /// timers that reveal it, so the frame was the header on black where the load-only capture had the
