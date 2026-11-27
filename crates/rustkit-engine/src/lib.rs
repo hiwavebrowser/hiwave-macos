@@ -7486,11 +7486,59 @@ impl Engine {
             };
         }
         if all.relaid_out {
-            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
-                debug!(error = %e, "frames: the parent's layout after a frame's failed");
+            // NO-MUTATION-RELAYOUT: the parent's paint includes its frames', and that is all that
+            // changed: paint it again over its laid-out boxes. Anything else pending for it (a
+            // mutation of its own, a resize) still takes the relayout.
+            match self.repaint_over_layout(id) {
+                Ok(true) => {}
+                _ => {
+                    if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                        debug!(error = %e, "frames: the parent's layout after a frame's failed");
+                    }
+                }
             }
         }
         all
+    }
+
+    /// NO-MUTATION-RELAYOUT: build view `id`'s display list again over the boxes it last laid out
+    /// and paint it, with no build and no layout: what a parent needs when only its frames' paint
+    /// changed (`display_list_for` splices each frame's current list in at its iframe). `false` when
+    /// the view needs a relayout instead: nothing laid out yet, a relayout or restyle pending, or its
+    /// size changed (the same guards as `paint_animation_frame`).
+    fn repaint_over_layout(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let (Some(_), Some(laid), Some(_)) = (view.laid_with.as_ref(), view.layout.clone(), view.display_list.as_ref())
+        else {
+            return Ok(false);
+        };
+        if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
+            return Ok(false);
+        }
+        let size = match view.headless_bounds {
+            Some(b) => (b.width, b.height),
+            None => match self.presenter.as_mut().map(|p| p.host_bounds(self.views[&id].viewhost_id)) {
+                Some(Ok(b)) => (b.width, b.height),
+                _ => return Ok(false),
+            },
+        };
+        if self.views[&id].laid_with.as_ref().is_some_and(|w| w.size != size) {
+            return Ok(false);
+        }
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.display_list = Some(Arc::new(display_list));
+        // The images this list paints are the ones laid out, as for an animation frame.
+        let planned = view.images_planned_for == view.frame_generation;
+        view.frame_generation += 1;
+        if planned {
+            view.images_planned_for = view.frame_generation;
+        }
+        view.relayout_stats.layouts_skipped = view.relayout_stats.layouts_skipped.saturating_add(1);
+        self.render(id)?;
+        Ok(true)
     }
 
     /// One live turn of view `id` and, with nested browsing contexts on,
