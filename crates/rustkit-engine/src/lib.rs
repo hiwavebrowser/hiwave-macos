@@ -952,6 +952,8 @@ mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod layout_memo_exact_tests;
+#[cfg(all(test, feature = "headless"))]
 mod layout_once_tests;
 #[cfg(test)]
 mod loop_limit_tests;
