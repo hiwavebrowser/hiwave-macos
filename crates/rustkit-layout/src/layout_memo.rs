@@ -9,7 +9,8 @@
 //! results per box and, on a hit, writes the recorded OUTPUT fields back instead of laying the
 //! subtree out again.
 //!
-//! `RUSTKIT_LAYOUT_MEMO=off|verify|on`, default off:
+//! `RUSTKIT_LAYOUT_MEMO=off|verify|on`, default on (since batch 127; the batch-126 memo-on arm moved
+//! no campaign, board, A/B or WPT capture, and the verify corpus is clean):
 //! - `off`: nothing changes.
 //! - `verify`: never restores. When a restore would have applied, the subtree is laid out anyway and
 //!   compared with what the restore would have produced; any difference panics.
@@ -110,9 +111,9 @@ pub fn memo_totals() -> MemoCounters {
 fn env_mode() -> MemoMode {
     static MODE: std::sync::OnceLock<MemoMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("RUSTKIT_LAYOUT_MEMO").as_deref() {
-        Ok("on") => MemoMode::On,
+        Ok("off") => MemoMode::Off,
         Ok("verify") => MemoMode::Verify,
-        _ => MemoMode::Off,
+        _ => MemoMode::On,
     })
 }
 
@@ -177,6 +178,8 @@ struct BoxOutputs {
     /// SET2: the pitch `set_wrapped_pitch` gave a wrapped text run, which the next visit reads back
     /// to take it out of the run's height again.
     text_line_pitch: Option<f32>,
+    /// INLINE-MID-LINE: a wrapped inline's (line boxes, end x, line height), the x relative here.
+    inline_flow_end: Option<(usize, f32, f32)>,
 }
 
 struct MemoEntry {
@@ -353,6 +356,11 @@ fn classify_every_field(b: &LayoutBox) {
         children_laid_at: _,
         abspos_cb_hint: _,
         text_line_pitch: _,
+        inline_flow_end: _,
+        // INLINE-MID-LINE: set by the block's inline loop on an inline just before laying it out and
+        // taken by that layout, so it is `None` between layouts. Its pen and line are relative to the
+        // block, which is what the key's width and margin context already describe.
+        inline_flow: _,
         // An input, set by flex and grid on an item before laying it out (the block pre-pass lays
         // the same item out without it), so `input_fingerprint` hashes it for the box and below.
         formatting_root: _,
@@ -405,6 +413,7 @@ fn snapshot(b: &LayoutBox) -> Option<Vec<BoxOutputs>> {
                 children_laid_at: c.children_laid_at,
                 abspos_cb_hint: c.abspos_cb_hint.map(|r| Rect { x: r.x - ox, y: r.y - oy, ..r }),
                 text_line_pitch: c.text_line_pitch,
+                inline_flow_end: c.inline_flow_end.map(|(n, x, lh)| (n, x - ox, lh)),
             });
             if !walk(c, ox, oy, out) {
                 return false;
@@ -440,6 +449,7 @@ fn restore(b: &mut LayoutBox, outputs: &[BoxOutputs]) -> bool {
             c.children_laid_at = o.children_laid_at;
             c.abspos_cb_hint = o.abspos_cb_hint.map(|r| Rect { x: r.x + ox, y: r.y + oy, ..r });
             c.text_line_pitch = o.text_line_pitch;
+            c.inline_flow_end = o.inline_flow_end.map(|(n, x, lh)| (n, x + ox, lh));
             walk(c, ox, oy, it);
         }
     }
@@ -545,6 +555,11 @@ impl BoxOutputs {
             && match (self.text_line_pitch, other.text_line_pitch) {
                 (None, None) => true,
                 (Some(a), Some(b)) => close(a, b),
+                _ => false,
+            }
+            && match (self.inline_flow_end, other.inline_flow_end) {
+                (None, None) => true,
+                (Some((n1, x1, h1)), Some((n2, x2, h2))) => n1 == n2 && close(x1, x2) && close(h1, h2),
                 _ => false,
             }
     }

@@ -1162,14 +1162,32 @@ const PAGE_LIFECYCLE_JS: &str = r#"
     // The load's clock, one callback at a time, so the host can publish a
     // frame between them. A negative return is `-callbacks` and means the
     // horizon still has timers due. Zero frame budget never stops early.
-    __rk.runTimersFramed = function (horizon, max, frameMs) {
+    //
+    // `virtual` (LOAD-VIRTUAL-TIME): the frames are the timers' clock's, `frameMs` of virtual time
+    // each: the call returns before the first timer of a later frame than the one its first
+    // callback ran in, however much real time the callbacks took. Without it a frame ends once
+    // `frameMs` of real time has passed, so where the host's layout and observer delivery fall
+    // among the timers depends on the engine's speed.
+    __rk.runTimersFramed = function (horizon, max, frameMs, virtual) {
         var start = realNow();
         var ran = 0;
+        var byClock = !!virtual && frameMs > 0;
+        // The virtual frame the call's first callback ran in.
+        var frame = -1;
         while (ran < max) {
+            if (byClock && frame >= 0) {
+                var next = -1;
+                for (var i = 0; i < Q.count; i++) {
+                    if (next < 0 || timers[i].due < next) next = timers[i].due;
+                }
+                if (next >= 0 && next <= horizon && floorOf(next / frameMs) > frame) return -ran;
+            }
             var n = runTimers(horizon, 1, false);
             if (n === 0) break;
             ran += n;
-            if (frameMs > 0 && (realNow() - start) >= frameMs) return -ran;
+            if (byClock) {
+                if (frame < 0) frame = floorOf(Q.now / frameMs);
+            } else if (frameMs > 0 && (realNow() - start) >= frameMs) return -ran;
         }
         return ran;
     };
@@ -2042,6 +2060,13 @@ impl DomBindings {
             .map_err(Into::into)
     }
 
+    /// Install `WebAssembly` in this realm (WASM W1; the engine's
+    /// `webassembly` flag, docs/design/WASM-W1.md).
+    pub fn enable_webassembly(&self) -> Result<(), BindingError> {
+        self.runtime.borrow_mut().enable_webassembly()?;
+        Ok(())
+    }
+
     /// Turn on the page half of `<iframe>` (web_frames.js): frame requests
     /// are queued for [`Self::take_frame_requests`] and `contentWindow` /
     /// `contentDocument` answer the windows [`Self::attach_frame`] gave.
@@ -2093,6 +2118,28 @@ impl DomBindings {
                     return JsValue::Boolean(true);
                 }
                 JsValue::Null
+            }),
+        )?;
+        // A frame's blank request still in the queue becomes `prebuilt`: the
+        // page half attached the spare at the first read of its window
+        // (SPARE-COST). False once the request has been drained (the engine
+        // gave the frame its own window) or when there is none.
+        let queue = self.frame_requests.clone();
+        runtime.register_host_function(
+            "__rustkit_frame_prebuild",
+            1,
+            Box::new(move |args| {
+                let Some(JsValue::Number(node)) = args.first() else { return JsValue::Boolean(false) };
+                let node = *node as usize;
+                let mut queue = queue.borrow_mut();
+                let pending = queue.iter_mut().rev().find(|r| r.node == node);
+                match pending {
+                    Some(r) if !r.prebuilt && r.sandbox.is_none() && r.url.as_deref() == Some("about:blank") => {
+                        r.prebuilt = true;
+                        JsValue::Boolean(true)
+                    }
+                    _ => JsValue::Boolean(false),
+                }
             }),
         )?;
         runtime.evaluate_with_host(include_str!("web_frames.js"))?;
@@ -4239,9 +4286,32 @@ impl DomBindings {
         max_callbacks: u32,
         frame_ms: u64,
     ) -> Result<(u32, bool), BindingError> {
+        self.run_timers_framed(horizon_ms, max_callbacks, frame_ms, false)
+    }
+
+    /// [`Self::run_timers_for_frame`] with frames of virtual time (LOAD-VIRTUAL-TIME): it stops
+    /// before the first timer of a later `frame_ms` frame of the timers' clock than the one it began
+    /// in, however long the callbacks took in real time. `true` means the horizon still has timers
+    /// due.
+    pub fn run_timers_for_virtual_frame(
+        &self,
+        horizon_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+    ) -> Result<(u32, bool), BindingError> {
+        self.run_timers_framed(horizon_ms, max_callbacks, frame_ms, true)
+    }
+
+    fn run_timers_framed(
+        &self,
+        horizon_ms: u64,
+        max_callbacks: u32,
+        frame_ms: u64,
+        virtual_frames: bool,
+    ) -> Result<(u32, bool), BindingError> {
         let ran = self.runtime.borrow_mut().evaluate_host_turn(&format!(
-            "return __rk.runTimersFramed({}, {}, {})",
-            horizon_ms, max_callbacks, frame_ms
+            "return __rk.runTimersFramed({}, {}, {}, {})",
+            horizon_ms, max_callbacks, frame_ms, virtual_frames
         ), &[])?;
         Ok(match ran {
             JsValue::Number(n) if n < 0.0 => ((-n) as u32, true),
