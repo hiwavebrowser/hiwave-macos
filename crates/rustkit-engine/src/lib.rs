@@ -952,6 +952,8 @@ mod inserted_script_live_tests;
 #[cfg(all(test, feature = "headless"))]
 mod vm_interrupt_tests;
 #[cfg(all(test, feature = "headless"))]
+mod layout_memo_exact_tests;
+#[cfg(all(test, feature = "headless"))]
 mod layout_once_tests;
 #[cfg(test)]
 mod loop_limit_tests;
@@ -973,6 +975,8 @@ mod record_elapsed_tests;
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
+#[cfg(all(test, feature = "headless"))]
+mod pre_wrap_newline_inline_end_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_action_url_tests;
 #[cfg(test)]

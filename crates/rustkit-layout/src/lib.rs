@@ -3653,11 +3653,13 @@ impl LayoutBox {
         }
     }
 
-    /// Whether the in-flow path (INLINE-MID-LINE) leaves `b` out: an inline that holds a
-    /// preserved newline or spaced text is laid out as before it, moved whole to the next line
-    /// when it does not fit the rest of this one.
+    /// Whether the in-flow path (INLINE-MID-LINE) leaves `b` out: an inline that holds spaced
+    /// text is laid out as before it, moved whole to the next line when it does not fit the rest
+    /// of this one. An inline that holds a preserved newline flows: the line loops carry a newline
+    /// at its end as a break (`inline_ends_with_preserved_newline`, PRE-WRAP-NEWLINE-AT-INLINE-END),
+    /// which is what kept it out before (batch 124 lost a line at letter-spacing-200).
     fn stays_out_of_flow(b: &LayoutBox) -> bool {
-        Self::holds_preserved_newline(b) || Self::holds_spaced_text(b)
+        Self::holds_spaced_text(b)
     }
 
     /// Whether `b` is, or holds among its inline content, text with a non-zero `letter-spacing`
@@ -3678,27 +3680,32 @@ impl LayoutBox {
         }
     }
 
-    /// Whether `b` is, or holds among its inline content, a preserved newline (text whose
-    /// `white-space` keeps newlines). INLINE-MID-LINE's in-flow path does not carry a newline
-    /// across an inline's edge (`1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap lost a line: WPT
-    /// css-text/letter-spacing/letter-spacing-200, batch 124), so an inline that holds one is not
-    /// laid out in flow: if it does not fit the rest of the line it moves to the next line, as
-    /// before INLINE-MID-LINE. Other inlines in the same block still start mid-line. A `<br>` is
-    /// carried.
-    fn holds_preserved_newline(b: &LayoutBox) -> bool {
-        match &b.box_type {
-            BoxType::Text(text) => {
-                matches!(
-                    b.style.white_space,
-                    rustkit_css::WhiteSpace::Pre
-                        | rustkit_css::WhiteSpace::PreWrap
-                        | rustkit_css::WhiteSpace::PreLine
-                        | rustkit_css::WhiteSpace::BreakSpaces
-                ) && text.contains('\n')
+    /// PRE-WRAP-NEWLINE-AT-INLINE-END: whether `b`, a non-atomic inline in the flow, ends with a
+    /// preserved newline (its last content is text whose `white-space` keeps newlines and which
+    /// ends with one, at any depth). That newline ends the line, so the content after the inline
+    /// starts the next line box, as after a `<br>` (Chrome 148:
+    /// `1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap is 123 / 45 / 678). With nothing after it,
+    /// it adds no line.
+    fn inline_ends_with_preserved_newline(b: &LayoutBox) -> bool {
+        fn ends(b: &LayoutBox) -> bool {
+            match &b.box_type {
+                BoxType::Text(text) => {
+                    matches!(
+                        b.style.white_space,
+                        rustkit_css::WhiteSpace::Pre
+                            | rustkit_css::WhiteSpace::PreWrap
+                            | rustkit_css::WhiteSpace::PreLine
+                            | rustkit_css::WhiteSpace::BreakSpaces
+                    ) && text.ends_with('\n')
+                }
+                BoxType::Inline => b.children.last().is_some_and(ends),
+                _ => false,
             }
-            BoxType::Inline => b.children.iter().any(Self::holds_preserved_newline),
-            _ => false,
         }
+        matches!(b.box_type, BoxType::Inline)
+            && b.style.display == rustkit_css::Display::Inline
+            && !matches!(b.position, Position::Absolute | Position::Fixed)
+            && ends(b)
     }
 
     /// Whether a text child that does NOT fit the remaining line space
@@ -7143,7 +7150,34 @@ impl LayoutBox {
         // that opens starts at it, so it is aligned with that line.
         let mut pending_oof: Option<usize> = None;
 
+        // PRE-WRAP-NEWLINE-AT-INLINE-END: the inline before this child ended with a preserved
+        // newline, so this child starts the next line box (`inline_ends_with_preserved_newline`).
+        let mut break_after_inline = false;
         for (i, child) in self.children.iter_mut().enumerate() {
+            if std::mem::take(&mut break_after_inline) {
+                seam = None;
+                if let Some(start) = line_start_index {
+                    lines.push((
+                        start,
+                        i,
+                        line_width,
+                        floats.line_band(cursor_y, empty_line_height, container_width),
+                    ));
+                }
+                cursor_y += if cursor_x > 0.0 || line_height > 0.0 {
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
+                } else {
+                    empty_line_height
+                };
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
+                line_start_index = None;
+                line_width = 0.0;
+                pending_oof = None;
+            }
+            break_after_inline = Self::inline_ends_with_preserved_newline(child);
             // Skip absolutely/fixed positioned children for flow layout.
             // The stand-in's height is the flow cursor (static position);
             // `bottom`/`inset` are re-resolved against the real padding box
@@ -8395,7 +8429,33 @@ impl LayoutBox {
         // Once this box is final, reanchor_absolute_children re-resolves the
         // child against the real padding box (CSS 2.1 §10.1).
 
+        // PRE-WRAP-NEWLINE-AT-INLINE-END (see layout_block_children).
+        let mut break_after_inline = false;
         for (i, child) in self.children.iter_mut().enumerate() {
+            if std::mem::take(&mut break_after_inline) {
+                seam = None;
+                if let Some(start) = line_start_index {
+                    lines.push((
+                        start,
+                        i,
+                        line_width,
+                        floats.line_band(cursor_y, empty_line_height, container_width),
+                    ));
+                }
+                cursor_y += if cursor_x > 0.0 || line_height > 0.0 {
+                    line_advance(line_height, line_below_baseline, line_extents, strut)
+                } else {
+                    empty_line_height
+                };
+                cursor_x = 0.0;
+                line_height = 0.0;
+                line_below_baseline = 0.0;
+                line_extents = (0.0, 0.0);
+                line_start_index = None;
+                line_width = 0.0;
+                pending_oof = None;
+            }
+            break_after_inline = Self::inline_ends_with_preserved_newline(child);
             // Skip absolutely/fixed positioned children for flow layout
             if child.position == Position::Absolute || child.position == Position::Fixed {
                 // Out-of-flow boxes do not participate in margin collapsing
