@@ -318,6 +318,8 @@ mod text_input;
 pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_splice_style_tests;
 #[cfg(test)]
 mod button_background_tests;
 #[cfg(test)]
@@ -16594,7 +16596,15 @@ impl layout_ctx::LayoutCtx {
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
+                // BOX-REBUILD-ON-STYLE: a restyle build records a skipped child only for the children
+                // after it that it builds, so it stops after the last child it builds or walks (a
+                // write on the first of thousands of siblings skipped and recorded every other one).
+                // An ordinary build has no skipped child: `last_needed` is the last child.
+                let last_needed = restyle_last_needed(node.id.raw(), &child_nodes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
+                    if last_needed.is_none_or(|last| child_index > last) {
+                        break;
+                    }
                     let restyle = restyle_child(node.id.raw(), child.id.raw());
                     if restyle == RestyleChild::Skip {
                         // A restyle build skips what no root is under: the
@@ -16602,6 +16612,8 @@ impl layout_ctx::LayoutCtx {
                         // earlier one (S22: a feed of hundreds of posts
                         // paid a selector path, a children clone and a
                         // placeholder style per post, twice per move).
+                        #[cfg(test)]
+                        SKIPPED_SIBLINGS.with(|n| n.set(n.get() + 1));
                         if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
                             let t = lower_tag(tag_name);
                             *type_seen.entry(t.clone()).or_insert(0) += 1;
@@ -50058,6 +50070,9 @@ thread_local! {
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Elements the builds on this thread walked into (the element arm of the build), for tests.
     static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Children a restyle build on this thread skipped and recorded as a later sibling's earlier
+    /// one (BOX-REBUILD-ON-STYLE), for tests.
+    static SKIPPED_SIBLINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Builds this thread spliced into a kept box tree (PR 3), for tests.
     static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
@@ -50086,6 +50101,12 @@ pub(crate) fn splice_mismatches_for_test() -> usize {
 #[cfg(test)]
 pub(crate) fn splices_for_test() -> (usize, String) {
     (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
+}
+
+/// Children this thread's restyle builds have skipped and recorded so far (tests).
+#[cfg(test)]
+pub(crate) fn skipped_siblings_for_test() -> usize {
+    SKIPPED_SIBLINGS.with(std::cell::Cell::get)
 }
 
 /// Elements this thread's builds have walked into so far (tests).
@@ -50300,6 +50321,22 @@ enum RestyleChild {
     Walk,
     /// A root: built, and its box kept in `found`.
     Root,
+}
+
+/// BOX-REBUILD-ON-STYLE: the index of the last of `children` (of `parent`) a build must reach. In a
+/// restyle build under a parent on its path, the last child that is on the path or a root (after
+/// it every child is skipped); otherwise the last child. Read only: `restyle_child` counts the
+/// children it reaches down in `pending`, so this must not call it.
+fn restyle_last_needed(parent: usize, children: &[Rc<rustkit_dom::Node>]) -> Option<usize> {
+    RESTYLE_BUILD.with(|build| {
+        let build = build.borrow();
+        match build.as_ref() {
+            Some(build) if build.path.contains(&parent) => children
+                .iter()
+                .rposition(|c| build.roots.contains(&c.id.raw()) || build.path.contains(&c.id.raw())),
+            _ => children.len().checked_sub(1),
+        }
+    })
 }
 
 fn restyle_child(parent: usize, child: usize) -> RestyleChild {
