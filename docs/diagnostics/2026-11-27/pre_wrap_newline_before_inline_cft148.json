@@ -112,6 +112,41 @@
     },
     {
       "face": "Ahem",
+      "width": 300,
+      "label": "a newline-only run between two spans",
+      "white_space": "pre-wrap",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Ahem",
+      "width": 300,
+      "label": "a newline-only run between two spans, pre-line",
+      "white_space": "pre-line",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Ahem",
+      "width": 300,
+      "label": "newline at the paragraph end, after a span",
+      "white_space": "pre-wrap",
+      "markup": "1 2<span>4</span>6\n",
+      "height": 20,
+      "rows": [
+        "1246"
+      ]
+    },
+    {
+      "face": "Ahem",
       "width": 100,
       "label": "newline before a span",
       "white_space": "pre-wrap",
@@ -225,6 +260,43 @@
       ]
     },
     {
+      "face": "Ahem",
+      "width": 100,
+      "label": "a newline-only run between two spans",
+      "white_space": "pre-wrap",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 60,
+      "rows": [
+        "12",
+        "467",
+        "8"
+      ]
+    },
+    {
+      "face": "Ahem",
+      "width": 100,
+      "label": "a newline-only run between two spans, pre-line",
+      "white_space": "pre-line",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 60,
+      "rows": [
+        "12",
+        "467",
+        "8"
+      ]
+    },
+    {
+      "face": "Ahem",
+      "width": 100,
+      "label": "newline at the paragraph end, after a span",
+      "white_space": "pre-wrap",
+      "markup": "1 2<span>4</span>6\n",
+      "height": 20,
+      "rows": [
+        "1246"
+      ]
+    },
+    {
       "face": "Arial",
       "width": 300,
       "label": "newline before a span",
@@ -334,6 +406,41 @@
     },
     {
       "face": "Arial",
+      "width": 300,
+      "label": "a newline-only run between two spans",
+      "white_space": "pre-wrap",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Arial",
+      "width": 300,
+      "label": "a newline-only run between two spans, pre-line",
+      "white_space": "pre-line",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Arial",
+      "width": 300,
+      "label": "newline at the paragraph end, after a span",
+      "white_space": "pre-wrap",
+      "markup": "1 2<span>4</span>6\n",
+      "height": 20,
+      "rows": [
+        "1246"
+      ]
+    },
+    {
+      "face": "Arial",
       "width": 100,
       "label": "newline before a span",
       "white_space": "pre-wrap",
@@ -438,6 +545,41 @@
       "height": 20,
       "rows": [
         "124678"
+      ]
+    },
+    {
+      "face": "Arial",
+      "width": 100,
+      "label": "a newline-only run between two spans",
+      "white_space": "pre-wrap",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Arial",
+      "width": 100,
+      "label": "a newline-only run between two spans, pre-line",
+      "white_space": "pre-line",
+      "markup": "<span>1 2</span>\n<span>4</span>6 7 8",
+      "height": 40,
+      "rows": [
+        "12",
+        "4678"
+      ]
+    },
+    {
+      "face": "Arial",
+      "width": 100,
+      "label": "newline at the paragraph end, after a span",
+      "white_space": "pre-wrap",
+      "markup": "1 2<span>4</span>6\n",
+      "height": 20,
+      "rows": [
+        "1246"
       ]
     }
   ]

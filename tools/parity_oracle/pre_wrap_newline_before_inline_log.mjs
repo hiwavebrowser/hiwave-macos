@@ -32,6 +32,9 @@ const PARAGRAPHS = [
   ['two newlines before a span', 'pre-wrap', `1 2${NL}${NL}<span>4</span>6`],
   ['newline before a letter-spaced span', 'pre-wrap', `1 2${NL}<span style="letter-spacing:1em">4</span>6 7 8`],
   ['newline before a span, normal white-space', 'normal', `1 2${NL}<span>4</span> 6 7 8`],
+  ['a newline-only run between two spans', 'pre-wrap', `<span>1 2</span>${NL}<span>4</span>6 7 8`],
+  ['a newline-only run between two spans, pre-line', 'pre-line', `<span>1 2</span>${NL}<span>4</span>6 7 8`],
+  ['newline at the paragraph end, after a span', 'pre-wrap', `1 2<span>4</span>6${NL}`],
 ];
 const WIDTHS = [300, 100];
 const FACES = ['Ahem', 'Arial'];
