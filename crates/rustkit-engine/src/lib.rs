@@ -2180,7 +2180,11 @@ pub struct EngineConfig {
     /// script on real time. A live turn's budget stays wall-clock time.
     pub script_budget_unit_ns: Option<u64>,
     /// With `script_budget_unit_ns`: the real time the load's scripts may still take, so a page whose
-    /// time goes to work the units do not count (layout, native built-ins) still ends its load.
+    /// time goes to work the units do not count (layout, native built-ins) still ends its load. The
+    /// load's timers count too: on github's live page (2026-11-27) they ran 10 s of mostly native
+    /// work, where the 5 s wall-clock budget had stopped them, and lyft's capture then passed the
+    /// board's 30 s timeout. 10 s, twice the default budget: above walmart's script time with every
+    /// core busy and the layout memo on (6.2 s), below a capture's timeout.
     pub script_budget_wall_backstop_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
@@ -2301,7 +2305,7 @@ impl Default for EngineConfig {
             virtual_load_frames: false,
             script_budget_ms: 5_000,
             script_budget_unit_ns: None,
-            script_budget_wall_backstop_ms: 20_000,
+            script_budget_wall_backstop_ms: 10_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
             device_pixel_ratio: 1.0,
