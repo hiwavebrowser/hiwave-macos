@@ -9,7 +9,8 @@
 //! results per box and, on a hit, writes the recorded OUTPUT fields back instead of laying the
 //! subtree out again.
 //!
-//! `RUSTKIT_LAYOUT_MEMO=off|verify|on`, default off:
+//! `RUSTKIT_LAYOUT_MEMO=off|verify|on`, default on (since batch 127; the batch-126 memo-on arm moved
+//! no campaign, board, A/B or WPT capture, and the verify corpus is clean):
 //! - `off`: nothing changes.
 //! - `verify`: never restores. When a restore would have applied, the subtree is laid out anyway and
 //!   compared with what the restore would have produced; any difference panics.
@@ -110,9 +111,9 @@ pub fn memo_totals() -> MemoCounters {
 fn env_mode() -> MemoMode {
     static MODE: std::sync::OnceLock<MemoMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("RUSTKIT_LAYOUT_MEMO").as_deref() {
-        Ok("on") => MemoMode::On,
+        Ok("off") => MemoMode::Off,
         Ok("verify") => MemoMode::Verify,
-        _ => MemoMode::Off,
+        _ => MemoMode::On,
     })
 }
 

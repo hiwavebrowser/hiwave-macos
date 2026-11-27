@@ -537,16 +537,30 @@ impl TypedArrayKind {
     /// Convert `value` into the typed array element corresponding to this `TypedArrayKind`,
     /// assuming the `ContentType` of this kind is `Number`.
     pub(crate) fn to_element_f64(self, value: f64) -> TypedArrayElement {
-        match self {
-            TypedArrayKind::Int8 => TypedArrayElement::Int8(value as i8),
-            TypedArrayKind::Uint8 => TypedArrayElement::Uint8(value as u8),
-            TypedArrayKind::Uint8Clamped => {
-                TypedArrayElement::Uint8Clamped(ClampedU8(value.clamp(0.0, 255.0).round() as u8))
+        // HIWAVE PATCH (typed array conversion): the spec's ToInt8 ... ToUint32
+        // wrap modulo 2^n and ToUint8Clamp rounds half to even; Rust's `as`
+        // casts saturate (-56 -> 0u8) and `round` goes half away from zero.
+        // `modular` is ToUint32: NaN and the infinities are 0; the narrower
+        // types take its low bits, as the spec's modulo does.
+        let modular = || -> u32 {
+            if !value.is_finite() {
+                return 0;
             }
-            TypedArrayKind::Int16 => TypedArrayElement::Int16(value as i16),
-            TypedArrayKind::Uint16 => TypedArrayElement::Uint16(value as u16),
-            TypedArrayKind::Int32 => TypedArrayElement::Int32(value as i32),
-            TypedArrayKind::Uint32 => TypedArrayElement::Uint32(value as u32),
+            value.trunc().rem_euclid(4_294_967_296.0) as u32
+        };
+        match self {
+            TypedArrayKind::Int8 => TypedArrayElement::Int8(modular() as u8 as i8),
+            TypedArrayKind::Uint8 => TypedArrayElement::Uint8(modular() as u8),
+            TypedArrayKind::Uint8Clamped => {
+                // NaN clamps to 0.
+                let v = if value.is_nan() { 0.0 } else { value.clamp(0.0, 255.0) };
+                TypedArrayElement::Uint8Clamped(ClampedU8(v.round_ties_even() as u8))
+            }
+            TypedArrayKind::Int16 => TypedArrayElement::Int16(modular() as u16 as i16),
+            TypedArrayKind::Uint16 => TypedArrayElement::Uint16(modular() as u16),
+            TypedArrayKind::Int32 => TypedArrayElement::Int32(modular() as i32),
+            TypedArrayKind::Uint32 => TypedArrayElement::Uint32(modular()),
+            // END HIWAVE PATCH
             #[cfg(feature = "float16")]
             TypedArrayKind::Float16 => {
                 TypedArrayElement::Float16(Float16(float16::f16::from_f64(value)))
