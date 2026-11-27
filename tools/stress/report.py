@@ -11,7 +11,10 @@ unless --partial is given, and are never mixed with full ones. Runs with the
 live-turn watchdog raised (`live_turn_budget_ms` set, HIWAVE_STRESS_TURN_BUDGET_MS)
 are likewise left out unless --raised-budget is given, and are never mixed
 with default runs. A run that started at a 1-minute load of 3 or more is
-discarded (the `disc` column).
+discarded (the `disc` column). A MotionMark ramp run whose lowest complexity
+step ran below TARGET_FPS (58) is not a score either (the `<fps` column, and
+"not at target fps" where no run is left to score): the ramp's fit around the
+60 fps target has no knee to find (FRAME-FLOOR-HEADLESS).
 
 --compare BASE CAND applies the landing rule to every suite and engine both
 labels have scores for: the candidate regresses when its median is below the
@@ -33,6 +36,14 @@ import statistics
 import sys
 
 SCORE_LOAD = 3.0
+# FRAME-FLOOR-HEADLESS: MotionMark's ramp score is the knee of a frame-time-vs-complexity fit around its
+# 60 fps target. reporter.js sorts the ramp's samples by complexity and bins them (`frames[test].steps`),
+# so steps[0] is the run's lowest-complexity samples: the points the fit starts from. When those are
+# already below TARGET_FPS the fit has no at-target segment, its knee is ill-posed, and the score lands at
+# either end (Multiply: 1 and 223 from the same binary). Such a run is not a score. (Inside a ramp those
+# samples are mostly frames just after a big drop in complexity: on the Mac they average ~22 ms while a run
+# held at complexity 1 takes 16.7 ms, so this reads the ramp, not a steady per-frame floor.)
+TARGET_FPS = 58.0
 DEFAULT_DIR = pathlib.Path.home() / "zg-measure" / "stress-runs"
 
 
@@ -54,8 +65,21 @@ def load(dirs, partial, raised=False):
             # The Mac's load rule: a run that started at a 1-minute load of
             # SCORE_LOAD or more keeps its record but not its score.
             r["_valid"] = r["load_avg_before"][0] < SCORE_LOAD
+            r["_below_target"] = below_target_fps(r)
             runs.append(r)
     return runs
+
+
+def below_target_fps(r):
+    """A MotionMark ramp run (no fixed `complexity`) whose lowest-complexity bin of samples, in any subtest,
+    ran below TARGET_FPS (run.py's `frames`: reporter.js's samples sorted by complexity, in 12 bins)."""
+    if r.get("suite") != "motionmark" or r.get("complexity") is not None:
+        return False
+    for test in (r.get("frames") or {}).values():
+        steps = (test or {}).get("steps") or []
+        if steps and isinstance(steps[0].get("fps"), (int, float)) and steps[0]["fps"] < TARGET_FPS:
+            return True
+    return False
 
 
 def groups(runs):
@@ -69,9 +93,12 @@ def summary(rs):
     discarded = len([r for r in rs if not r["_valid"]])
     rs = [r for r in rs if r["_valid"]]
     if not rs:
-        return {"n": 0, "n_ok": 0, "not_ok": [], "shas": [], "pins": [], "wall_s": None, "load": None, "discarded": discarded}
-    ok = [r["score"] for r in rs if r["status"] == "ok" and isinstance(r.get("score"), (int, float))]
-    s = {"discarded": discarded, "n": len(rs), "n_ok": len(ok), "not_ok": sorted({r["status"] for r in rs if r["status"] != "ok"}),
+        return {"n": 0, "n_ok": 0, "not_ok": [], "shas": [], "pins": [], "wall_s": None, "load": None, "discarded": discarded,
+                "not_at_target": 0}
+    not_at_target = len([r for r in rs if r["_below_target"]])
+    ok = [r["score"] for r in rs if r["status"] == "ok" and isinstance(r.get("score"), (int, float)) and not r["_below_target"]]
+    s = {"discarded": discarded, "not_at_target": not_at_target, "n": len(rs), "n_ok": len(ok),
+         "not_ok": sorted({r["status"] for r in rs if r["status"] != "ok"}),
          "shas": sorted({r["binary_sha1"][:10] for r in rs}), "pins": sorted({r["suite_sha"][:10] for r in rs}),
          "wall_s": round(statistics.median(r["wall_s"] for r in rs), 1),
          "load": round(max(r["load_avg_before"][0] for r in rs), 1)}
@@ -121,29 +148,35 @@ def main():
         return 0
 
     if not args.compare:
-        print("%-12s %-16s %-14s %5s %10s %21s %8s %7s %5s %4s  %s"
-              % ("suite", "engine", "label", "N ok", "median", "min - max", "spread", "wall s", "load", "disc", "not ok"))
+        print("%-12s %-16s %-14s %5s %10s %21s %8s %7s %5s %4s %6s  %s"
+              % ("suite", "engine", "label", "N ok", "median", "min - max", "spread", "wall s", "load", "disc", "<fps", "not ok"))
         for (suite, engine, label), s in sorted(table.items()):
             rng = "%s - %s" % (fmt(s.get("min")), fmt(s.get("max"))) if "median" in s else "-"
-            print("%-12s %-16s %-14s %2d/%-2d %10s %21s %7s%% %7s %5s %4d  %s"
-                  % (suite, engine, label[:14], s["n_ok"], s["n"], fmt(s.get("median")), rng,
+            med = fmt(s.get("median")) if "median" in s or not s["not_at_target"] else "not at target fps"
+            print("%-12s %-16s %-14s %2d/%-2d %10s %21s %7s%% %7s %5s %4d %6d  %s"
+                  % (suite, engine, label[:14], s["n_ok"], s["n"], med, rng,
                      "%.1f" % s["spread_pct"] if "median" in s else "-", s["wall_s"], s["load"], s["discarded"],
-                     ",".join(s["not_ok"])))
+                     s["not_at_target"], ",".join(s["not_ok"])))
             if args.subs:
                 for name, v in sorted(sub_medians(g[(suite, engine, label)]).items()):
                     print("    %-48s %s" % (name, fmt(v)))
         print("disc = runs left out because they started at a 1-minute load of %.0f or more" % SCORE_LOAD)
+        print("<fps = MotionMark ramp runs left out because their lowest complexity step ran below %.0f fps "
+              "(the ramp's fit has no knee; not a score)" % TARGET_FPS)
         return 0
 
     base, cand = args.compare
     rows, bad = [], False
-    empty = {"n": 0, "n_ok": 0, "not_ok": [], "discarded": 0}
+    empty = {"n": 0, "n_ok": 0, "not_ok": [], "discarded": 0, "not_at_target": 0}
     for suite, engine in sorted({(k[0], k[1]) for k in table if k[2] in (base, cand)}):
         b, c = table.get((suite, engine, base)) or empty, table.get((suite, engine, cand)) or empty
         row = {"suite": suite, "engine": engine, "base": b, "cand": c}
         # Every way a pair can fail to be a clean comparison is a finding:
         # only "within noise" and "improved" leave the exit code at 0.
-        if "median" not in b:
+        if b["not_at_target"] or c["not_at_target"]:
+            row["verdict"] = "NOT AT TARGET FPS (base %d, candidate %d of their runs below %.0f fps at the lowest step)" % (
+                b["not_at_target"], c["not_at_target"], TARGET_FPS)
+        elif "median" not in b:
             row["verdict"] = "NO BASE SCORE (%d runs, %d discarded for load)" % (b["n"], b["discarded"])
         elif "median" not in c:
             row["verdict"] = "REGRESSION (base scored, candidate did not)"
