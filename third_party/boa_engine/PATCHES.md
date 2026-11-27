@@ -1448,3 +1448,23 @@ that is current when it runs, and the getters read their own realm's, so realms 
 
 **Pin.** `crates/rustkit-js/tests/regexp_legacy_statics.rs`: the Chrome values, the descriptor
 shape, and the WSL lexer's own pattern; all three tests fail without the patch.
+
+## Patch: a count of JavaScript work (`work count`)
+
+**Why.** A capture's script budget was wall-clock time, so whether a page's later scripts ran
+depended on the machine's speed and load (CAPTURE-SCRIPT-BUDGET: walmart's offline replay ran its
+scripts in 3.7 s idle and 5.3 to 11 s with every core busy, the 5 s budget between, and its frame
+changed with it). A count of the work run is the same on any machine.
+
+**What.** `src/vm/stats.rs`: a thread-local `WORK_UNITS`, `count_work_unit()` and the public
+`work_units()` (`boa_engine::vm_stats::work_units`). `src/vm/mod.rs`: `Context::check_interrupt`
+counts one unit first. That check runs on every ordinary and native function call and on every
+loop back-edge (see the interrupt patch), and in the native loops the interrupt patches reach
+(`Array`, `JSON`, `String`, promise and property-key loops). The cost is one thread-local increment
+there. Nothing else reads it.
+
+**Use.** `rustkit_js::work_units()`; the engine charges a load's script budget in these units when
+`EngineConfig::script_budget_unit_ns` is set (parity-capture sets it).
+
+**Pin.** `parity-capture` `whether_a_later_script_runs_does_not_depend_on_how_long_the_earlier_one_took`
+and `rustkit-engine` `a_budget_charged_in_units_of_work_is_spent_by_the_work_and_backed_by_real_time`.

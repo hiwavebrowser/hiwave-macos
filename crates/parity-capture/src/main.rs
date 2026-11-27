@@ -109,6 +109,12 @@ struct Args {
     #[arg(long)]
     script_budget_ms: Option<u64>,
 
+    /// Charge the load's script budget in wall-clock time, as before CAPTURE-SCRIPT-BUDGET, instead
+    /// of in units of JavaScript work. With it, whether a later script runs depends on the machine's
+    /// speed and load. A capture taken with it is not comparable with the board and must be labelled.
+    #[arg(long)]
+    script_budget_wall: bool,
+
     /// The live turn's allowance, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): the turn's
     /// whole allowance of script time, so a raised value paces frames differently even when no single
     /// callback is long. A running callback is stopped at 30 s (`LIVE_SCRIPT_STOP_MS`), or at this
@@ -493,6 +499,10 @@ struct ScriptStats {
     over_budget: u32,
     bytes: u64,
     elapsed_ms: u64,
+    /// Units of JavaScript work the load ran (one per function call and per loop back-edge), the
+    /// unit the script budget is charged in (CAPTURE-SCRIPT-BUDGET).
+    #[serde(default)]
+    work_units: u64,
 }
 
 /// What the live loop did after the load (`--live-ms`).
@@ -593,6 +603,13 @@ impl LivePacing {
 /// A/B test settled by `setTimeout`, an entrance reveal) has run by the time ours is taken. The same span on
 /// every run: the page clock in a stepped capture is virtual.
 const STEPPED_SETTLE_MS: u64 = 5_000;
+
+/// What one unit of JavaScript work (a function call or a loop back-edge, `js_work_units`) is charged
+/// as against the load's script budget (CAPTURE-SCRIPT-BUDGET): 1 us, so the 5 s budget is 5M units.
+/// Measured on walmart's offline replay (2026-11-26, release build, idle): 4.21M units in 3.75 s of
+/// script time, 0.89 us a unit with the native work between them. The units were the same within
+/// 0.05% with the memo on or off and with every core busy, where the script time ran 3.7 to 11 s.
+const SCRIPT_WORK_UNIT_NS: u64 = 1_000;
 
 /// The most real time a stepped settle may take: the reference's own wait (5 s of real time). A settle
 /// whose turns are slow (a page that relays itself out on every step, at up to a second a turn) stops
@@ -1167,9 +1184,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             );
         }
         let load_began = Instant::now();
+        let units_before = rustkit_engine::js_work_units();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
+        let load_units = rustkit_engine::js_work_units().wrapping_sub(units_before);
         // The engine shows a server's error page as the page, which is what
         // the app's user should see. A capture is of the site, not of its
         // error page: it fails as it did when the engine refused the
@@ -1231,7 +1250,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             }
         }
         if let Some(log) = engine.script_log(view_id) {
-            result.script_stats = Some(script_stats(log));
+            result.script_stats = Some(ScriptStats { work_units: load_units, ..script_stats(log) });
             if let Some(ref path) = args.dump_scripts {
                 if let Err(e) = fs::write(path, script_log_json(log).to_string()) {
                     error!("Failed to write script log: {:?}", e);
@@ -2001,6 +2020,7 @@ fn script_stats(log: &[ScriptRecord]) -> ScriptStats {
         over_budget: 0,
         bytes: 0,
         elapsed_ms: 0,
+        work_units: 0,
     };
     for record in log {
         match record.outcome {
@@ -2443,6 +2463,12 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     }
     if let Some(budget) = args.script_budget_ms {
         config.script_budget_ms = budget;
+    }
+    // The load's script budget in units of JavaScript work, not real time (CAPTURE-SCRIPT-BUDGET),
+    // unless asked for real time: a capture's later scripts then run or not by what the earlier ones
+    // did, whatever the machine's speed or load.
+    if !args.script_budget_wall {
+        config.script_budget_unit_ns = Some(SCRIPT_WORK_UNIT_NS);
     }
     if let Some(budget) = args.live_turn_budget_ms {
         config.live_turn_budget_ms = budget;
@@ -2971,6 +2997,15 @@ mod tests {
             config.timer_horizon_ms,
             EngineConfig::for_parity_testing().timer_horizon_ms
         );
+    }
+
+    // CAPTURE-SCRIPT-BUDGET: a capture charges the load's script budget in units of JavaScript work;
+    // `--script-budget-wall` takes the real-time budget back. The app's config stays on real time.
+    #[test]
+    fn a_capture_charges_its_script_budget_in_units_of_work_unless_asked_for_real_time() {
+        assert_eq!(capture_config(&parsed(&[]), None).script_budget_unit_ns, Some(SCRIPT_WORK_UNIT_NS));
+        assert_eq!(capture_config(&parsed(&["--script-budget-wall"]), None).script_budget_unit_ns, None);
+        assert_eq!(EngineConfig::default().script_budget_unit_ns, None);
     }
 
     fn write_file(dir: &Path, rel: &str, content: &str) {

@@ -1327,6 +1327,7 @@ impl Context {
     // or is `u64::MAX` (every turn). 0 never stops anything.
     #[inline]
     pub(crate) fn check_interrupt(&self) -> JsResult<()> {
+        stats::count_work_unit(); // HIWAVE PATCH (work count)
         // HIWAVE PATCH (stop finally): while a stop runs `finally` blocks,
         // the word naming the stopped turn is what they run despite; the
         // grace's end stops them, and `u64::MAX` (Stop) still does.
