@@ -25,6 +25,16 @@
 //! boxes share a float context). Its position is not in the key: outputs are stored relative to
 //! the box's content origin and translated back. A subtree with a fixed or sticky descendant is
 //! never memoised: those are placed against the viewport or a scroll container, not this box.
+//!
+//! Exactness (MEMO-BIT-EXACT): a restore is a fresh layout to within f32 rounding, not to the bit.
+//! The layout builds each position left to right from the absolute origin,
+//! `(((origin + cursor) + margin) + border) + padding`, rounding at the absolute scale after each
+//! term; a restore adds the stored offset to the new origin in one step. A subtree restored where it
+//! was recorded comes back to within an ulp or so, and one restored elsewhere (grid and flex lay
+//! an item out at one place and then another) can differ by a few ulps: websuite card-grid, 161
+//! numbers, at most 4 ulps (6e-5 px), frame byte-identical. `layout_memo_exact_tests` pins that
+//! at 8 ulps per number; the batch's dump comparison uses the same bound. Exact restores would need
+//! every position computed as `origin + (local terms)` (parked row LAYOUT-REASSOCIATE).
 
 use super::*;
 use std::cell::{Cell, RefCell};
