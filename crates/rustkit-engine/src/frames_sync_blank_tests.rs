@@ -12,7 +12,6 @@
 
 use super::*;
 use crate::script_net_tests::serve_routes;
-use std::time::Duration;
 
 struct Page {
     engine: Engine,
@@ -607,5 +606,61 @@ fn a_refused_request_does_not_take_the_spare() {
         page.js("var later = document.createElement('iframe'); document.body.appendChild(later); String(later.contentWindow !== null)"),
         r#"String("true")"#,
         "the spare stayed with the document"
+    );
+}
+
+/// SPARE-COST: a frame document loaded from a URL that has no frames of its
+/// own holds no spare; an about:blank frame (JetStream's `#magic`, which a
+/// script fills with `innerHTML = '<iframe>'` and reads at once) still does.
+/// Every Speedometer 3.1 workload is a URL document in the runner's one test
+/// frame; each built a spare it never used (~134 ms and ~13 MB, [R5]), and
+/// batch 126's bisect put the spares at most of #1440's ~6% Speedometer cost.
+/// Such a document that later inserts a frame attaches it at the drain, as a
+/// top-level page's first frame does, and holds a spare from then on.
+#[test]
+fn a_url_frame_without_frames_holds_no_spare() {
+    let mut page = Page::load(true, "<!doctype html><body><iframe id=magic></iframe><iframe id=w src=/leaf.html></iframe></body>");
+    page.turns("false", 8);
+    let spare_of = |page: &Page, url_has: &str| -> Option<bool> {
+        let top = page.engine.views.get(&page.view)?;
+        top.frames.values().find_map(|f| {
+            let v = page.engine.views.get(&f.view)?;
+            let url = v.doc.url.as_ref().map(|u| u.to_string()).unwrap_or_else(|| "about:blank".into());
+            url.contains(url_has).then(|| v.doc.bindings.as_ref().is_some_and(|b| b.has_spare()))
+        })
+    };
+    assert_eq!(spare_of(&page, "about:blank"), Some(true), "the about:blank frame holds a spare");
+    assert_eq!(spare_of(&page, "/leaf.html"), Some(false), "the URL frame with no frames holds none");
+    // It can still make a frame: at the drain, and from then on at once.
+    page.js("var w = document.getElementById('w').contentDocument; var a = w.createElement('iframe'); w.body.appendChild(a); window.wa = a; 0");
+    assert!(page.turns("!!window.wa.contentWindow", 10), "the first frame attaches at the drain");
+    page.turns("false", 3);
+    assert_eq!(spare_of(&page, "/leaf.html"), Some(true), "a URL frame that has frames holds a spare");
+}
+
+/// SPARE-COST, Speedometer's shape: each of its iterations removes the test
+/// frame and appends a fresh one, then navigates it; nothing reads the
+/// fresh frame's about:blank document. The spare is attached only when a
+/// script reads `contentWindow` / `contentDocument` before the drain (as
+/// JetStream does); unread, the drain builds the frame as it does with
+/// spares off, and the spare stays: no rebuild on the turns after (each
+/// rebuild was ~90 ms inside Speedometer's measured suites on the Mac).
+#[test]
+fn an_inserted_frame_nobody_reads_leaves_the_spare_unused() {
+    let mut page = Page::load(true, WITH_MAGIC);
+    let has_spare = |page: &Page| {
+        page.engine.views.get(&page.view).and_then(|v| v.doc.bindings.as_ref()).is_some_and(|b| b.has_spare())
+    };
+    assert!(has_spare(&page), "a loaded, settled page with a frame holds a spare");
+    for i in 0..3 {
+        page.js("if (window.runner) runner.remove(); window.runner = document.createElement('iframe'); \
+                 document.body.insertBefore(runner, document.body.firstChild); 0");
+        assert!(page.turns("!!runner.contentWindow", 6), "iteration {i}: the drain gives the frame its window");
+        assert!(has_spare(&page), "iteration {i}: the unread insertion left the spare");
+    }
+    // A read inside the insertion still answers at once, from the spare.
+    assert_eq!(
+        page.js("var f = document.createElement('iframe'); document.body.appendChild(f); String(f.contentWindow !== null)"),
+        r#"String("true")"#
     );
 }

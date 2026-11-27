@@ -35,6 +35,7 @@ members = [
     "crates/rustkit-svg",
     "crates/rustkit-canvas",
     "crates/rustkit-webgl",
+    "crates/rustkit-wasm",
     "crates/rustkit-idb",
     "crates/rustkit-sw",
     "crates/rustkit-worker",
@@ -111,6 +112,7 @@ rustkit-svg = { path = "crates/rustkit-svg" }
 hiwave-mcp = { path = "crates/hiwave-mcp" }
 rustkit-canvas = { path = "crates/rustkit-canvas" }
 rustkit-webgl = { path = "crates/rustkit-webgl" }
+rustkit-wasm = { path = "crates/rustkit-wasm" }
 rustkit-idb = { path = "crates/rustkit-idb" }
 rustkit-sw = { path = "crates/rustkit-sw" }
 rustkit-worker = { path = "crates/rustkit-worker" }

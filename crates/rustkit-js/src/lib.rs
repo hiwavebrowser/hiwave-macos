@@ -39,6 +39,8 @@ mod source_context;
 pub use diag::{standard_name, STANDARD_ERROR_NAMES};
 #[cfg(all(test, feature = "boa"))]
 mod module_tests;
+#[cfg(all(test, feature = "boa"))]
+mod wasm_tests;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -583,6 +585,11 @@ pub struct JsRuntime {
     current_realm: RealmId,
     #[cfg(feature = "boa")]
     context: boa_engine::Context,
+    /// Each realm's WebAssembly store (WASM W1), by realm index: owned here
+    /// and dropped with its realm (`drop_realm`), so it never roots a realm
+    /// from inside the garbage-collected graph.
+    #[cfg(feature = "boa")]
+    wasm: std::collections::HashMap<usize, std::rc::Rc<rustkit_wasm::WasmRealm>>,
     /// The module host (see `module`): imports the graph asks for are
     /// recorded here for the embedder to fetch.
     #[cfg(feature = "boa")]
@@ -746,6 +753,8 @@ impl JsRuntime {
             #[cfg(feature = "boa")]
             context,
             #[cfg(feature = "boa")]
+            wasm: std::collections::HashMap::new(),
+            #[cfg(feature = "boa")]
             modules,
             #[cfg(feature = "boa")]
             executor,
@@ -895,6 +904,8 @@ impl JsRuntime {
         #[cfg(feature = "boa")]
         if let Some(slot) = self.realms.get_mut(realm.0) {
             self.blobs.borrow_mut().drop_realm(realm.0);
+            // Its WebAssembly store, and the JS imports it held, with it.
+            self.wasm.remove(&realm.0);
             if let Some(host) = self.realm_hosts.get_mut(realm.0) {
                 *host = None;
             }
@@ -1584,6 +1595,36 @@ impl JsRuntime {
                 .map_err(|e| JsError::ExecutionError(e.to_string()))?;
         }
         Ok(())
+    }
+
+    /// Install `WebAssembly` in the current realm (WASM W1,
+    /// docs/design/WASM-W1.md). The bindings call it per realm when the
+    /// engine's flag is on.
+    pub fn enable_webassembly(&mut self) -> Result<(), JsError> {
+        #[cfg(feature = "boa")]
+        {
+            self.realm_gone()?;
+            let realm = rustkit_wasm::WasmRealm::new();
+            let natives = rustkit_wasm::natives(&mut self.context, &realm).map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            // The prelude runs through this runtime's own script path, with
+            // the natives handed over on a key nothing else uses and removed
+            // before the call returns.
+            let key = boa_engine::js_string!("__rustkit_wasm_natives");
+            let global = self.context.global_object();
+            global
+                .set(key.clone(), natives, false, &mut self.context)
+                .map_err(|e| JsError::ExecutionError(e.to_string()))?;
+            let installed = self.evaluate_script(&format!(
+                "(function () {{ var n = globalThis.__rustkit_wasm_natives; delete globalThis.__rustkit_wasm_natives; ({})(n); }})()",
+                rustkit_wasm::PRELUDE
+            ));
+            let _ = global.delete_property_or_throw(key, &mut self.context);
+            installed?;
+            self.wasm.insert(self.current_realm.0, realm);
+            Ok(())
+        }
+        #[cfg(not(feature = "boa"))]
+        Err(JsError::NotInitialized)
     }
 
     /// Evaluate JavaScript code as one of the embedder's own scripts: its

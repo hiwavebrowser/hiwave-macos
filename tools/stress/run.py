@@ -909,6 +909,26 @@ def scores(suite, record):
     return r.get("score"), r.get("tests") or {}, {"failedTest": r.get("failedTest")}
 
 
+# The engine's running totals of frame spares (rustkit-engine refill_spare, SPARE-COST): one INFO line
+# per spare built, "frames spare built: total N in M ms". The last one is the run's total.
+SPARE_LINE = re.compile(r"frames spare built: total (\d+) in ([0-9.]+) ms")
+
+
+def log_spares(path):
+    """The record's `frame_spares`: {"built": N, "ms": M} from the engine log's last spare line, zeros when
+    the log has none (no spare was built), None when there is no log to read."""
+    try:
+        text = pathlib.Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    last = None
+    for m in SPARE_LINE.finditer(text):
+        last = m
+    if last is None:
+        return {"built": 0, "ms": 0.0}
+    return {"built": int(last.group(1)), "ms": round(float(last.group(2)), 1)}
+
+
 def log_findings(path):
     """Lines of the app's log that say why a page stopped (shapes only)."""
     try:
@@ -1260,6 +1280,7 @@ def main():
         "log_findings": findings,
         # Uncaught exceptions and rejections in the engine's own log (the app's console log).
         "engine_errors": log_uncaught(work / "app.log") if handle is not None else [],
+        "frame_spares": log_spares(work / "app.log") if handle is not None and args.engine != "chrome" else None,
         # Console lines that read like such a record but not behind the engine's own prefix: left out
         # of `engine_errors`, counted here. Not zero = a record was dropped or imitated; read the log.
         "engine_errors_refused": log_console_refused(work / "app.log") if handle is not None else 0,

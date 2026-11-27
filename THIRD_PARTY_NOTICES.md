@@ -18,7 +18,7 @@ checked is in section 7 and in `docs/GATES.md`.
 1. Licences with source or file-level obligations (MPL-2.0)
 2. Works that are not Cargo crates (Chart.js, Unicode CLDR data, SQLite, the Rust standard library)
 3. Vendored and modified source (`third_party/`: Boa, with code ported from V8 and atoi_simd)
-4. Rust crates in the dependency closure of the `hiwave` binary (388 crates), by licence, with each licence text once
+4. Rust crates in the dependency closure of the `hiwave` binary (394 crates), by licence, with each licence text once
 5. Crates under more than one licence at once, and licence files reproduced in full
 6. What is in the repository but does not ship
 7. How this file was made, and what was not verified
@@ -212,7 +212,7 @@ in section 4.
 
 Every crate `cargo tree -p hiwave-app -e normal` reports for
 `aarch64-apple-darwin` and `x86_64-apple-darwin`, HiWave's own crates left out.
-363 of them are compiled and linked into the binary. The other 25 are
+369 of them are compiled and linked into the binary. The other 25 are
 procedural macros (marked in their entries): they run at build time and are
 not linked, but the code they generate is, so they are listed too.
 
@@ -223,7 +223,7 @@ copied from the licence files inside each published crate; where a crate ships
 none, the entry says so and gives the `authors` field of its `Cargo.toml`
 instead.
 
-### MIT License (`MIT`): 337 crates
+### MIT License (`MIT`): 343 crates
 
 - **addr 0.15.6** (declared `MIT/Apache-2.0`). Copyright (c) 2016 Rushmore Mushambi. <https://github.com/addr-rs/addr>
 - **addr2line 0.25.1** (declared `Apache-2.0 OR MIT`). Copyright (c) 2016-2018 The gimli Developers. <https://github.com/gimli-rs/addr2line>
@@ -490,6 +490,7 @@ instead.
 - **small_btree 0.1.0** (declared `Unlicense OR MIT`). No copyright line in the published crate; Cargo.toml authors: boa-dev. <https://github.com/boa-dev/boa>
 - **smallvec 1.15.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2018 The Servo Project Developers. <https://github.com/servo/rust-smallvec>
 - **socket2 0.6.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2014 Alex Crichton. <https://github.com/rust-lang/socket2>
+- **spin 0.9.9** (declared `MIT`). Copyright (c) 2014 Mathijs van de Nes. <https://github.com/mvdnes/spin-rs.git>
 - **stable_deref_trait 1.2.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Robert Grosse. <https://github.com/storyyeller/stable_deref_trait>
 - **static_assertions 1.1.0** (declared `MIT OR Apache-2.0`). Copyright (c) 2017 Nikolai Vazquez. <https://github.com/nvzqz/static-assertions-rs>
 - **strict-num 0.1.1** (declared `MIT`). Copyright (c) 2022 Yevhenii Reizner. <https://github.com/RazrFalcon/strict-num>
@@ -546,6 +547,11 @@ instead.
 - **utf16_iter 1.0.5** (declared `Apache-2.0 OR MIT`). Copyright Mozilla Foundation. <https://github.com/hsivonen/utf16_iter>
 - **utf8_iter 1.0.4** (declared `Apache-2.0 OR MIT`). Copyright Mozilla Foundation. <https://github.com/hsivonen/utf8_iter>
 - **want 0.3.1** (declared `MIT`). Copyright (c) 2018-2019 Sean McArthur. <https://github.com/seanmonstar/want>
+- **wasmi 2.0.0** (declared `MIT/Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Robin Freyler. <https://github.com/wasmi-labs/wasmi>
+- **wasmi_collections 2.0.0** (declared `MIT/Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Robin Freyler. <https://github.com/wasmi-labs/wasmi>
+- **wasmi_core 2.0.0** (declared `MIT/Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Robin Freyler. <https://github.com/wasmi-labs/wasmi>
+- **wasmi_ir 2.0.0** (declared `MIT/Apache-2.0`). No copyright line in the published crate; Cargo.toml authors: Robin Freyler. <https://github.com/wasmi-labs/wasmi>
+- **wasmparser 0.228.0** (declared `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). No copyright line in the published crate; Cargo.toml authors: Yury Delendik. <https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasmparser>
 - **weezl 0.1.12** (declared `MIT OR Apache-2.0`). Copyright (c) HeroicKatora 2020. <https://github.com/image-rs/weezl>
 - **wgpu 23.0.1** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
 - **wgpu 24.0.5** (declared `MIT OR Apache-2.0`). Copyright (c) 2021 The gfx-rs developers. <https://github.com/gfx-rs/wgpu>
@@ -3391,8 +3397,8 @@ does not repeat that search.
 
 Not verified:
 
-- Copyright lines are what each crate's own licence files say (300 crates).
-  81 crates ship no copyright line; their entries give the `authors` field
+- Copyright lines are what each crate's own licence files say (301 crates).
+  86 crates ship no copyright line; their entries give the `authors` field
   instead, which names authors, not necessarily copyright holders. Their
   upstream repositories were not read, except Boa's.
 - Licence expressions are the crates' own declarations. No crate's source was

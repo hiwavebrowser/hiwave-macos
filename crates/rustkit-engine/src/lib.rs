@@ -529,6 +529,8 @@ mod ch_font_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod svg_shape_visual_rect_tests;
 #[cfg(all(test, feature = "headless"))]
+mod inline_mid_line_tests;
+#[cfg(all(test, feature = "headless"))]
 mod logical_size_tests;
 #[cfg(all(test, feature = "headless"))]
 mod window_event_path_tests;
@@ -622,6 +624,8 @@ mod sheet_reuse_tests;
 mod script_fresh_layout_tests;
 #[cfg(all(test, feature = "headless"))]
 mod load_geometry_read_tests;
+#[cfg(test)]
+mod load_virtual_frame_tests;
 #[cfg(all(test, feature = "headless"))]
 mod forced_layout_cause_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -905,6 +909,8 @@ mod pseudo_animation_tests;
 mod chrome_bridge_tests;
 #[cfg(all(test, feature = "headless"))]
 mod waapi_layer_tests;
+#[cfg(test)]
+mod wasm_engine_tests;
 #[cfg(test)]
 mod clock_live_timer_tests;
 #[cfg(test)]
@@ -1290,6 +1296,12 @@ pub enum EngineEvent {
 /// microsoft, shopify and walmart failed as "Unknown image format").
 /// Add `image/avif` back when a decoder lands.
 const IMAGE_ACCEPT: &str = "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+
+/// Frame spares built in this process and the time spent building them
+/// (`Engine::refill_spare`), logged at INFO on each build for the stress
+/// harness's record (SPARE-COST). Process-wide: a stress run is one engine.
+static SPARES_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SPARE_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// View state.
 #[allow(dead_code)]
@@ -2140,6 +2152,13 @@ pub struct EngineConfig {
     /// every run, however long its turns take in real time. Frame callbacks' timestamps and
     /// `performance.now()` still flow. Off by default: a live page's timeline is its frames' stamps.
     pub grid_frame_stamps: bool,
+    /// The load's timer horizon is cut into frames of virtual time (LOAD-VIRTUAL-TIME): the page is
+    /// laid out and its observers are told between timers of different 16 ms frames of the timers'
+    /// clock, never inside one. Off, a slice ends once 16 ms of real time has passed, so where the
+    /// layouts and observer callbacks fall among the timers depends on how fast the engine runs
+    /// (walmart: a faster layout put more timers in a slice, and the page opened a dialog it did not
+    /// open at the slower speed). Off by default: a window publishes frames on the real clock.
+    pub virtual_load_frames: bool,
     /// How long the page's scripts may execute on the load path. Only
     /// JavaScript counts: a fetch, a module load, or any other network
     /// wait does not. Once the executions so far have used it, a script
@@ -2185,6 +2204,10 @@ pub struct EngineConfig {
     /// Off by default: an iframe stays an empty box with `contentWindow`
     /// null, as before.
     pub nested_contexts: bool,
+    /// `WebAssembly` in every realm (WASM W1, docs/design/WASM-W1.md). Off
+    /// unless `HIWAVE_WEBASSEMBLY=1`: defining it changes what real pages do
+    /// (they take their wasm path), and W1 has stated gaps (no memory grow).
+    pub webassembly: bool,
     /// With nested contexts on: pre-built spare frames, so a frame inserted
     /// by script has its about:blank document at once (JETSTREAM-IFRAME-SYNC).
     /// On unless `HIWAVE_FRAME_SPARES=0`: the switch for the cost gate's
@@ -2265,6 +2288,7 @@ impl Default for EngineConfig {
             disable_animations: false,
             deterministic_page_clock: false,
             grid_frame_stamps: false,
+            virtual_load_frames: false,
             script_budget_ms: 5_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
@@ -2275,6 +2299,7 @@ impl Default for EngineConfig {
             // Off unless `HIWAVE_NESTED_CONTEXTS=1`: the switch for trying
             // frames in a built app or parity-capture before the flip.
             nested_contexts: std::env::var("HIWAVE_NESTED_CONTEXTS").ok().as_deref() == Some("1"),
+            webassembly: std::env::var("HIWAVE_WEBASSEMBLY").ok().as_deref() == Some("1"),
             frame_spares: std::env::var("HIWAVE_FRAME_SPARES").ok().as_deref() != Some("0"),
             replay_proxy: None,
             interrupt_scripts_at_budget: false,
@@ -7128,7 +7153,9 @@ impl Engine {
                 .and_then(|_| child.set_location(&target))
                 .and_then(|_| child.set_dimensions(width, height))
                 .and_then(|_| child.enable_net_bridge())
-                .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) });
+                .and_then(|_| if self.config.nested_contexts { child.enable_frames() } else { Ok(()) })
+                // A frame's realm has WebAssembly too, with the flag on.
+                .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
             if bound.is_ok() && blank {
                 if let Some(parent) = parent_of(self, id) {
                     child.inherit_origin_from(parent);
@@ -7371,8 +7398,16 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "before_load");
             return;
         }
-        let depth = self.frame_ancestry_urls(id).len();
-        let wanted = !view.frames.is_empty() || depth > 1;
+        let ancestry = self.frame_ancestry_urls(id);
+        let depth = ancestry.len();
+        // SPARE-COST: a frame document gets one only while it shows
+        // about:blank (JetStream's `#magic`, filled by script and read at
+        // once; a spare's own spare). A URL document gets one once it has
+        // frames, as a top-level page does: before that, its first frame
+        // attaches at the drain. Every Speedometer workload is a frameless
+        // URL document in a frame, and built a spare it never used.
+        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
         if !wanted {
             debug!(target: "frames_spare", outcome = "not_wanted");
             return;
@@ -7381,6 +7416,7 @@ impl Engine {
             debug!(target: "frames_spare", outcome = "too_deep");
             return;
         }
+        let started = std::time::Instant::now();
         let Ok(child) = parent.new_child() else { return };
         let built = Document::parse_html_scripted("<html><head></head><body></body></html>", self.config.javascript_enabled)
             .ok()
@@ -7393,14 +7429,24 @@ impl Engine {
             .set_document(Rc::new(document))
             .and_then(|_| child.set_location(&blank))
             .and_then(|_| child.enable_net_bridge())
-            .and_then(|_| child.enable_frames());
+            .and_then(|_| child.enable_frames())
+            // As the drain's frames do: a spare becomes a frame's realm.
+            .and_then(|_| if self.config.webassembly { child.enable_webassembly() } else { Ok(()) });
         if bound.is_err() {
             parent.drop_child(child);
             return;
         }
         child.inherit_origin_from(parent);
         match parent.offer_spare(child) {
-            Ok(true) => debug!(target: "frames_spare", outcome = "built"),
+            Ok(true) => {
+                debug!(target: "frames_spare", outcome = "built");
+                use std::sync::atomic::Ordering::Relaxed;
+                let built = SPARES_BUILT.fetch_add(1, Relaxed) + 1;
+                let took = started.elapsed().as_micros() as u64;
+                let us = SPARE_BUILD_US.fetch_add(took, Relaxed) + took;
+                // Running totals, the stress harness's `frame_spares` (tools/stress/run.py, log_spares).
+                info!("frames spare built: total {} in {:.1} ms", built, us as f64 / 1000.0);
+            }
             Ok(false) => debug!(target: "frames_spare", outcome = "refused"),
             Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
@@ -10388,6 +10434,8 @@ impl Engine {
         // cut short: the slice stops between callbacks.
         if !yielded && !poisoned.get() && !nav_cancel::cancelled(watch) {
             let mut remaining = MAX_TIMER_CALLBACKS;
+            // Slices of virtual time, not real time (LOAD-VIRTUAL-TIME).
+            let virtual_frames = self.config.virtual_load_frames;
             // The script time of every slice, for the errors the timers reported (H19c).
             let mut timers_ms: u64 = 0;
             loop {
@@ -10399,7 +10447,11 @@ impl Engine {
                 let (caught, stopped) = with_script_js(bindings, || {
                     let _job = rustkit_js::DiagJob::enter("timer");
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        if virtual_frames {
+                            bindings.run_timers_for_virtual_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        } else {
+                            bindings.run_timers_for_frame(horizon_ms, remaining, LIVE_FRAME_MS)
+                        }
                     }))
                 });
                 let slice_ms = step_started.elapsed().as_millis() as u64;
@@ -11045,6 +11097,11 @@ impl Engine {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
                 }
             }
+            if self.config.webassembly {
+                if let Err(e) = bindings.enable_webassembly() {
+                    warn!(error = %e, "WebAssembly did not install");
+                }
+            }
             if let Some(view) = self.views.get_mut(&id) {
                 view.canvases = Some(bindings.canvas_source());
             }
@@ -11550,6 +11607,11 @@ impl Engine {
             if self.config.nested_contexts {
                 if let Err(e) = bindings.enable_frames() {
                     warn!(error = %e, "nested browsing contexts: the frame bindings did not install");
+                }
+            }
+            if self.config.webassembly {
+                if let Err(e) = bindings.enable_webassembly() {
+                    warn!(error = %e, "WebAssembly did not install");
                 }
             }
             if let Some(view) = self.views.get_mut(&id) {

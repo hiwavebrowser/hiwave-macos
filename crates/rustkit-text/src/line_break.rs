@@ -119,7 +119,7 @@ impl LineBreaker {
         // UAX #14 break opportunities. In keep-all mode a complete
         // implementation would suppress breaks within CJK; for now all
         // UAX #14 breaks are allowed there (pre-existing simplification).
-        let mut ops: Vec<BreakOpportunity> = linebreaks(text)
+        let mut unicode = linebreaks(text)
             .map(|(offset, break_op)| BreakOpportunity {
                 offset,
                 kind: match break_op {
@@ -127,28 +127,33 @@ impl LineBreaker {
                     UnicodeBreakOp::Allowed => BreakKind::Allowed,
                 },
             })
-            .collect();
+            .peekable();
 
         // css-text-3 §4.2 `word-break: break-all`: breaking is allowed
         // between any two typographic character units, so every grapheme
         // boundary UAX #14 did not already surface is a REAL soft wrap
         // opportunity (used in normal line filling), not an emergency one.
-        if self.word_break == WordBreak::BreakAll {
-            use crate::segmentation::grapheme_boundaries;
-            let existing: std::collections::HashSet<usize> =
-                ops.iter().map(|op| op.offset).collect();
-            for offset in grapheme_boundaries(text).into_iter().skip(1) {
-                if !existing.contains(&offset) {
-                    ops.push(BreakOpportunity {
-                        offset,
-                        kind: BreakKind::Allowed,
-                    });
+        let mut graphemes = (self.word_break == WordBreak::BreakAll).then(|| {
+            crate::segmentation::grapheme_indices(text).map(|g| g.end).peekable()
+        });
+        std::iter::from_fn(move || {
+            if let Some(graphemes) = &mut graphemes {
+                if let Some(&offset) = graphemes.peek() {
+                    match unicode.peek() {
+                        Some(op) if op.offset < offset => return unicode.next(),
+                        Some(op) if op.offset == offset => {
+                            // Keep the Unicode kind, including mandatory breaks.
+                            graphemes.next();
+                        }
+                        _ => {
+                            graphemes.next();
+                            return Some(BreakOpportunity { offset, kind: BreakKind::Allowed });
+                        }
+                    }
                 }
             }
-            ops.sort_by_key(|op| op.offset);
-        }
-
-        ops.into_iter()
+            unicode.next()
+        })
     }
 
     /// Get break opportunities as byte offsets.
@@ -374,6 +379,46 @@ pub fn break_into_lines(text: &str) -> Vec<LineSegment<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn break_all_merges_graphemes_without_replacing_unicode_breaks() {
+        use std::collections::BTreeMap;
+
+        for text in ["", "one  two\r\nthree", "e\u{301} 👩‍💻🇫🇷", "漢字\u{200b}仮名\u{2029}"] {
+            let mut expected = BTreeMap::new();
+            for offset in crate::segmentation::grapheme_boundaries(text).into_iter().skip(1) {
+                expected.insert(offset, BreakKind::Allowed);
+            }
+            for (offset, kind) in linebreaks(text) {
+                expected.insert(offset, match kind {
+                    UnicodeBreakOp::Mandatory => BreakKind::Mandatory,
+                    UnicodeBreakOp::Allowed => BreakKind::Allowed,
+                });
+            }
+            let breaker = LineBreaker::new(WordBreak::BreakAll, OverflowWrap::Normal);
+            let actual: Vec<_> = breaker.break_opportunities(text)
+                .map(|op| (op.offset, op.kind))
+                .collect();
+            assert_eq!(actual, expected.into_iter().collect::<Vec<_>>(), "{text:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release timing"]
+    fn time_first_break_after_line_width() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let text = "Les fenêtres donnent sur le jardin. ".repeat(14);
+        for mode in [WordBreak::Normal, WordBreak::BreakAll] {
+            let breaker = LineBreaker::new(mode, OverflowWrap::Normal);
+            let start = Instant::now();
+            for _ in 0..50_000 {
+                black_box(breaker.find_break_after(black_box(&text), black_box(72)));
+            }
+            eprintln!("{mode:?}: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
 
     #[test]
     fn test_line_breaker_default() {
