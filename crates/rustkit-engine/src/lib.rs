@@ -440,6 +440,8 @@ mod script_net_body_size_tests;
 mod frames_stage2_tests;
 #[cfg(test)]
 mod frames_sync_blank_tests;
+#[cfg(test)]
+mod spare_wanted_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -602,6 +604,7 @@ mod aspect_ratio_apply_tests;
 mod logical_size_apply_tests;
 #[cfg(test)]
 mod ch_font_size_unit_tests;
+#[cfg(test)]
 mod svg_paint_rules_keep_tests;
 #[cfg(test)]
 mod color_shorthand_keep_tests;
@@ -7411,8 +7414,10 @@ impl Engine {
         // frames, as a top-level page does: before that, its first frame
         // attaches at the drain. Every Speedometer workload is a frameless
         // URL document in a frame, and built a spare it never used.
-        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
-        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
+        let blank = ancestry
+            .first()
+            .is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = spare_is_wanted(!view.frames.is_empty(), depth, blank);
         if !wanted {
             debug!(target: "frames_spare", outcome = "not_wanted");
             return;
@@ -7456,7 +7461,21 @@ impl Engine {
             Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
     }
+}
 
+/// Whether a document should get a frame spare (SPARE-COST / #1481).
+///
+/// - Any document that already has child frames wants one (the next insertion
+///   can attach it).
+/// - A nested blank (`about:`) document wants one even before it has frames
+///   (JetStream `#magic`, a spare's own spare).
+/// - A nested URL document with no frames does **not** (Speedometer's workload
+///   frame): its first child attaches at the drain instead.
+pub(crate) fn spare_is_wanted(has_child_frames: bool, depth: usize, document_is_about: bool) -> bool {
+    has_child_frames || (depth > 1 && document_is_about)
+}
+
+impl Engine {
     /// Drop the frame of iframe `node` of view `id`, if it has one: its
     /// offscreen view goes, and its realm with it.
     fn drop_frame(&mut self, id: EngineViewId, node: usize) -> bool {
