@@ -3685,7 +3685,9 @@ impl LayoutBox {
     /// ends with one, at any depth). That newline ends the line, so the content after the inline
     /// starts the next line box, as after a `<br>` (Chrome 148:
     /// `1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap is 123 / 45 / 678). With nothing after it,
-    /// it adds no line.
+    /// it adds no line. PRE-WRAP-NEWLINE-BEFORE-INLINE: a text run in the flow that ends with one
+    /// ends the line the same way (`1 2\n<span>4</span>6 7 8` under pre-wrap is 12 / 4678; the run
+    /// kept the line open when it had room).
     fn inline_ends_with_preserved_newline(b: &LayoutBox) -> bool {
         fn ends(b: &LayoutBox) -> bool {
             match &b.box_type {
@@ -3702,10 +3704,12 @@ impl LayoutBox {
                 _ => false,
             }
         }
-        matches!(b.box_type, BoxType::Inline)
-            && b.style.display == rustkit_css::Display::Inline
-            && !matches!(b.position, Position::Absolute | Position::Fixed)
-            && ends(b)
+        let in_flow = match b.box_type {
+            BoxType::Inline => b.style.display == rustkit_css::Display::Inline,
+            BoxType::Text(_) => true,
+            _ => false,
+        };
+        in_flow && !matches!(b.position, Position::Absolute | Position::Fixed) && ends(b)
     }
 
     /// Whether a text child that does NOT fit the remaining line space
