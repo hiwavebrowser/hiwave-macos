@@ -980,6 +980,8 @@ mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
 #[cfg(all(test, feature = "headless"))]
+mod pre_wrap_newline_before_inline_tests;
+#[cfg(all(test, feature = "headless"))]
 mod pre_wrap_newline_inline_end_tests;
 #[cfg(all(test, feature = "headless"))]
 mod form_action_url_tests;
