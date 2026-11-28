@@ -1455,6 +1455,8 @@ impl TextShaper {
 
     /// `run`'s width with this shaper's spacing, as `ShapedRun::apply_spacing` would make it:
     /// the letter-spacing after every glyph and the word-spacing after every white-space glyph.
+    /// The two must count the same units (per glyph, so a ligature or a cluster takes one
+    /// letter-spacing): if they disagree, lines are fitted at one width and painted at another.
     fn fit_width(&self, run: &ShapedRun) -> f32 {
         let (letter, word) = self.spacing;
         if letter == 0.0 && word == 0.0 {
@@ -1468,13 +1470,31 @@ impl TextShaper {
         run.metrics.width + letter * run.glyphs.len() as f32 + word * spaces as f32
     }
 
-    /// `line`'s width with this shaper's spacing: what it takes on its line box. The wrap
-    /// functions fit lines with it but return their unspaced width (LETTER-SPACING-BREAK).
+    /// `line`'s width with this shaper's spacing: what it takes on its line box, and what
+    /// `text-align` aligns. The wrap functions fit lines with it but return their unspaced width
+    /// (LETTER-SPACING-BREAK).
+    ///
+    /// Spaces that hang off the line's end are not in `line.width` (`line_ink_width`), so they
+    /// take no spacing here either: Chrome centres `1 2 3 ` at `letter-spacing:0.5em` (Ahem 20px)
+    /// as 150px, where spacing the hanging space too made it 160.
     pub fn spaced_width(&self, line: &WrappedLine) -> f32 {
-        if self.spacing == (0.0, 0.0) {
+        let (letter, word) = self.spacing;
+        if letter == 0.0 && word == 0.0 {
             return line.width;
         }
-        line.width + line.runs.iter().map(|r| self.fit_width(r) - r.metrics.width).sum::<f32>()
+        let extra: f32 = line.runs.iter().map(|r| self.fit_width(r) - r.metrics.width).sum();
+        let unspaced: f32 = line.runs.iter().map(|r| r.metrics.width).sum();
+        let hanging = line.runs.last().map_or(0, |r| {
+            let trailing = r.glyphs.iter().rev().take_while(|g| is_collapsible_space(g.character));
+            let (count, advance) = trailing.fold((0usize, 0.0f32), |(n, a), g| (n + 1, a + g.advance));
+            // They hang only where the wrap left them out of the line's width.
+            if count > 0 && unspaced - line.width >= advance - 0.01 {
+                count
+            } else {
+                0
+            }
+        });
+        line.width + extra - hanging as f32 * (letter + word)
     }
 
     /// Whether `c`, a character the primary face lacks, takes the emoji

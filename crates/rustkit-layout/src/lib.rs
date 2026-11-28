@@ -2821,6 +2821,9 @@ impl LayoutBox {
                     *drop = drop.max(below + (f.len() as f32 - 1.0) * line_height);
                     *reach = reach.max(content.y + content.height);
                     if first_run {
+                        // One `line_height` per leading empty fragment: they are forced-break
+                        // lines of this run, each one pitch tall. A run whose lines differ in
+                        // height (a taller inline inside one) would need the fragments' own tops.
                         let lead = f.iter().take_while(|r| r.width <= 0.0).count();
                         if lead < f.len() {
                             *skip = Some(lead as f32 * line_height);
@@ -3570,11 +3573,13 @@ impl LayoutBox {
                     // per-line offsets). Two alignment sources meant mixed
                     // runs double-shifted or half-shifted depending on which
                     // path a child happened to take.
+                    // Each line's width is its spaced width, as on the in-flow path: it is
+                    // what the parent's `text-align` pass aligns (LETTER-SPACING-BREAK).
                     let text_lines: Vec<TextLine> = lines
                         .iter()
                         .map(|l| TextLine {
                             text: l.text(),
-                            width: l.width,
+                            width: shaper.spaced_width(l),
                             x_offset: 0.0,
                             justify_space: 0.0,
                         })
