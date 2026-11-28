@@ -818,6 +818,131 @@ mod restore_tests {
         let h = body.children[0].children[0].dimensions.border_box().height;
         assert!((h - 30.0).abs() < 0.5, "grid float-only item height {h} with the memo on; Chromium 30");
     }
+
+    /// FLEX-MEMO (#1456): a box is absolute if either position field says so, and a containing
+    /// block only if both do (`snapshot` / flex item collection read `style.position`). Headless
+    /// `flex_remeasure_tests` only exercises the both-agree escape path.
+    #[test]
+    fn abspos_escapes_reads_both_position_fields() {
+        let style = rustkit_css::ComputedStyle::default();
+        // Layout Absolute, style Static: still escapes.
+        let mut only_layout = LayoutBox::new(BoxType::Block, style.clone());
+        let mut abs = LayoutBox::new(BoxType::Block, style.clone());
+        abs.position = Position::Absolute;
+        only_layout.children.push(abs);
+        assert!(
+            abspos_escapes(&only_layout),
+            "layout Absolute alone must refuse the memo"
+        );
+        // Style Absolute, layout Static: still escapes.
+        let mut only_style = LayoutBox::new(BoxType::Block, style.clone());
+        let mut abs = LayoutBox::new(BoxType::Block, style.clone());
+        abs.style.position = rustkit_css::Position::Absolute;
+        only_style.children.push(abs);
+        assert!(
+            abspos_escapes(&only_style),
+            "style Absolute alone must refuse the memo"
+        );
+        // Layout Relative alone is not a containing block: the abspos still escapes.
+        let mut half_cb = LayoutBox::new(BoxType::Block, style.clone());
+        half_cb.position = Position::Relative;
+        let mut abs = LayoutBox::new(BoxType::Block, style.clone());
+        abs.position = Position::Absolute;
+        abs.style.position = rustkit_css::Position::Absolute;
+        half_cb.children.push(abs);
+        assert!(
+            abspos_escapes(&half_cb),
+            "layout-only Relative must not contain an abspos for the memo"
+        );
+        // Both fields Relative: contained, no escape.
+        let mut full_cb = LayoutBox::new(BoxType::Block, style.clone());
+        full_cb.position = Position::Relative;
+        full_cb.style.position = rustkit_css::Position::Relative;
+        let mut abs = LayoutBox::new(BoxType::Block, style);
+        abs.position = Position::Absolute;
+        abs.style.position = rustkit_css::Position::Absolute;
+        full_cb.children.push(abs);
+        assert!(
+            !abspos_escapes(&full_cb),
+            "both-fields Relative must contain the abspos"
+        );
+    }
+
+    /// FLEX-MEMO (#1456): the flex key hashes the container's own `percent_height_is_auto`
+    /// (descendants alone are in `input_fingerprint`). A missing flag restores the wrong cross-size.
+    #[test]
+    fn flex_key_includes_the_containers_own_percent_height_flag() {
+        let style = rustkit_css::ComputedStyle::default();
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        let cb = Dimensions {
+            content: Rect::new(0.0, 0.0, 100.0, 50.0),
+            ..Default::default()
+        };
+        b.percent_height_is_auto = false;
+        let with_definite = flex_key(&b, &cb, None, Some(50.0), Some(50.0));
+        b.percent_height_is_auto = true;
+        let with_auto = flex_key(&b, &cb, None, Some(50.0), Some(50.0));
+        assert!(
+            with_definite != with_auto,
+            "container percent_height_is_auto must change the flex memo key"
+        );
+    }
+
+    /// FLEX-REMEASURE (#1452): `formatting_root` is keyed only when the subtree holds a float, so
+    /// a block pre-pass and a flex pass without floats can share a result.
+    #[test]
+    fn formatting_root_is_not_keyed_without_floats() {
+        use rustkit_css::{Float, Length};
+        let style = rustkit_css::ComputedStyle::new();
+        let mut plain = LayoutBox::new(BoxType::Block, style.clone());
+        plain.children.push(LayoutBox::new(BoxType::Block, style.clone()));
+        plain.formatting_root = false;
+        plain.children[0].formatting_root = false;
+        let without = input_fingerprint(&plain);
+        plain.formatting_root = true;
+        plain.children[0].formatting_root = true;
+        assert_eq!(
+            without,
+            input_fingerprint(&plain),
+            "without floats, formatting_root must not change the key"
+        );
+
+        let float = {
+            let mut st = rustkit_css::ComputedStyle::new();
+            st.width = Length::Px(10.0);
+            st.height = Length::Px(30.0);
+            st.float = Float::Left;
+            LayoutBox::with_float(BoxType::Block, st, Float::Left)
+        };
+        let mut with_float = LayoutBox::new(BoxType::Block, style);
+        with_float.children.push(float);
+        with_float.formatting_root = false;
+        let as_non_root = input_fingerprint(&with_float);
+        with_float.formatting_root = true;
+        assert_ne!(
+            as_non_root,
+            input_fingerprint(&with_float),
+            "with a float, the box's formatting_root must be keyed"
+        );
+    }
+
+    /// FLEX-REMEASURE (#1452): an empty shared float context is memoised (`shares_floats` in the
+    /// key); a non-empty shared context is refused separately by the run path.
+    #[test]
+    fn key_for_records_an_empty_shared_float_context() {
+        let style = rustkit_css::ComputedStyle::default();
+        let mut b = LayoutBox::new(BoxType::Block, style);
+        let margin = MarginCollapseContext::new();
+        let alone = key_for(&b, None, &margin);
+        assert!(!alone.shares_floats);
+        b.context_floats = Some(FloatContext::new());
+        let shared_empty = key_for(&b, None, &margin);
+        assert!(shared_empty.shares_floats);
+        assert!(
+            alone != shared_empty,
+            "an empty shared float context must change the memo key"
+        );
+    }
 }
 
 /// FLEX-MEMO: whether an absolutely positioned descendant of `b` has its containing block outside

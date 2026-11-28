@@ -321,6 +321,8 @@ mod selection_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_splice_style_tests;
 #[cfg(test)]
+mod restyle_last_needed_unit_tests;
+#[cfg(test)]
 mod button_background_tests;
 #[cfg(test)]
 mod text_transform_layout_tests;
@@ -444,6 +446,8 @@ mod frames_stage2_tests;
 mod frame_parent_repaint_tests;
 #[cfg(test)]
 mod frames_sync_blank_tests;
+#[cfg(test)]
+mod spare_wanted_tests;
 #[cfg(all(test, feature = "headless"))]
 mod frame_round_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -602,6 +606,12 @@ mod inline_line_pitch_tests;
 mod opacity_value_tests;
 #[cfg(test)]
 mod aspect_ratio_apply_tests;
+#[cfg(test)]
+mod logical_size_apply_tests;
+#[cfg(test)]
+mod ch_font_size_unit_tests;
+#[cfg(test)]
+mod svg_paint_rules_keep_tests;
 #[cfg(test)]
 mod color_shorthand_keep_tests;
 #[cfg(test)]
@@ -7414,8 +7424,10 @@ impl Engine {
         // frames, as a top-level page does: before that, its first frame
         // attaches at the drain. Every Speedometer workload is a frameless
         // URL document in a frame, and built a spare it never used.
-        let blank = ancestry.first().is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
-        let wanted = !view.frames.is_empty() || (depth > 1 && blank);
+        let blank = ancestry
+            .first()
+            .is_none_or(|url| url.as_ref().is_none_or(|u| u.scheme() == "about"));
+        let wanted = spare_is_wanted(!view.frames.is_empty(), depth, blank);
         if !wanted {
             debug!(target: "frames_spare", outcome = "not_wanted");
             return;
@@ -7459,7 +7471,21 @@ impl Engine {
             Err(e) => debug!(target: "frames_spare", outcome = "refused", error = %e),
         }
     }
+}
 
+/// Whether a document should get a frame spare (SPARE-COST / #1481).
+///
+/// - Any document that already has child frames wants one (the next insertion
+///   can attach it).
+/// - A nested blank (`about:`) document wants one even before it has frames
+///   (JetStream `#magic`, a spare's own spare).
+/// - A nested URL document with no frames does **not** (Speedometer's workload
+///   frame): its first child attaches at the drain instead.
+pub(crate) fn spare_is_wanted(has_child_frames: bool, depth: usize, document_is_about: bool) -> bool {
+    has_child_frames || (depth > 1 && document_is_about)
+}
+
+impl Engine {
     /// Drop the frame of iframe `node` of view `id`, if it has one: its
     /// offscreen view goes, and its realm with it.
     fn drop_frame(&mut self, id: EngineViewId, node: usize) -> bool {
@@ -19048,11 +19074,7 @@ impl layout_ctx::LayoutCtx {
             return;
         }
         // The parent's font-size as it computes: handed down in px, or a root-relative size.
-        let parent_font_px = match parent_style.map(|p| &p.font_size) {
-            Some(rustkit_css::Length::Px(px)) => *px,
-            Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
-            _ => 16.0,
-        };
+        let parent_font_px = ch_parent_font_px(parent_style);
         let advance = ch_advance_px(style, parent_font_px);
         for (property, value) in ch_pending.winners() {
             let substituted = substitute_ch_units(value, advance);
@@ -22195,7 +22217,7 @@ impl layout_ctx::LayoutCtx {
     /// with the root's custom properties: kept while the sheets, their
     /// order and media are the same (LAT4b), since reading them means
     /// visiting every rule of every sheet.
-    fn svg_paint_rules(
+    pub(crate) fn svg_paint_rules(
         &self,
         inline: Vec<Rc<Stylesheet>>,
         external: &Rc<Vec<Stylesheet>>,
@@ -29848,14 +29870,7 @@ fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
     // em or % size is resolved here the way it will compute (rem against the root font, em and %
     // against the parent's). Reading only px and falling back to 16px measured `16ch` at
     // `font-size: 3.5rem` with a 16px "0" (GitHub's hero heading, Chrome 148: equal widths).
-    let font_size = match style.font_size {
-        rustkit_css::Length::Px(px) => px,
-        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
-        rustkit_css::Length::Em(v) => v * parent_font_px,
-        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
-        rustkit_css::Length::Zero => 0.0,
-        _ => 16.0,
-    };
+    let font_size = ch_font_size_px(style, parent_font_px);
     let measured = rustkit_layout::measure_text_advanced(
         "0",
         &style.font_family,
@@ -29868,6 +29883,32 @@ fn ch_advance_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
         measured
     } else {
         font_size * 0.5
+    }
+}
+
+/// The element's font-size in px for a `ch` length, before the cascade absolutizes it.
+///
+/// Rem uses the thread's root font; em and % use `parent_font_px`. Anything else that is not
+/// already px falls back to 16 (the initial value), matching the pre-absolutize path in
+/// `ch_advance_px`.
+pub(crate) fn ch_font_size_px(style: &ComputedStyle, parent_font_px: f32) -> f32 {
+    match style.font_size {
+        rustkit_css::Length::Px(px) => px,
+        rustkit_css::Length::Rem(v) => v * rustkit_css::root_font_px(),
+        rustkit_css::Length::Em(v) => v * parent_font_px,
+        rustkit_css::Length::Percent(p) => p / 100.0 * parent_font_px,
+        rustkit_css::Length::Zero => 0.0,
+        _ => 16.0,
+    }
+}
+
+/// The parent's font-size as `resolve_ch_lengths` hands it to `ch_advance_px`: already-px, or a
+/// root-relative rem; everything else (including a missing parent) is 16.
+pub(crate) fn ch_parent_font_px(parent: Option<&ComputedStyle>) -> f32 {
+    match parent.map(|p| &p.font_size) {
+        Some(rustkit_css::Length::Px(px)) => *px,
+        Some(rustkit_css::Length::Rem(v)) => v * rustkit_css::root_font_px(),
+        _ => 16.0,
     }
 }
 
@@ -50323,18 +50364,37 @@ enum RestyleChild {
     Root,
 }
 
+/// BOX-REBUILD-ON-STYLE: the index of the last of `child_ids` (of `parent`) a build must reach.
+/// In a restyle build under a parent on its path, the last child that is on the path or a root
+/// (after it every child is skipped); otherwise the last child. Pure: the TLS wrapper
+/// [`restyle_last_needed`] feeds it the live build's path and roots.
+pub(crate) fn restyle_last_needed_index(
+    parent: usize,
+    child_ids: &[usize],
+    path: Option<&std::collections::HashSet<usize>>,
+    roots: Option<&std::collections::HashSet<usize>>,
+) -> Option<usize> {
+    match (path, roots) {
+        (Some(path), Some(roots)) if path.contains(&parent) => child_ids
+            .iter()
+            .rposition(|id| roots.contains(id) || path.contains(id)),
+        _ => child_ids.len().checked_sub(1),
+    }
+}
+
 /// BOX-REBUILD-ON-STYLE: the index of the last of `children` (of `parent`) a build must reach. In a
 /// restyle build under a parent on its path, the last child that is on the path or a root (after
 /// it every child is skipped); otherwise the last child. Read only: `restyle_child` counts the
 /// children it reaches down in `pending`, so this must not call it.
 fn restyle_last_needed(parent: usize, children: &[Rc<rustkit_dom::Node>]) -> Option<usize> {
+    let ids: Vec<usize> = children.iter().map(|c| c.id.raw()).collect();
     RESTYLE_BUILD.with(|build| {
         let build = build.borrow();
         match build.as_ref() {
-            Some(build) if build.path.contains(&parent) => children
-                .iter()
-                .rposition(|c| build.roots.contains(&c.id.raw()) || build.path.contains(&c.id.raw())),
-            _ => children.len().checked_sub(1),
+            Some(build) => {
+                restyle_last_needed_index(parent, &ids, Some(&build.path), Some(&build.roots))
+            }
+            None => restyle_last_needed_index(parent, &ids, None, None),
         }
     })
 }

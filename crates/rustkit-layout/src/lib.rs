@@ -116,6 +116,8 @@ mod clip_rect_unit_tests;
 
 #[cfg(test)]
 mod wrapped_inline_align_unit_tests;
+#[cfg(test)]
+mod inline_mid_line_unit_tests;
 
 pub use flex::{layout_flex_container, Axis, FlexItem, FlexLine};
 pub use forms::{
@@ -3658,7 +3660,7 @@ impl LayoutBox {
     /// of this one. An inline that holds a preserved newline flows: the line loops carry a newline
     /// at its end as a break (`inline_ends_with_preserved_newline`, PRE-WRAP-NEWLINE-AT-INLINE-END),
     /// which is what kept it out before (batch 124 lost a line at letter-spacing-200).
-    fn stays_out_of_flow(b: &LayoutBox) -> bool {
+    pub(crate) fn stays_out_of_flow(b: &LayoutBox) -> bool {
         Self::holds_spaced_text(b)
     }
 
@@ -3670,7 +3672,7 @@ impl LayoutBox {
     /// with Ahem the text after it on the span's own line). Such an inline is not laid out in
     /// flow: if it does not fit the rest of the line it moves to the next line, as before
     /// INLINE-MID-LINE.
-    fn holds_spaced_text(b: &LayoutBox) -> bool {
+    pub(crate) fn holds_spaced_text(b: &LayoutBox) -> bool {
         match &b.box_type {
             BoxType::Text(_) => {
                 !is_zero_length(&b.style.letter_spacing) || !is_zero_length(&b.style.word_spacing)
@@ -3686,7 +3688,7 @@ impl LayoutBox {
     /// starts the next line box, as after a `<br>` (Chrome 148:
     /// `1 2 3<span>\n4 5\n</span>6 7 8` under pre-wrap is 123 / 45 / 678). With nothing after it,
     /// it adds no line.
-    fn inline_ends_with_preserved_newline(b: &LayoutBox) -> bool {
+    pub(crate) fn inline_ends_with_preserved_newline(b: &LayoutBox) -> bool {
         fn ends(b: &LayoutBox) -> bool {
             match &b.box_type {
                 BoxType::Text(text) => {

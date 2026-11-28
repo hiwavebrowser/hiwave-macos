@@ -168,9 +168,13 @@ mod unhandled_rejection_tests;
 #[cfg(test)]
 mod frame_sandbox_tests;
 #[cfg(test)]
+mod frame_prebuild_tests;
+#[cfg(test)]
 mod web_worker_tests;
 #[cfg(test)]
 mod web_named_access_tests;
+#[cfg(test)]
+mod window_event_path_unit_tests;
 #[cfg(test)]
 mod child_realm_tests;
 #[cfg(test)]
@@ -1942,6 +1946,12 @@ pub struct FrameRequest {
     pub prebuilt: bool,
 }
 
+/// Whether `__rustkit_frame_prebuild` may mark a pending request as
+/// prebuilt (SPARE-COST / #1489): still pending, unsandboxed about:blank.
+pub(crate) fn frame_prebuild_accepted(r: &FrameRequest) -> bool {
+    !r.prebuilt && r.sandbox.is_none() && r.url.as_deref() == Some("about:blank")
+}
+
 pub struct DomBindings {
     runtime: PageRuntime,
     /// Where the monotonic clock behind the page clock counts from: the
@@ -2132,7 +2142,7 @@ impl DomBindings {
                 let mut queue = queue.borrow_mut();
                 let pending = queue.iter_mut().rev().find(|r| r.node == node);
                 match pending {
-                    Some(r) if !r.prebuilt && r.sandbox.is_none() && r.url.as_deref() == Some("about:blank") => {
+                    Some(r) if frame_prebuild_accepted(r) => {
                         r.prebuilt = true;
                         JsValue::Boolean(true)
                     }
