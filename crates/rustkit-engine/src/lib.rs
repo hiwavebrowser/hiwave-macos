@@ -318,6 +318,8 @@ mod text_input;
 pub use text_input::{TextInputCaret, TextInputState};
 #[cfg(test)]
 mod selection_tests;
+#[cfg(all(test, feature = "headless"))]
+mod box_splice_style_tests;
 #[cfg(test)]
 mod button_background_tests;
 #[cfg(test)]
@@ -438,6 +440,8 @@ mod script_net_t7_tests;
 mod script_net_body_size_tests;
 #[cfg(test)]
 mod frames_stage2_tests;
+#[cfg(test)]
+mod frame_parent_repaint_tests;
 #[cfg(test)]
 mod frames_sync_blank_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -977,6 +981,8 @@ mod record_elapsed_tests;
 mod script_nav_image_wait_tests;
 #[cfg(all(test, feature = "headless"))]
 mod post_onload_requests_tests;
+#[cfg(all(test, feature = "headless"))]
+mod pre_wrap_newline_before_inline_tests;
 #[cfg(all(test, feature = "headless"))]
 mod pre_wrap_newline_inline_end_tests;
 #[cfg(all(test, feature = "headless"))]
@@ -7490,11 +7496,59 @@ impl Engine {
             };
         }
         if all.relaid_out {
-            if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
-                debug!(error = %e, "frames: the parent's layout after a frame's failed");
+            // NO-MUTATION-RELAYOUT: the parent's paint includes its frames', and that is all that
+            // changed: paint it again over its laid-out boxes. Anything else pending for it (a
+            // mutation of its own, a resize) still takes the relayout.
+            match self.repaint_over_layout(id) {
+                Ok(true) => {}
+                _ => {
+                    if let Err(e) = self.relayout_for(id, RelayoutCause::Timer) {
+                        debug!(error = %e, "frames: the parent's layout after a frame's failed");
+                    }
+                }
             }
         }
         all
+    }
+
+    /// NO-MUTATION-RELAYOUT: build view `id`'s display list again over the boxes it last laid out
+    /// and paint it, with no build and no layout: what a parent needs when only its frames' paint
+    /// changed (`display_list_for` splices each frame's current list in at its iframe). `false` when
+    /// the view needs a relayout instead: nothing laid out yet, a relayout or restyle pending, or its
+    /// size changed (the same guards as `paint_animation_frame`).
+    fn repaint_over_layout(&mut self, id: EngineViewId) -> Result<bool, EngineError> {
+        let Some(view) = self.views.get(&id) else {
+            return Ok(false);
+        };
+        let (Some(_), Some(laid), Some(_)) = (view.laid_with.as_ref(), view.layout.clone(), view.display_list.as_ref())
+        else {
+            return Ok(false);
+        };
+        if !view.relayout_pending.is_empty() || view.pending_dirty.is_some() || view.pointer_restyle {
+            return Ok(false);
+        }
+        let size = match view.headless_bounds {
+            Some(b) => (b.width, b.height),
+            None => match self.presenter.as_mut().map(|p| p.host_bounds(self.views[&id].viewhost_id)) {
+                Some(Ok(b)) => (b.width, b.height),
+                _ => return Ok(false),
+            },
+        };
+        if self.views[&id].laid_with.as_ref().is_some_and(|w| w.size != size) {
+            return Ok(false);
+        }
+        let display_list = self.display_list_for(id, &laid);
+        let view = self.views.get_mut(&id).ok_or(EngineError::ViewNotFound(id))?;
+        view.display_list = Some(Arc::new(display_list));
+        // The images this list paints are the ones laid out, as for an animation frame.
+        let planned = view.images_planned_for == view.frame_generation;
+        view.frame_generation += 1;
+        if planned {
+            view.images_planned_for = view.frame_generation;
+        }
+        view.relayout_stats.layouts_skipped = view.relayout_stats.layouts_skipped.saturating_add(1);
+        self.render(id)?;
+        Ok(true)
     }
 
     /// One live turn of view `id` and, with nested browsing contexts on,
@@ -16546,7 +16600,15 @@ impl layout_ctx::LayoutCtx {
                 // Match sharing keys a child's matches on its ancestor chain.
                 let share_chain = MatchShareChain::enter(stylesheets, ancestors, &child_ancestors);
                 let table_hints = TableHintScope::enter(&tag_lower, attributes);
+                // BOX-REBUILD-ON-STYLE: a restyle build records a skipped child only for the children
+                // after it that it builds, so it stops after the last child it builds or walks (a
+                // write on the first of thousands of siblings skipped and recorded every other one).
+                // An ordinary build has no skipped child: `last_needed` is the last child.
+                let last_needed = restyle_last_needed(node.id.raw(), &child_nodes);
                 for (child_index, child) in child_nodes.iter().enumerate() {
+                    if last_needed.is_none_or(|last| child_index > last) {
+                        break;
+                    }
                     let restyle = restyle_child(node.id.raw(), child.id.raw());
                     if restyle == RestyleChild::Skip {
                         // A restyle build skips what no root is under: the
@@ -16554,6 +16616,8 @@ impl layout_ctx::LayoutCtx {
                         // earlier one (S22: a feed of hundreds of posts
                         // paid a selector path, a children clone and a
                         // placeholder style per post, twice per move).
+                        #[cfg(test)]
+                        SKIPPED_SIBLINGS.with(|n| n.set(n.get() + 1));
                         if let NodeType::Element { tag_name, attributes, .. } = &child.node_type {
                             let t = lower_tag(tag_name);
                             *type_seen.entry(t.clone()).or_insert(0) += 1;
@@ -50010,6 +50074,9 @@ thread_local! {
     static CASCADES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Elements the builds on this thread walked into (the element arm of the build), for tests.
     static BUILT_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Children a restyle build on this thread skipped and recorded as a later sibling's earlier
+    /// one (BOX-REBUILD-ON-STYLE), for tests.
+    static SKIPPED_SIBLINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Builds this thread spliced into a kept box tree (PR 3), for tests.
     static SPLICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Splices a `boxes-verify` build found different from the full build beside them, for tests.
@@ -50038,6 +50105,12 @@ pub(crate) fn splice_mismatches_for_test() -> usize {
 #[cfg(test)]
 pub(crate) fn splices_for_test() -> (usize, String) {
     (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
+}
+
+/// Children this thread's restyle builds have skipped and recorded so far (tests).
+#[cfg(test)]
+pub(crate) fn skipped_siblings_for_test() -> usize {
+    SKIPPED_SIBLINGS.with(std::cell::Cell::get)
 }
 
 /// Elements this thread's builds have walked into so far (tests).
@@ -50252,6 +50325,22 @@ enum RestyleChild {
     Walk,
     /// A root: built, and its box kept in `found`.
     Root,
+}
+
+/// BOX-REBUILD-ON-STYLE: the index of the last of `children` (of `parent`) a build must reach. In a
+/// restyle build under a parent on its path, the last child that is on the path or a root (after
+/// it every child is skipped); otherwise the last child. Read only: `restyle_child` counts the
+/// children it reaches down in `pending`, so this must not call it.
+fn restyle_last_needed(parent: usize, children: &[Rc<rustkit_dom::Node>]) -> Option<usize> {
+    RESTYLE_BUILD.with(|build| {
+        let build = build.borrow();
+        match build.as_ref() {
+            Some(build) if build.path.contains(&parent) => children
+                .iter()
+                .rposition(|c| build.roots.contains(&c.id.raw()) || build.path.contains(&c.id.raw())),
+            _ => children.len().checked_sub(1),
+        }
+    })
 }
 
 fn restyle_child(parent: usize, child: usize) -> RestyleChild {
