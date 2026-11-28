@@ -321,6 +321,8 @@ mod selection_tests;
 #[cfg(all(test, feature = "headless"))]
 mod box_splice_style_tests;
 #[cfg(test)]
+mod restyle_last_needed_unit_tests;
+#[cfg(test)]
 mod button_background_tests;
 #[cfg(test)]
 mod text_transform_layout_tests;
@@ -50362,18 +50364,37 @@ enum RestyleChild {
     Root,
 }
 
+/// BOX-REBUILD-ON-STYLE: the index of the last of `child_ids` (of `parent`) a build must reach.
+/// In a restyle build under a parent on its path, the last child that is on the path or a root
+/// (after it every child is skipped); otherwise the last child. Pure: the TLS wrapper
+/// [`restyle_last_needed`] feeds it the live build's path and roots.
+pub(crate) fn restyle_last_needed_index(
+    parent: usize,
+    child_ids: &[usize],
+    path: Option<&std::collections::HashSet<usize>>,
+    roots: Option<&std::collections::HashSet<usize>>,
+) -> Option<usize> {
+    match (path, roots) {
+        (Some(path), Some(roots)) if path.contains(&parent) => child_ids
+            .iter()
+            .rposition(|id| roots.contains(id) || path.contains(id)),
+        _ => child_ids.len().checked_sub(1),
+    }
+}
+
 /// BOX-REBUILD-ON-STYLE: the index of the last of `children` (of `parent`) a build must reach. In a
 /// restyle build under a parent on its path, the last child that is on the path or a root (after
 /// it every child is skipped); otherwise the last child. Read only: `restyle_child` counts the
 /// children it reaches down in `pending`, so this must not call it.
 fn restyle_last_needed(parent: usize, children: &[Rc<rustkit_dom::Node>]) -> Option<usize> {
+    let ids: Vec<usize> = children.iter().map(|c| c.id.raw()).collect();
     RESTYLE_BUILD.with(|build| {
         let build = build.borrow();
         match build.as_ref() {
-            Some(build) if build.path.contains(&parent) => children
-                .iter()
-                .rposition(|c| build.roots.contains(&c.id.raw()) || build.path.contains(&c.id.raw())),
-            _ => children.len().checked_sub(1),
+            Some(build) => {
+                restyle_last_needed_index(parent, &ids, Some(&build.path), Some(&build.roots))
+            }
+            None => restyle_last_needed_index(parent, &ids, None, None),
         }
     })
 }
