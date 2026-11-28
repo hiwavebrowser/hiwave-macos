@@ -690,8 +690,8 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                         wasmi::ExternType::Global(ty) => {
                             // The prelude hands ["G", globalId] for a WebAssembly.Global, ["V", value] otherwise.
                             let row = value.as_object().map(JsArray::from_object).transpose()?.ok_or_else(JsNativeError::typ)?;
-                            let tag = row.get(0, &mut *unsafe { &mut *context_ptr })?.to_string(unsafe { &mut *context_ptr })?.to_std_string_escaped();
-                            let payload = row.get(1, unsafe { &mut *context_ptr })?;
+                            let tag = row.get(0, &mut *context_ptr)?.to_string(&mut *context_ptr)?.to_std_string_escaped();
+                            let payload = row.get(1, &mut *context_ptr)?;
                             let global = if tag == "G" {
                                 let id = payload.as_number().unwrap_or(-1.0);
                                 realm.globals.borrow().get(id as usize).copied().ok_or_else(JsNativeError::typ)?
@@ -709,7 +709,7 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                                 if !ok {
                                     return Err(link("global import must be a number, valid Wasm reference, or WebAssembly.Global object"));
                                 }
-                                let v = to_wasm(&payload, content, unsafe { &mut *context_ptr })?;
+                                let v = to_wasm(&payload, content, &mut *context_ptr)?;
                                 wasmi::Global::new(ctx.as_context_mut(), v, wasmi::Mutability::Const)
                             };
                             linker.define(&key.0, &key.1, global).map_err(|e| wasm_error("LinkError", e))?;
@@ -915,7 +915,7 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
             // object in `memories` (dropped with the store), the detach key
             // keeps script from taking the storage, and the buffer is not
             // resizable. Only the store reads or writes through it.
-            let bytes: &'static mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
+            let bytes: &'static mut [u8] = std::slice::from_raw_parts_mut(ptr, size);
             let ty = wasmi::MemoryType::new(initial, maximum);
             let memory = realm
                 .with_store(|s| wasmi::Memory::new_static(s.ctx(), ty, bytes))
