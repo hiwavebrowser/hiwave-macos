@@ -1737,9 +1737,10 @@ fn dom_write(
     l: &RefCell<MutationLog>,
     args: &[JsValue],
 ) -> JsValue {
-    let record = write_record(&h.borrow(), args);
-    let (reach, cause) = write_reach(&h.borrow(), args, d);
-    match write(&h.borrow(), args) {
+    let host = h.borrow();
+    let record = write_record(&host, args);
+    let (reach, cause) = write_reach(&host, args, d);
+    match write(&host, args) {
         Ok((result, bucket)) => {
             let logged = match record.filter(|_| bucket != DomDirty::Clean) {
                 Some(record) => {
@@ -1748,8 +1749,8 @@ fn dom_write(
                 }
                 None => crate::Logged::No,
             };
-            trace_dirty(&h.borrow(), args, bucket);
-            note_mutation(m, bucket, write_kind(args), || node_label(&h.borrow(), args, 2));
+            trace_dirty(&host, args, bucket);
+            note_mutation(m, bucket, write_kind(args), || node_label(&host, args, 2));
             reach.mark(d, bucket, cause, logged);
             result
         }
@@ -4053,7 +4054,8 @@ const WRAPPERS_JS: &str = r#"
     // `name` is a literal that is already lower case, so the custom-element reaction is only asked for
     // when some definition watches it.
     function putPlain(el, name, text) {
-        var s = slotOf(el);
+        var s = el != null ? el[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', name);
         var ar = HOOKS.attrs && HOOKS.watched[name] === true && HOOKS.attrs(el, 'setAttr', name, true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, name, text);
@@ -4390,9 +4392,15 @@ const WRAPPERS_JS: &str = r#"
     // focus()/blur() and document.activeElement are in node_apis.js.
 
     Element.prototype.getAttribute = function (name) {
-        var s = slotOf(this); return N.attr(s.gen, s.id, String(name));
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return N.attr(s.gen, s.id, typeof name === 'string' ? name : String(name));
     };
-    Element.prototype.hasAttribute = function (name) { return this.getAttribute(name) !== null; };
+    Element.prototype.hasAttribute = function (name) {
+        var s = this != null ? this[SLOT] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return N.attr(s.gen, s.id, typeof name === 'string' ? name : String(name)) !== null;
+    };
     // A write to an `<img>`'s `src` or `srcset` starts its load over
     // (E54): the marks script reads `complete` and `decode()` from are
     // updated at once, not on the next event.
@@ -4546,13 +4554,13 @@ const WRAPPERS_JS: &str = r#"
     }
     // The tokens now; `st.raw` is the class attribute's text (null: no attribute).
     function tokens(st) {
-        var s = slotOf(st.el), v = N.attr(s.gen, s.id, 'class');
+        var s = st.el[SLOT], v = N.attr(s.gen, s.id, 'class');
         if (st.ts !== null && v === st.raw) return st.ts;
         st.raw = v;
         return tlParse(st, v === null ? '' : v);
     }
     function checkToken(t, method) {
-        t = tlStr(t);
+        if (typeof t !== 'string') t = tlStr(t);
         if (t === '') throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided must not be empty.", 'SyntaxError');
         if (tlTest(TL_SPACE, t)) throw new DOMException("Failed to execute '" + method + "' on 'DOMTokenList': The token provided contains HTML space characters.", 'InvalidCharacterError');
         return t;
@@ -4563,7 +4571,7 @@ const WRAPPERS_JS: &str = r#"
     // name: `attributeChanged` (on<type> attributes), `HOOKS.scripts.changed` (`async`, `src`)
     // and `HOOKS.frames.changed` (`src`). It keeps the custom-element reaction (`HOOKS.attrs`). Same write, same mutation record, same errors.
     function putClass(el, text) {
-        var s = slotOf(el);
+        var s = el[SLOT];
         var m = HOOKS.mutation && HOOKS.mutation.data(el, 'setAttr', 'class');
         var ar = HOOKS.attrs && HOOKS.watched.class === true && HOOKS.attrs(el, 'setAttr', 'class', true);
         var r = N.write(gen, 'setAttr', s.gen === gen ? s.id : -1, 'class', text);
