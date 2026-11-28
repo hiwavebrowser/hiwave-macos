@@ -1360,6 +1360,10 @@ struct WrapKey {
     overflow_wrap: u8,
     starts_mid_line: bool,
     preserve_spaces: bool,
+    /// The shaper's letter-spacing and word-spacing (bits): they move the breaks
+    /// (LETTER-SPACING-BREAK).
+    letter_spacing: u32,
+    word_spacing: u32,
 }
 
 struct LineSpan {
@@ -1425,6 +1429,10 @@ pub(crate) fn shaped_memo_bytes() -> usize {
 pub struct TextShaper {
     #[allow(dead_code)]
     cache: FontCache,
+    /// `letter-spacing` and `word-spacing` in px that the wrap functions fit lines with
+    /// (LETTER-SPACING-BREAK). The runs they return are still unspaced: the spacing is applied
+    /// where the lines are shaped for paint (`ShapedRun::apply_spacing`).
+    spacing: (f32, f32),
 }
 
 impl TextShaper {
@@ -1432,7 +1440,61 @@ impl TextShaper {
     pub fn new() -> Self {
         Self {
             cache: FontCache::new(),
+            spacing: (0.0, 0.0),
         }
+    }
+
+    /// This shaper with the `letter-spacing` and `word-spacing` (px) its wrap functions fit
+    /// lines with. The spacing is part of the content's width (CSS Text 3 §8), so a line breaks
+    /// where its spaced width no longer fits: without it `1 2` at `letter-spacing:1em` in a 5em
+    /// box stayed on one line 6em wide (WPT css-text/letter-spacing/letter-spacing-200).
+    pub fn with_spacing(mut self, letter_spacing: f32, word_spacing: f32) -> Self {
+        self.spacing = (letter_spacing, word_spacing);
+        self
+    }
+
+    /// `run`'s width with this shaper's spacing, as `ShapedRun::apply_spacing` would make it:
+    /// the letter-spacing after every glyph and the word-spacing after every white-space glyph.
+    /// The two must count the same units (per glyph, so a ligature or a cluster takes one
+    /// letter-spacing): if they disagree, lines are fitted at one width and painted at another.
+    fn fit_width(&self, run: &ShapedRun) -> f32 {
+        let (letter, word) = self.spacing;
+        if letter == 0.0 && word == 0.0 {
+            return run.metrics.width;
+        }
+        let spaces = if word == 0.0 {
+            0
+        } else {
+            run.glyphs.iter().filter(|g| g.character.is_whitespace()).count()
+        };
+        run.metrics.width + letter * run.glyphs.len() as f32 + word * spaces as f32
+    }
+
+    /// `line`'s width with this shaper's spacing: what it takes on its line box, and what
+    /// `text-align` aligns. The wrap functions fit lines with it but return their unspaced width
+    /// (LETTER-SPACING-BREAK).
+    ///
+    /// Spaces that hang off the line's end are not in `line.width` (`line_ink_width`), so they
+    /// take no spacing here either: Chrome centres `1 2 3 ` at `letter-spacing:0.5em` (Ahem 20px)
+    /// as 150px, where spacing the hanging space too made it 160.
+    pub fn spaced_width(&self, line: &WrappedLine) -> f32 {
+        let (letter, word) = self.spacing;
+        if letter == 0.0 && word == 0.0 {
+            return line.width;
+        }
+        let extra: f32 = line.runs.iter().map(|r| self.fit_width(r) - r.metrics.width).sum();
+        let unspaced: f32 = line.runs.iter().map(|r| r.metrics.width).sum();
+        let hanging = line.runs.last().map_or(0, |r| {
+            let trailing = r.glyphs.iter().rev().take_while(|g| is_collapsible_space(g.character));
+            let (count, advance) = trailing.fold((0usize, 0.0f32), |(n, a), g| (n + 1, a + g.advance));
+            // They hang only where the wrap left them out of the line's width.
+            if count > 0 && unspaced - line.width >= advance - 0.01 {
+                count
+            } else {
+                0
+            }
+        });
+        line.width + extra - hanging as f32 * (letter + word)
     }
 
     /// Whether `c`, a character the primary face lacks, takes the emoji
@@ -2914,6 +2976,8 @@ impl TextShaper {
             overflow_wrap: breaker.overflow_wrap as u8,
             starts_mid_line,
             preserve_spaces,
+            letter_spacing: self.spacing.0.to_bits(),
+            word_spacing: self.spacing.1.to_bits(),
         });
         if let Some(key) = &key {
             let spans = WRAP_MEMO.with(|memo| {
@@ -2971,7 +3035,7 @@ impl TextShaper {
             let remaining = &text[line_start..];
             let (window, shaped) = self.overflowing_window(remaining, font_chain, weight, style, stretch, size, cur_max)?;
 
-            if window.len() == remaining.len() && shaped.metrics.width <= cur_max + Self::FIT_EPSILON {
+            if window.len() == remaining.len() && self.fit_width(&shaped) <= cur_max + Self::FIT_EPSILON {
                 // Entire remaining text fits on one line
                 let width = shaped.metrics.width;
                 lines.push(WrappedLine {
@@ -3037,7 +3101,7 @@ impl TextShaper {
                             stretch,
                             size,
                         )?;
-                        if shaped_prefix.metrics.width <= cur_max + Self::FIT_EPSILON {
+                        if self.fit_width(&shaped_prefix) <= cur_max + Self::FIT_EPSILON {
                             fitted = offset;
                         } else {
                             break;
@@ -3141,7 +3205,7 @@ impl TextShaper {
             let end = remaining.char_indices().nth(chars).map_or(remaining.len(), |(i, _)| i);
             let window = &remaining[..end];
             let shaped = self.shape(window, font_chain, weight, style, stretch, size)?;
-            if end == remaining.len() || shaped.metrics.width > enough {
+            if end == remaining.len() || self.fit_width(&shaped) > enough {
                 return Ok((window, shaped));
             }
             chars *= 2;
@@ -3197,9 +3261,7 @@ impl TextShaper {
             let fits = if prefix.is_empty() {
                 true
             } else {
-                self.shape(prefix, font_chain, weight, style, stretch, size)?
-                    .metrics
-                    .width
+                self.fit_width(&self.shape(prefix, font_chain, weight, style, stretch, size)?)
                     <= max_width + Self::FIT_EPSILON
             };
 
@@ -3599,6 +3661,44 @@ mod tests {
             assert!(windowed.len() > 3, "{label}: {} lines", windowed.len());
             assert_eq!(windowed, whole, "{label}: the window breaks where the whole text does");
             assert_eq!(repeated, whole, "{label}: reused breaks agree with the whole text");
+        }
+    }
+
+    /// LETTER-SPACING-BREAK and the wrap memo (#1487): a paragraph's breaks depend on its
+    /// letter-spacing and word-spacing, so the same paragraph wrapped at another spacing must not
+    /// reuse the breaks of the first. Each spaced wrap follows an unspaced wrap of the same text
+    /// (which fills the memo) and must break where an uncached wrap (`WRAP_WINDOW_OFF`) does.
+    #[test]
+    fn a_paragraph_at_another_spacing_does_not_reuse_its_breaks() {
+        let text = "1 2 3 4 5 6 7 8 9 ".repeat(40);
+        let chain = FontFamilyChain::from_css_value("Arial, sans-serif");
+        let wrap = |shaper: &TextShaper, uncached: bool| {
+            WRAP_WINDOW_OFF.with(|w| w.set(uncached));
+            let lines = shaper
+                .wrap_text_mid_line_white_space(
+                    &text,
+                    &chain,
+                    FontWeight::NORMAL,
+                    FontStyle::Normal,
+                    FontStretch::Normal,
+                    20.0,
+                    300.0,
+                    300.0,
+                    CssWordBreak::Normal,
+                    CssOverflowWrap::Normal,
+                    WhiteSpace::Normal,
+                )
+                .expect("wrap");
+            WRAP_WINDOW_OFF.with(|w| w.set(false));
+            lines.iter().map(|l| (l.start_offset, l.end_offset)).collect::<Vec<_>>()
+        };
+        for (label, letter, word) in [("letter-spacing 20px", 20.0, 0.0), ("word-spacing 30px", 0.0, 30.0)] {
+            let unspaced = wrap(&TextShaper::new(), false);
+            let spaced = TextShaper::new().with_spacing(letter, word);
+            let after_unspaced = wrap(&spaced, false);
+            let uncached = wrap(&spaced, true);
+            assert!(uncached.len() > unspaced.len(), "{label}: spacing should add lines");
+            assert_eq!(after_unspaced, uncached, "{label}: the spaced wrap reused the unspaced breaks");
         }
     }
 

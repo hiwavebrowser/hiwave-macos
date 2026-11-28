@@ -1,0 +1,160 @@
+{
+  "chrome": "148.0.7778.216",
+  "platform": "win32",
+  "cases": [
+    {
+      "label": "Ahem, letter-spacing 1em on the block, \"1 2\"",
+      "style": "body{margin:0} #p{font:20px/1 Ahem;width:100px} #p{letter-spacing:1em}",
+      "body": "<div id=p>1 2</div>",
+      "font_loaded": true,
+      "height": 40,
+      "lines": [
+        "1",
+        "2"
+      ]
+    },
+    {
+      "label": "Ahem, letter-spacing 1em on the block, \"1 2 3 4\"",
+      "style": "body{margin:0} #p{font:20px/1 Ahem;width:100px} #p{letter-spacing:1em}",
+      "body": "<div id=p>1 2 3 4</div>",
+      "font_loaded": true,
+      "height": 80,
+      "lines": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ]
+    },
+    {
+      "label": "Ahem, letter-spacing 1em on a span, \"1 2\"",
+      "style": "body{margin:0} #p{font:20px/1 Ahem;width:100px} span{letter-spacing:1em}",
+      "body": "<div id=p><span>1 2</span></div>",
+      "font_loaded": true,
+      "height": 40,
+      "lines": [
+        "1",
+        "2"
+      ]
+    },
+    {
+      "label": "Ahem, word-spacing 40px on the block, \"1 2 3\"",
+      "style": "body{margin:0} #p{font:20px/1 Ahem;width:100px} #p{word-spacing:40px}",
+      "body": "<div id=p>1 2 3</div>",
+      "font_loaded": true,
+      "height": 40,
+      "lines": [
+        "12",
+        "3"
+      ]
+    },
+    {
+      "label": "Arial, letter-spacing 2px",
+      "style": "body{margin:0} #p{font:16px/1.25 Arial;width:200px} #p{letter-spacing:2px}",
+      "body": "<div id=p>The quick brown fox jumps over the lazy dog and keeps on running far away</div>",
+      "font_loaded": false,
+      "height": 80,
+      "lines": [
+        "Thequickbrownfox",
+        "jumpsoverthelazy",
+        "dogandkeepson",
+        "runningfaraway"
+      ]
+    },
+    {
+      "label": "Arial, letter-spacing 0.2em",
+      "style": "body{margin:0} #p{font:16px/1.25 Arial;width:200px} #p{letter-spacing:0.2em}",
+      "body": "<div id=p>The quick brown fox jumps over the lazy dog and keeps on running far away</div>",
+      "font_loaded": false,
+      "height": 100,
+      "lines": [
+        "Thequickbrown",
+        "foxjumpsoverthe",
+        "lazydogandkeeps",
+        "onrunningfar",
+        "away"
+      ]
+    },
+    {
+      "label": "Arial, word-spacing 8px",
+      "style": "body{margin:0} #p{font:16px/1.25 Arial;width:200px} #p{word-spacing:8px}",
+      "body": "<div id=p>The quick brown fox jumps over the lazy dog and keeps on running far away</div>",
+      "font_loaded": false,
+      "height": 80,
+      "lines": [
+        "Thequickbrownfox",
+        "jumpsoverthelazy",
+        "dogandkeepson",
+        "runningfaraway"
+      ]
+    },
+    {
+      "label": "Arial, letter-spacing -1px",
+      "style": "body{margin:0} #p{font:16px/1.25 Arial;width:200px} #p{letter-spacing:-1px}",
+      "body": "<div id=p>The quick brown fox jumps over the lazy dog and keeps on running far away</div>",
+      "font_loaded": false,
+      "height": 60,
+      "lines": [
+        "Thequickbrownfoxjumpsover",
+        "thelazydogandkeepson",
+        "runningfaraway"
+      ]
+    },
+    {
+      "label": "Arial, no spacing (control)",
+      "style": "body{margin:0} #p{font:16px/1.25 Arial;width:200px}",
+      "body": "<div id=p>The quick brown fox jumps over the lazy dog and keeps on running far away</div>",
+      "font_loaded": false,
+      "height": 60,
+      "lines": [
+        "Thequickbrownfoxjumps",
+        "overthelazydogand",
+        "keepsonrunningfaraway"
+      ]
+    },
+    {
+      "label": "letter-spacing-200 box 2 as written",
+      "style": "body{margin:0} .contain{font:20px/1 Ahem;width:5em;border:solid blue;margin:1em;float:left} span,.test{letter-spacing:1em} .pre,.control p{white-space:pre-wrap} p{margin:0}",
+      "body": "<div class=\"contain\" id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<span><br>4 5<br></span>6 7 8</p><p class=\"pre\">1 2 3<span>\n4 5\n</span>6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 266,
+      "lines": [
+        "1",
+        "2",
+        "12三",
+        "456",
+        "七89",
+        "123",
+        "4",
+        "5",
+        "678",
+        "123",
+        "4",
+        "5",
+        "678"
+      ]
+    },
+    {
+      "label": "letter-spacing-200 box 3 as written",
+      "style": "body{margin:0} .contain{font:20px/1 Ahem;width:5em;border:solid blue;margin:1em;float:left} span,.test{letter-spacing:1em} .pre,.control p{white-space:pre-wrap} p{margin:0}",
+      "body": "<div class=\"contain\" id=p><p><span>1 2</span></p><p>1 2 三<span>456</span>七 8 9</p><p>1 2 3<br><span>4 5</span><br>6 7 8</p><p class=\"pre\">1 2 3\n<span>4 5</span>\n6 7 8</p></div>",
+      "font_loaded": true,
+      "height": 266,
+      "lines": [
+        "1",
+        "2",
+        "12三",
+        "456",
+        "七89",
+        "123",
+        "4",
+        "5",
+        "678",
+        "123",
+        "4",
+        "5",
+        "678"
+      ]
+    }
+  ]
+}

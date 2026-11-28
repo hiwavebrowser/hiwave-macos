@@ -1,0 +1,99 @@
+{
+  "chrome": "148.0.7778.216",
+  "oracle": "tools/parity_oracle/spaced_align_empty_union_log.mjs",
+  "style": "body{margin:0} p{margin:0;font:20px/1 Ahem;width:200px}",
+  "align": [
+    {
+      "label": "centered, letter-spacing 0.5em",
+      "style": "text-align:center;letter-spacing:0.5em",
+      "text": "1 2 3 4 5 6",
+      "height": 40,
+      "lines": [
+        {
+          "chars": "123",
+          "left": 25
+        },
+        {
+          "chars": "456",
+          "left": 25
+        }
+      ]
+    },
+    {
+      "label": "right-aligned, letter-spacing 0.5em",
+      "style": "text-align:right;letter-spacing:0.5em",
+      "text": "1 2 3 4 5 6",
+      "height": 40,
+      "lines": [
+        {
+          "chars": "123",
+          "left": 50
+        },
+        {
+          "chars": "456",
+          "left": 50
+        }
+      ]
+    },
+    {
+      "label": "centered, word-spacing 1em",
+      "style": "text-align:center;word-spacing:1em",
+      "text": "1 2 3 4 5 6 7",
+      "height": 40,
+      "lines": [
+        {
+          "chars": "1234",
+          "left": 0
+        },
+        {
+          "chars": "567",
+          "left": 30
+        }
+      ]
+    },
+    {
+      "label": "centered, no spacing (control)",
+      "style": "text-align:center",
+      "text": "1 2 3 4 5 6 7 8 9 1 2",
+      "height": 60,
+      "lines": [
+        {
+          "chars": "12345",
+          "left": 10
+        },
+        {
+          "chars": "67891",
+          "left": 10
+        },
+        {
+          "chars": "2",
+          "left": 90
+        }
+      ]
+    }
+  ],
+  "union": [
+    {
+      "label": "a span holding one newline, at a line end",
+      "markup": "1 2 3<span id=s>\n</span>6 7 8",
+      "height_p": 40,
+      "span": {
+        "x": 100,
+        "y": 0,
+        "width": 0,
+        "height": 20
+      }
+    },
+    {
+      "label": "a span holding two newlines, at a line end",
+      "markup": "1 2 3<span id=s>\n\n</span>6 7 8",
+      "height_p": 60,
+      "span": {
+        "x": 0,
+        "y": 20,
+        "width": 0,
+        "height": 20
+      }
+    }
+  ]
+}
