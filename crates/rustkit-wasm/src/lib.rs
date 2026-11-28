@@ -27,6 +27,14 @@ use wasmi::{AsContext, AsContextMut};
 /// recursion is a catchable `RangeError: Maximum call stack size exceeded`).
 pub const MAX_NESTING: usize = 256;
 
+/// The most linear memory one realm may allocate (docs/design/WASM-W1.md):
+/// past it, `new Memory` is a `RangeError`, as Chrome's is when its own
+/// reservation fails.
+pub const MAX_REALM_MEMORY: usize = 1 << 30;
+
+/// One page of linear memory.
+const PAGE: usize = 65536;
+
 type Caller = wasmi::Caller<'static, HostData>;
 
 thread_local! {
@@ -48,6 +56,62 @@ pub struct HostData {
     /// An exception a JS import threw, carried out through the wasm frames to
     /// the export call that started them, which rethrows it unchanged.
     pending: Option<JsError>,
+    /// The store's resource limiter (`Limits`).
+    limits: Limits,
+}
+
+/// The store's `ResourceLimiter`. W1 memories do not grow
+/// (docs/design/WASM-W1.md): a JS-made memory runs over a static buffer of its
+/// initial pages, and wasmi 2.0.0 PANICS when `memory.grow` asks a static
+/// buffer for more than it holds ("tried to use too small static buffer").
+/// Denied here instead, before the buffer is asked, which wasm sees as -1:
+/// any growth past the current size is refused; a memory's first allocation
+/// (from 0) is allowed within the realm's cap (`MAX_REALM_MEMORY`), which so
+/// also bounds the memories wasmi allocates for module-defined memories.
+struct Limits {
+    allocated: usize,
+}
+
+impl wasmi::ResourceLimiter for Limits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        if current != 0 || desired <= current {
+            return Ok(desired <= current);
+        }
+        if self.allocated.saturating_add(desired) > MAX_REALM_MEMORY {
+            return Ok(false);
+        }
+        self.allocated += desired;
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        // Tables are Vec-backed in wasmi and may grow (within their maximum,
+        // which wasmi checks first).
+        let _ = (current, desired);
+        Ok(true)
+    }
+
+    fn instances(&self) -> usize {
+        10_000
+    }
+
+    fn tables(&self) -> usize {
+        10_000
+    }
+
+    fn memories(&self) -> usize {
+        10_000
+    }
 }
 
 /// One realm's WebAssembly state.
@@ -65,6 +129,29 @@ pub struct WasmRealm {
     /// them with their owning `Module` / `Instance` objects.
     modules: RefCell<Vec<(wasmi::Module, HashMap<String, u32>)>>,
     funcs: RefCell<Vec<wasmi::Func>>,
+    /// Memories by id: the wasmi memory and, for one made in JS, the
+    /// `ArrayBuffer` whose storage it runs over (`Memory::new_static`). Held
+    /// here so the bytes can never be freed while this store, and so any
+    /// instance using them, lives; dropped with the realm (Rust ownership,
+    /// not a root inside the GC graph). A module-defined memory has no
+    /// buffer in W1 (its exported `buffer` is a TypeError, stated).
+    memories: RefCell<Vec<(wasmi::Memory, Option<boa_engine::JsObject>)>>,
+    /// Bytes of linear memory allocated in this realm (`MAX_REALM_MEMORY`).
+    memory_bytes: Cell<usize>,
+    /// Tables and globals by id.
+    tables: RefCell<Vec<wasmi::Table>>,
+    globals: RefCell<Vec<wasmi::Global>>,
+    /// A function's id by its handle's identity. wasmi's handles derive only
+    /// Debug/Copy/Clone (no equality); their Debug form names the store and
+    /// the index, a stable identity, so the same function (an export, or one
+    /// read from a table) always answers the same id, and so the same JS
+    /// function object (Chrome: `table.get(i) === exports.f`).
+    func_ids: RefCell<HashMap<String, usize>>,
+    /// The prelude's `convert` (setConvert): turns a native error string
+    /// into its WebAssembly error class. Called only on an exported
+    /// function's error path; held here, not in the export closures, so no
+    /// closure holds a GC root (#1440), and released with the realm.
+    convert: RefCell<Option<boa_engine::JsObject>>,
 }
 
 impl WasmRealm {
@@ -72,16 +159,40 @@ impl WasmRealm {
         // Stated W1 gaps (docs/design/WASM-W1.md): no memory64, no SIMD. Both
         // are left out at build time (wasmi without its `memory64` and `simd`
         // features), so a module using either fails validation.
-        let config = wasmi::Config::default();
+        // Fuel: every call runs in slices of FUEL_SLICE, and between slices
+        // the JS context's interrupt word is checked (`call_func`), so the
+        // turn's budget stops wasm where it would stop script.
+        //
+        // Compilation is eager: wasmi's default compiles each function at its
+        // first call and charges that compile fuel as an error that can't be
+        // resumed, so a big function (or a slice nearly used up) became a bare
+        // trap mid-run. Eager compilation does it all in `WebAssembly.Module`,
+        // where no slice is running.
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(true);
+        config.compilation_mode(wasmi::CompilationMode::Eager);
         let engine = wasmi::Engine::new(&config);
         let id = NEXT_REALM.with(|n| {
             let id = n.get();
             n.set(id + 1);
             id
         });
-        let data = HostData { realm: id, imports: Vec::new(), contexts: Vec::new(), pending: None };
-        let store = wasmi::Store::new(&engine, data);
-        Rc::new(Self { id, engine, store: RefCell::new(store), modules: RefCell::default(), funcs: RefCell::default() })
+        let data = HostData { realm: id, imports: Vec::new(), contexts: Vec::new(), pending: None, limits: Limits { allocated: 0 } };
+        let mut store = wasmi::Store::new(&engine, data);
+        store.limiter(|data| &mut data.limits);
+        Rc::new(Self {
+            id,
+            engine,
+            store: RefCell::new(store),
+            modules: RefCell::default(),
+            funcs: RefCell::default(),
+            memories: RefCell::default(),
+            memory_bytes: Cell::new(0),
+            tables: RefCell::default(),
+            globals: RefCell::default(),
+            func_ids: RefCell::default(),
+            convert: RefCell::default(),
+        })
     }
 
     /// The live `Caller` of the innermost host function of this realm
@@ -179,6 +290,52 @@ fn export_func_indices(bytes: &[u8]) -> HashMap<String, u32> {
     out
 }
 
+/// The id of `func` in `realm.funcs`, added if new (`WasmRealm::func_ids`).
+fn func_id(realm: &WasmRealm, func: wasmi::Func) -> usize {
+    let key = format!("{func:?}");
+    if let Some(id) = realm.func_ids.borrow().get(&key) {
+        return *id;
+    }
+    let mut funcs = realm.funcs.borrow_mut();
+    funcs.push(func);
+    let id = funcs.len() - 1;
+    realm.func_ids.borrow_mut().insert(key, id);
+    id
+}
+
+/// A funcref for JS: `[funcId, arity]`, or `null`.
+fn funcref_to_js(realm: &WasmRealm, r: wasmi::Ref, context: &mut Context) -> JsResult<JsValue> {
+    let func = match r {
+        wasmi::Ref::Func(f) => Option::<wasmi::Func>::from(f),
+        _ => return Err(JsNativeError::typ().with_message("WebAssembly: externref arrives later in W1 phase 3").into()),
+    };
+    let Some(func) = func else { return Ok(JsValue::null()) };
+    let id = func_id(realm, func);
+    let arity = realm.with_store(|s| func.ty(s.ctx()).params().len());
+    let row: [JsValue; 2] = [JsValue::from(id as u32), JsValue::from(arity as u32)];
+    Ok(JsArray::from_iter(row, context).into())
+}
+
+/// A funcref from JS: the prelude hands a wasm function over as its id, null as -1.
+fn funcref_from_js(realm: &WasmRealm, value: &JsValue) -> JsResult<wasmi::Ref> {
+    let id = value.as_number().unwrap_or(-1.0);
+    if id < 0.0 {
+        return Ok(wasmi::Ref::Func(wasmi::Nullable::Null));
+    }
+    let func = realm.funcs.borrow().get(id as usize).copied().ok_or_else(JsNativeError::typ)?;
+    Ok(wasmi::Ref::Func(wasmi::Nullable::Val(func)))
+}
+
+fn val_type(name: &str) -> Option<ValType> {
+    Some(match name {
+        "i32" => ValType::I32,
+        "i64" => ValType::I64,
+        "f32" => ValType::F32,
+        "f64" => ValType::F64,
+        _ => return None,
+    })
+}
+
 fn realm_of(weak: &Weak<WasmRealm>) -> JsResult<Rc<WasmRealm>> {
     weak.upgrade().ok_or_else(|| JsNativeError::typ().with_message("WebAssembly: the realm has gone").into())
 }
@@ -204,7 +361,9 @@ fn trap_message(code: TrapCode) -> &'static str {
         TrapCode::UnreachableCodeReached => "unreachable",
         TrapCode::MemoryOutOfBounds => "memory access out of bounds",
         TrapCode::TableOutOfBounds => "table index is out of bounds",
-        TrapCode::IndirectCallToNull | TrapCode::BadSignature => "null function or function signature mismatch",
+        // Chrome 148: a null table entry is "null function".
+        TrapCode::IndirectCallToNull => "null function",
+        TrapCode::BadSignature => "null function or function signature mismatch",
         TrapCode::IntegerDivisionByZero => "divide by zero",
         TrapCode::IntegerOverflow => "divide result unrepresentable",
         TrapCode::BadConversionToInteger => "float unrepresentable in integer range",
@@ -258,10 +417,14 @@ fn call_func(realm: &WasmRealm, func: wasmi::Func, args: &[JsValue], context: &m
         if ctx.data().contexts.len() >= MAX_NESTING {
             return Err((None, Some(overflow())));
         }
-        ctx.data_mut().contexts.push(context as *mut Context);
-        let r = func.call(&mut ctx, &params, &mut results);
+        let context_ptr = context as *mut Context;
+        ctx.data_mut().contexts.push(context_ptr);
+        let r = run_in_slices(&mut ctx, func, &params, &mut results, context_ptr);
         ctx.data_mut().contexts.pop();
-        r.map_err(|e| (Some(e), ctx.data_mut().pending.take()))
+        r.map_err(|e| match e {
+            Stop::Wasm(e) => (Some(e), ctx.data_mut().pending.take()),
+            Stop::Interrupted(stop) => (None, Some(stop)),
+        })
     });
     match outcome {
         Ok(()) => match results.len() {
@@ -280,6 +443,49 @@ fn call_func(realm: &WasmRealm, func: wasmi::Func, args: &[JsValue], context: &m
             None => Err(wasm_error("RuntimeError", e)),
         },
         Err((None, None)) => Err(wasm_error("RuntimeError", "trap")),
+    }
+}
+
+/// Fuel per slice: between slices the turn's interrupt word is checked. About
+/// a millisecond of wasmi's loop dispatch at a few hundred million
+/// instructions a second, so a stop lands within the watchdog's slack.
+const FUEL_SLICE: u64 = 1_000_000;
+
+/// Why a sliced call ended early.
+enum Stop {
+    /// A trap, or a JS import's error (its exception is in `HostData::pending`).
+    Wasm(wasmi::Error),
+    /// The JS context's interrupt word stopped the turn: Boa's own uncatchable error.
+    Interrupted(JsError),
+}
+
+/// Call `func` in slices of FUEL_SLICE (call_resumable), checking the JS
+/// context's interrupt word whenever a slice runs out. Used at every level,
+/// outermost and nested inside a JS import alike: a plain call that ran out
+/// of fuel would trap instead of being resumed.
+fn run_in_slices(
+    ctx: &mut wasmi::StoreContextMut<'_, HostData>,
+    func: wasmi::Func,
+    params: &[wasmi::Val],
+    results: &mut [wasmi::Val],
+    context: *mut Context,
+) -> Result<(), Stop> {
+    ctx.set_fuel(FUEL_SLICE).map_err(Stop::Wasm)?;
+    let mut call = func.call_resumable(&mut *ctx, params, results).map_err(Stop::Wasm)?;
+    loop {
+        match call {
+            wasmi::ResumableCall::Finished => return Ok(()),
+            wasmi::ResumableCall::HostTrap(trap) => return Err(Stop::Wasm(trap.into_host_error())),
+            wasmi::ResumableCall::OutOfFuel(paused) => {
+                // SAFETY: `context` is the JS context that made this call; it
+                // outlives the call (call_func's caller holds it).
+                if let Err(stop) = unsafe { &*context }.check_interrupt_now() {
+                    return Err(Stop::Interrupted(stop));
+                }
+                ctx.set_fuel(FUEL_SLICE).map_err(Stop::Wasm)?;
+                call = paused.resume(&mut *ctx, results).map_err(Stop::Wasm)?;
+            }
+        }
     }
 }
 
@@ -335,6 +541,12 @@ fn host_func(ctx: wasmi::StoreContextMut<'_, HostData>, ty: wasmi::FuncType, ind
             wasmi::Error::new("js")
         })
     })
+}
+
+/// A table or global a module exports.
+enum ExternHandle {
+    Table(wasmi::Table),
+    Global(wasmi::Global),
 }
 
 fn kind_name(ty: &wasmi::ExternType) -> &'static str {
@@ -430,7 +642,12 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
             // A start function may call a JS import: instantiation is a call
             // level of its own, in this native's context.
             let context_ptr = context as *mut Context;
-            let linked: JsResult<Vec<(wasmi::Func, String, usize, u32)>> = realm.with_store(|s| {
+            #[allow(clippy::type_complexity)]
+            let linked: JsResult<(
+                Vec<(wasmi::Func, String, usize, u32)>,
+                Vec<(String, wasmi::Memory)>,
+                Vec<(String, &'static str, ExternHandle)>,
+            )> = realm.with_store(|s| {
                 let mut ctx = s.ctx();
                 let mut linker = <wasmi::Linker<HostData>>::new(&realm.engine);
                 for import in module.imports() {
@@ -449,19 +666,65 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                             let func = host_func(ctx.as_context_mut(), ty.clone(), index);
                             linker.define(&key.0, &key.1, func).map_err(|e| wasm_error("LinkError", e))?;
                         }
-                        _ => {
-                            return Err(wasm_error(
-                                "LinkError",
-                                format!(
-                                    "Import \"{}\" \"{}\": memory, table and global imports arrive in W1 phases 2-3",
-                                    key.0, key.1
-                                ),
-                            ))
+                        wasmi::ExternType::Memory(_) => {
+                            // The prelude hands a WebAssembly.Memory over as its id, anything else as -1.
+                            let id = value.as_number().filter(|n| *n >= 0.0).map(|n| n as usize);
+                            let memory = id.and_then(|id| realm.memories.borrow().get(id).map(|m| m.0)).ok_or_else(|| {
+                                wasm_error(
+                                    "LinkError",
+                                    format!("Import \"{}\" \"{}\": memory import must be a WebAssembly.Memory object", key.0, key.1),
+                                )
+                            })?;
+                            linker.define(&key.0, &key.1, memory).map_err(|e| wasm_error("LinkError", e))?;
+                        }
+                        wasmi::ExternType::Table(_) => {
+                            let id = value.as_number().filter(|n| *n >= 0.0).map(|n| n as usize);
+                            let table = id.and_then(|id| realm.tables.borrow().get(id).copied()).ok_or_else(|| {
+                                wasm_error(
+                                    "LinkError",
+                                    format!("Import \"{}\" \"{}\": table import requires a WebAssembly.Table", key.0, key.1),
+                                )
+                            })?;
+                            linker.define(&key.0, &key.1, table).map_err(|e| wasm_error("LinkError", e))?;
+                        }
+                        wasmi::ExternType::Global(ty) => {
+                            // The prelude hands ["G", globalId] for a WebAssembly.Global, ["V", value] otherwise.
+                            let row = value.as_object().map(JsArray::from_object).transpose()?.ok_or_else(JsNativeError::typ)?;
+                            let tag = row.get(0, &mut *context_ptr)?.to_string(&mut *context_ptr)?.to_std_string_escaped();
+                            let payload = row.get(1, &mut *context_ptr)?;
+                            let global = if tag == "G" {
+                                let id = payload.as_number().unwrap_or(-1.0);
+                                realm.globals.borrow().get(id as usize).copied().ok_or_else(JsNativeError::typ)?
+                            } else {
+                                let link = |why: &str| wasm_error("LinkError", format!("Import \"{}\" \"{}\": {why}", key.0, key.1));
+                                if ty.mutability().is_mut() {
+                                    return Err(link("imported mutable global must be a WebAssembly.Global object"));
+                                }
+                                let content = ty.content();
+                                let ok = match content {
+                                    ValType::I64 => payload.is_bigint(),
+                                    ValType::I32 | ValType::F32 | ValType::F64 => payload.is_number(),
+                                    _ => false,
+                                };
+                                if !ok {
+                                    return Err(link("global import must be a number, valid Wasm reference, or WebAssembly.Global object"));
+                                }
+                                let v = to_wasm(&payload, content, &mut *context_ptr)?;
+                                wasmi::Global::new(ctx.as_context_mut(), v, wasmi::Mutability::Const)
+                            };
+                            linker.define(&key.0, &key.1, global).map_err(|e| wasm_error("LinkError", e))?;
                         }
                     }
                 }
                 ctx.data_mut().contexts.push(context_ptr);
+                // wasmi runs a start function with a plain call, which can't be
+                // resumed after a slice: it gets unlimited fuel, so a start
+                // function that never ends is not stopped (stated W1 gap; a
+                // wasm call already running around this one gets a fresh slice
+                // back below and is stopped at its next one).
+                let _ = ctx.set_fuel(u64::MAX);
                 let started = linker.instantiate_and_start(&mut ctx, &module);
+                let _ = ctx.set_fuel(FUEL_SLICE);
                 ctx.data_mut().contexts.pop();
                 let instance = started.map_err(|e| match ctx.data_mut().pending.take() {
                     // The start function's JS import threw: that, unchanged.
@@ -472,28 +735,135 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
                     },
                 })?;
                 let mut out = Vec::new();
+                let mut memories = Vec::new();
+                let mut others = Vec::new();
                 for export in module.exports() {
                     if let Some(func) = instance.get_func(ctx.as_context(), export.name()) {
                         let arity = func.ty(ctx.as_context()).params().len();
                         let index = indices.get(export.name()).copied().unwrap_or(0);
                         out.push((func, export.name().to_string(), arity, index));
+                    } else if let Some(memory) = instance.get_memory(ctx.as_context(), export.name()) {
+                        memories.push((export.name().to_string(), memory));
+                    } else if let Some(table) = instance.get_table(ctx.as_context(), export.name()) {
+                        others.push((export.name().to_string(), "table", ExternHandle::Table(table)));
+                    } else if let Some(global) = instance.get_global(ctx.as_context(), export.name()) {
+                        others.push((export.name().to_string(), "global", ExternHandle::Global(global)));
                     }
                 }
-                Ok(out)
+                Ok((out, memories, others))
             });
-            let mut funcs = realm.funcs.borrow_mut();
+            let (linked, exported_memories, others) = linked?;
             let mut rows = Vec::new();
-            for (func, name, arity, index) in linked? {
-                funcs.push(func);
+            // Table and global exports: ["name", "table" | "global", id].
+            for (name, kind, handle) in others {
+                let id = match handle {
+                    ExternHandle::Table(t) => {
+                        let mut tables = realm.tables.borrow_mut();
+                        let key = format!("{t:?}");
+                        match tables.iter().position(|x| format!("{x:?}") == key) {
+                            Some(i) => i,
+                            None => {
+                                tables.push(t);
+                                tables.len() - 1
+                            }
+                        }
+                    }
+                    ExternHandle::Global(g) => {
+                        let mut globals = realm.globals.borrow_mut();
+                        let key = format!("{g:?}");
+                        match globals.iter().position(|x| format!("{x:?}") == key) {
+                            Some(i) => i,
+                            None => {
+                                globals.push(g);
+                                globals.len() - 1
+                            }
+                        }
+                    }
+                };
+                let row: [JsValue; 3] = [js_string!(name).into(), js_string!(kind).into(), JsValue::from(id as u32)];
+                rows.push(JsArray::from_iter(row, context).into());
+            }
+            // A memory export: ["name", "memory", memId]. An imported memory
+            // keeps its id (the prelude answers the same Memory object); a
+            // module-defined one gets an id with no buffer (W1, stated).
+            for (name, memory) in exported_memories {
+                // wasmi's handles have no equality: the same memory is the
+                // same storage, so compare data pointers.
+                let known: Vec<*mut u8> = {
+                    let memories = realm.memories.borrow();
+                    realm.with_store(|s| memories.iter().map(|m| m.0.data_ptr(s.ctx())).collect())
+                };
+                let here = realm.with_store(|s| memory.data_ptr(s.ctx()));
+                let empty = realm.with_store(|s| memory.size(s.ctx())) == 0;
+                let mut memories = realm.memories.borrow_mut();
+                // Zero-page memories share a dangling pointer: never matched.
+                let id = match known.iter().position(|p| *p == here && !empty) {
+                    Some(id) => id,
+                    None => {
+                        memories.push((memory, None));
+                        memories.len() - 1
+                    }
+                };
+                let row: [JsValue; 3] = [js_string!(name).into(), js_string!("memory").into(), JsValue::from(id as u32)];
+                rows.push(JsArray::from_iter(row, context).into());
+            }
+            for (func, name, arity, index) in linked {
+                let id = func_id(&realm, func);
                 let row: [JsValue; 4] = [
                     js_string!(name).into(),
-                    JsValue::from((funcs.len() - 1) as u32),
+                    JsValue::from(id as u32),
                     JsValue::from(arity as u32),
                     JsValue::from(index),
                 ];
                 rows.push(JsArray::from_iter(row, context).into());
             }
             Ok(JsArray::from_iter(rows, context).into())
+        })
+    };
+    let w = weak.clone();
+    // setConvert(fn): the prelude's error conversion, for makeExport's functions.
+    let set_convert = unsafe {
+        NativeFunction::from_closure(move |_, args, _| {
+            let realm = realm_of(&w)?;
+            *realm.convert.borrow_mut() = args.first().and_then(JsValue::as_object);
+            Ok(JsValue::undefined())
+        })
+    };
+    let w = weak.clone();
+    // makeExport(funcId, arity, name): an exported function as a native
+    // function object (no prototype, not a constructor, as in Chrome). A JS
+    // wrapper frame per call cost about as much as the call itself in Boa
+    // (JetStream's richards-wasm makes 42.7M of them).
+    let make_export = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let arity = args.get(1).cloned().unwrap_or_default().to_u32(context)? as usize;
+            let name = args.get(2).cloned().unwrap_or_default().to_string(context)?;
+            let weak = w.clone();
+            let function = NativeFunction::from_closure(move |_, args, context| {
+                let realm = realm_of(&weak)?;
+                let func = realm.funcs.borrow().get(id).copied().ok_or_else(|| JsNativeError::typ().with_message("no such function"))?;
+                call_func(&realm, func, args, context).or_else(|e| {
+                    // Only this crate's error strings (wasm_error) are
+                    // converted; a JS import's exception and the turn's
+                    // uncatchable stop pass through as they are.
+                    let marked = e.as_opaque().filter(|v| v.is_string()).cloned();
+                    let convert = realm.convert.borrow().clone();
+                    match (marked, convert) {
+                        (Some(thrown), Some(convert)) => {
+                            Err(JsError::from_opaque(convert.call(&JsValue::undefined(), &[thrown], context)?))
+                        }
+                        _ => Err(e),
+                    }
+                })
+            });
+            let realm = context.realm().clone();
+            Ok(boa_engine::object::FunctionObjectBuilder::new(&realm, function)
+                .name(name)
+                .length(arity)
+                .constructor(false)
+                .build()
+                .into())
         })
     };
     let w = weak.clone();
@@ -513,12 +883,181 @@ pub fn natives(context: &mut Context, realm: &Rc<WasmRealm>) -> JsResult<boa_eng
         })
     };
 
+    let w = weak.clone();
+    // memoryNew(initial, maximum | -1) -> [memId, buffer]
+    let memory_new = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let initial = args.first().cloned().unwrap_or_default().to_u32(context)?;
+            let maximum = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+            let maximum = (maximum >= 0.0).then_some(maximum as u32);
+            let len = (initial as usize).checked_mul(PAGE).ok_or_else(|| JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory"))?;
+            if realm.memory_bytes.get().saturating_add(len) > MAX_REALM_MEMORY {
+                return Err(JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory").into());
+            }
+            let mut block = boa_engine::object::builtins::AlignedVec::<u8>::new(64);
+            block
+                .try_reserve_exact(len)
+                .map_err(|_| JsNativeError::range().with_message("WebAssembly.Memory(): could not allocate memory"))?;
+            block.resize(len, 0);
+            // A detach key nothing outside this crate has: script cannot
+            // detach the buffer (`transfer()` is a TypeError), and the engine
+            // never does while the store lives.
+            let key = JsValue::from(boa_engine::JsSymbol::new(Some(js_string!("wasm memory"))).ok_or_else(JsNativeError::typ)?);
+            let buffer = JsArrayBuffer::from_byte_block_with_detach_key(block, key, context)?;
+            let (ptr, size) = {
+                let mut data = buffer.data_mut().ok_or_else(JsNativeError::typ)?;
+                (data.as_mut_ptr(), data.len())
+            };
+            // SAFETY (the `&'static mut` invariant, docs/design/WASM-W1.md):
+            // the slice is the `ArrayBuffer`'s storage, which never moves or
+            // frees while this realm's store lives: the realm holds the buffer
+            // object in `memories` (dropped with the store), the detach key
+            // keeps script from taking the storage, and the buffer is not
+            // resizable. Only the store reads or writes through it.
+            let bytes: &'static mut [u8] = std::slice::from_raw_parts_mut(ptr, size);
+            let ty = wasmi::MemoryType::new(initial, maximum);
+            let memory = realm
+                .with_store(|s| wasmi::Memory::new_static(s.ctx(), ty, bytes))
+                .map_err(|e| JsNativeError::range().with_message(format!("WebAssembly.Memory(): {e}")))?;
+            realm.memory_bytes.set(realm.memory_bytes.get() + len);
+            let buffer_object: boa_engine::JsObject = buffer.into();
+            let mut memories = realm.memories.borrow_mut();
+            memories.push((memory, Some(buffer_object.clone())));
+            let row: [JsValue; 2] = [JsValue::from((memories.len() - 1) as u32), buffer_object.into()];
+            Ok(JsArray::from_iter(row, context).into())
+        })
+    };
+    let w = weak.clone();
+    // memoryGrow(memId, delta) -> old pages. W1: only grow(0) (docs/design/WASM-W1.md).
+    let memory_grow = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let delta = args.get(1).cloned().unwrap_or_default().to_u32(context)?;
+            let memory = realm.memories.borrow().get(id).map(|m| m.0).ok_or_else(JsNativeError::typ)?;
+            let pages = realm.with_store(|s| memory.size(s.ctx()));
+            if delta == 0 {
+                return Ok(JsValue::from(pages as u32));
+            }
+            Err(JsNativeError::range()
+                .with_message("WebAssembly.Memory.grow(): Unable to grow instance memory (WASM W1: no grow; W2)")
+                .into())
+        })
+    };
+
+    let w = weak.clone();
+    // tableNew(initial, maximum | -1) -> tableId (funcref, null-filled)
+    let table_new = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let initial = args.first().cloned().unwrap_or_default().to_u32(context)?;
+            let maximum = args.get(1).cloned().unwrap_or_default().to_number(context)?;
+            let maximum = (maximum >= 0.0).then_some(maximum as u32);
+            let ty = wasmi::TableType::new(wasmi::RefType::Func, initial, maximum);
+            let table = realm
+                .with_store(|s| wasmi::Table::new(s.ctx(), ty, wasmi::Ref::Func(wasmi::Nullable::Null)))
+                .map_err(|e| JsNativeError::range().with_message(format!("WebAssembly.Table(): {e}")))?;
+            let mut tables = realm.tables.borrow_mut();
+            tables.push(table);
+            Ok(JsValue::from((tables.len() - 1) as u32))
+        })
+    };
+    let w = weak.clone();
+    // tableOp(tableId, op, a, b): "length" | "get" i | "set" i funcId | "grow" delta
+    let table_op = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let op = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+            let table = realm.tables.borrow().get(id).copied().ok_or_else(JsNativeError::typ)?;
+            let size = realm.with_store(|s| table.size(s.ctx()));
+            match op.as_str() {
+                "length" => Ok(JsValue::from(size as u32)),
+                "get" => {
+                    let i = args.get(2).cloned().unwrap_or_default().to_u32(context)? as u64;
+                    if i >= size {
+                        return Err(JsNativeError::range().with_message("WebAssembly.Table.get(): invalid address").into());
+                    }
+                    let r = realm.with_store(|s| table.get(s.ctx(), i)).ok_or_else(JsNativeError::typ)?;
+                    funcref_to_js(&realm, r, context)
+                }
+                "set" => {
+                    let i = args.get(2).cloned().unwrap_or_default().to_u32(context)? as u64;
+                    if i >= size {
+                        return Err(JsNativeError::range().with_message("WebAssembly.Table.set(): invalid address").into());
+                    }
+                    let r = funcref_from_js(&realm, &args.get(3).cloned().unwrap_or_default())?;
+                    realm
+                        .with_store(|s| table.set(s.ctx(), i, r))
+                        .map_err(|e| JsNativeError::typ().with_message(format!("WebAssembly.Table.set(): {e}")))?;
+                    Ok(JsValue::undefined())
+                }
+                "grow" => {
+                    let delta = args.get(2).cloned().unwrap_or_default().to_u32(context)? as u64;
+                    realm
+                        .with_store(|s| table.grow(s.ctx(), delta, wasmi::Ref::Func(wasmi::Nullable::Null)))
+                        .map(|old| JsValue::from(old as u32))
+                        .map_err(|_| JsNativeError::range().with_message("WebAssembly.Table.grow(): failed to grow table").into())
+                }
+                _ => Err(JsNativeError::typ().into()),
+            }
+        })
+    };
+    let w = weak.clone();
+    // globalNew(type, mutable, value) -> globalId
+    let global_new = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let ty = args.first().cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+            let ty = val_type(&ty).ok_or_else(|| JsNativeError::typ().with_message("WebAssembly.Global(): value type"))?;
+            let mutability = if args.get(1).is_some_and(JsValue::to_boolean) { wasmi::Mutability::Var } else { wasmi::Mutability::Const };
+            let value = match args.get(2) {
+                Some(v) if !v.is_undefined() => to_wasm(v, ty, context)?,
+                _ => wasmi::Val::default_for_ty(ty),
+            };
+            let global = realm.with_store(|s| wasmi::Global::new(s.ctx(), value, mutability));
+            let mut globals = realm.globals.borrow_mut();
+            globals.push(global);
+            Ok(JsValue::from((globals.len() - 1) as u32))
+        })
+    };
+    let w = weak.clone();
+    // globalOp(globalId, "get" | "set", value)
+    let global_op = unsafe {
+        NativeFunction::from_closure(move |_, args, context| {
+            let realm = realm_of(&w)?;
+            let id = args.first().cloned().unwrap_or_default().to_u32(context)? as usize;
+            let op = args.get(1).cloned().unwrap_or_default().to_string(context)?.to_std_string_escaped();
+            let global = realm.globals.borrow().get(id).copied().ok_or_else(JsNativeError::typ)?;
+            let ty = realm.with_store(|s| global.ty(s.ctx()));
+            if op == "get" {
+                let v = realm.with_store(|s| global.get(s.ctx()));
+                return to_js(&v);
+            }
+            if !ty.mutability().is_mut() {
+                return Err(JsNativeError::typ().with_message("WebAssembly.Global.value: Can't set the value of an immutable global.").into());
+            }
+            let v = to_wasm(&args.get(2).cloned().unwrap_or_default(), ty.content(), context)?;
+            realm.with_store(|s| global.set(s.ctx(), v)).map_err(|e| JsNativeError::typ().with_message(e.to_string()))?;
+            Ok(JsValue::undefined())
+        })
+    };
+
     Ok(boa_engine::object::ObjectInitializer::new(context)
+        .function(table_new, js_string!("tableNew"), 2)
+        .function(table_op, js_string!("tableOp"), 4)
+        .function(global_new, js_string!("globalNew"), 3)
+        .function(global_op, js_string!("globalOp"), 3)
+        .function(memory_new, js_string!("memoryNew"), 2)
+        .function(memory_grow, js_string!("memoryGrow"), 2)
         .function(validate, js_string!("validate"), 1)
         .function(compile, js_string!("compile"), 1)
         .function(reflect, js_string!("reflect"), 2)
         .function(instantiate, js_string!("instantiate"), 2)
         .function(call, js_string!("call"), 2)
+        .function(set_convert, js_string!("setConvert"), 1)
+        .function(make_export, js_string!("makeExport"), 3)
         .build())
 }
 

@@ -133,6 +133,18 @@ rustkit-a11y = { path = "crates/rustkit-a11y" }
 [profile.dev.package."*"]
 opt-level = 2
 
+# wasmi's tail-call dispatch (rustkit-wasm) keeps the native stack flat only
+# when LLVM turns its calls into jumps. In this dev profile it did not at
+# opt-level 2, nor at 3 with debug assertions and overflow checks on (a long
+# wasm loop overflowed a 16 MiB thread); with all three below it does, as in
+# parity and release.
+# rustkit-js's wasm_tests::a_long_wasm_loop_does_not_grow_the_native_stack
+# guards it; the batch also runs it in a parity build.
+[profile.dev.package.wasmi]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 [profile.dev.package.rustkit-js]
 opt-level = 2
 

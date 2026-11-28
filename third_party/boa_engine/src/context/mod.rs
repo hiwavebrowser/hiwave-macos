@@ -653,6 +653,16 @@ impl Context {
     pub fn set_interrupt_turn(&mut self, turn: u64) {
         self.vm.interrupt_turn = turn;
     }
+
+    /// Check the interrupt word now, as a call or a loop back-edge does: the
+    /// same uncatchable [`RuntimeLimitError::Interrupted`](crate::error::RuntimeLimitError)
+    /// when it stops the running turn. For an embedder running code Boa
+    /// doesn't see (a WebAssembly interpreter between its fuel slices), so
+    /// that code stops where script would.
+    #[inline]
+    pub fn check_interrupt_now(&self) -> JsResult<()> {
+        self.check_interrupt()
+    }
     // END HIWAVE PATCH
 
     // HIWAVE PATCH (stop finally)

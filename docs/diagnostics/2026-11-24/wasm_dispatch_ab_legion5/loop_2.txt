@@ -1,0 +1,5 @@
+JETSTREAM-WASM HashSet: ok compile 51 ms, run 8073 ms, wall 8130 ms
+JETSTREAM-WASM tsf: ok compile 26 ms, run 33493 ms, wall 33552 ms
+JETSTREAM-WASM quicksort: ok compile 24 ms, run 199 ms, wall 230 ms
+JETSTREAM-WASM gcc-loops: ok compile 31 ms, run 70215 ms, wall 70283 ms
+JETSTREAM-WASM richards: ok compile 30 ms, run 83716 ms, wall 83752 ms

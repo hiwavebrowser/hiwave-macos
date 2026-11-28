@@ -24,7 +24,7 @@ can set.
 | `src/vm/mod.rs` | `Vm` gains `interrupt: Option<Arc<AtomicU64>>` and `interrupt_turn: u64`; `Context::check_interrupt` stops when the word is nonzero and equals `interrupt_turn` or `u64::MAX`; `check_runtime_limits` calls it first |
 | `src/vm/opcode/iteration/loop_ops.rs` | `IncrementLoopIteration` (every loop back-edge) calls `check_interrupt` |
 | `src/error/mod.rs` | `RuntimeLimitError::Interrupted` |
-| `src/context/mod.rs` | `Context::set_interrupt_word`, `Context::set_interrupt_turn` |
+| `src/context/mod.rs` | `Context::set_interrupt_word`, `Context::set_interrupt_turn`, and `Context::check_interrupt_now` (the same check, public, for code Boa doesn't run: rustkit-wasm checks it between WebAssembly fuel slices) |
 
 `check_runtime_limits` runs on every ordinary and native function call
 (`builtins/function/mod.rs`, `native_function/mod.rs`), and
