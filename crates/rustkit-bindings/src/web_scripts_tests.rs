@@ -129,3 +129,22 @@ fn an_unparseable_inserted_src_never_reaches_the_engine_queue() {
     assert_eq!(queued[0].url, "https://site.test/c.js");
     assert!(queued.iter().all(|q| Url::parse(&q.url).is_ok()));
 }
+
+#[test]
+fn text_node_appended_to_connected_empty_script_runs() {
+    let b = bound("<!DOCTYPE html><html><body></body></html>");
+    assert_eq!(
+        ev(
+            &b,
+            "window.mark = []; \
+             var s1 = document.createElement('script'); \
+             document.body.appendChild(s1); \
+             s1.appendChild(document.createTextNode(\"window.mark.push('append')\")); \
+             var s2 = document.createElement('script'); \
+             document.body.appendChild(s2); \
+             s2.insertBefore(document.createTextNode(\"window.mark.push('insertBefore')\"), null); \
+             mark.join(',')"
+        ),
+        "append,insertBefore"
+    );
+}

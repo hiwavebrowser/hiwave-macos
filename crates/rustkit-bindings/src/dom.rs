@@ -1200,6 +1200,13 @@ fn write(host: &DomHost, args: &[JsValue]) -> Result<(JsValue, DomDirty), &'stat
         };
         // A detached node is in no tree, so nothing needs a restyle yet.
         let node = document.create_node(node_type);
+        if let Some(owner_id) = number_arg(args, 3).filter(|n| *n >= 0.0) {
+            if let Some(owner) = document.get_node(NodeId::new(owner_id as usize)) {
+                if matches!(owner.node_type, NodeType::Document) {
+                    node.set_owner(owner.owner_document_id());
+                }
+            }
+        }
         adopt_template_contents(document, &node, &mut host.templates.borrow_mut());
         return Ok((node_id(Some(node)), DomDirty::Clean));
     }
@@ -2789,25 +2796,26 @@ pub(crate) fn install(
         "__rustkit_dom_mutate",
         5,
         Box::new(move |args| {
-            let records = mutate_records(&h.borrow(), args);
-            let (reach, cause) = mutate_reach(&h.borrow(), args, &d);
-            match mutate(&h.borrow(), args) {
-            Ok(()) => {
-                let logged = if records.is_empty() { crate::Logged::No } else { crate::Logged::Yes };
-                let mut log = l.borrow_mut();
-                for record in records {
-                    log.push(record);
+            let host = h.borrow();
+            let records = mutate_records(&host, args);
+            let (reach, cause) = mutate_reach(&host, args, &d);
+            match mutate(&host, args) {
+                Ok(()) => {
+                    let logged = if records.is_empty() { crate::Logged::No } else { crate::Logged::Yes };
+                    let mut log = l.borrow_mut();
+                    for record in records {
+                        log.push(record);
+                    }
+                    drop(log);
+                    trace_dirty(&host, args, DomDirty::Style);
+                    note_mutation(&m, DomDirty::Style, MutationKind::ChildList, || {
+                        node_label(&host, args, 2)
+                    });
+                    // Pin §3.3: a structure insert/remove/move restyles.
+                    reach.mark(&d, DomDirty::Style, cause, logged);
+                    JsValue::Null
                 }
-                drop(log);
-                trace_dirty(&h.borrow(), args, DomDirty::Style);
-                note_mutation(&m, DomDirty::Style, MutationKind::ChildList, || {
-                    node_label(&h.borrow(), args, 2)
-                });
-                // Pin §3.3: a structure insert/remove/move restyles.
-                reach.mark(&d, DomDirty::Style, cause, logged);
-                JsValue::Null
-            }
-            Err(name) => JsValue::String(name.to_string()),
+                Err(name) => JsValue::String(name.to_string()),
             }
         }),
     )?;
@@ -3620,7 +3628,18 @@ const WRAPPERS_JS: &str = r#"
                   : t === 8 ? Comment.prototype : t === 11 ? fragmentProto(id)
                   : Node.prototype;
         w = objCreate(proto);
-        defineOwn(w, SLOT, { value: slotRecord(id) });
+        var r = slotRecord(id);
+        r.t = t;
+        defineOwn(w, SLOT, { value: r });
+        cache.set(id, w);
+        return w;
+    }
+    function wrapNew(id, t, proto, local, tag) {
+        var w = objCreate(proto);
+        var r = slotRecord(id);
+        r.t = t;
+        if (local !== undefined) { r.local = local; r.tag = tag; r.name = tag; }
+        defineOwn(w, SLOT, { value: r });
         cache.set(id, w);
         return w;
     }
@@ -3766,7 +3785,8 @@ const WRAPPERS_JS: &str = r#"
     // A node in a DOMParser document is owned by it; every other node by
     // the global document.
     getter(Node.prototype, 'ownerDocument', function () {
-        if (info(this, 'type') === 9) return null;
+        var s = slotOf(this);
+        if (s.t === 9) return null;
         // A node of another document, in a tree or not (HTML2).
         var owner = info(this, 'owner');
         if (typeof owner === 'number' && owner > 0) {
@@ -3794,16 +3814,30 @@ const WRAPPERS_JS: &str = r#"
     function write(op, parent, node, child, method, replacing) {
         // A wrapper from an older document names no node here: -1 makes
         // the host answer NotFoundError instead of reusing its bare id.
-        function here(s) { return s.gen === gen ? s.id : -1; }
-        var p = slotOf(parent), n = nodeArg(node, method);
-        var c = child == null ? null : here(nodeArg(child, method));
+        var p = parent != null ? parent[SLOT] : undefined;
+        if (!p) throw new TypeError('Illegal invocation');
+        var n = node != null ? node[SLOT] : undefined;
+        if (!n) {
+            throw new TypeError("Failed to execute '" + method +
+                "' on 'Node': parameter 1 is not of type 'Node'.");
+        }
+        var c = null;
+        if (child != null) {
+            var cs = child[SLOT];
+            if (!cs) {
+                throw new TypeError("Failed to execute '" + method +
+                    "' on 'Node': parameter 1 is not of type 'Node'.");
+            }
+            c = cs.gen === gen ? cs.id : -1;
+        }
+        var isCharData = n.t === 3 || n.t === 8;
         var m = HOOKS.mutation && HOOKS.mutation.tree(op, parent, node, child);
         var inserted = op === 'insert' && HOOKS.scripts && HOOKS.scripts.inserting(node, parent);
-        var err = N.mutate(gen, op, here(p), here(n), c, !!replacing);
+        var err = N.mutate(gen, op, p.gen === gen ? p.id : -1, n.gen === gen ? n.id : -1, c, !!replacing);
         if (err) throw new DOMException("Failed to execute '" + method + "' on 'Node'.", err);
         if (m) m();
         if (inserted) inserted();
-        if (HOOKS.frames) HOOKS.frames.tree(op, node, parent);
+        if (!isCharData && HOOKS.frames) HOOKS.frames.tree(op, node, parent);
         return node;
     }
     Node.prototype.appendChild = function (node) {
@@ -5814,16 +5848,35 @@ const WRAPPERS_JS: &str = r#"
         if (s && d && s.gen === gen && d.gen === gen) N.write(gen, 'adoptTo', s.id, d.id);
     };
     Document.prototype.createElement = function (tag) {
-        tag = String(tag);
-        var el = ownedBy(create('element', tag, 'createElement'), this);
+        tag = typeof tag === 'string' ? tag : String(tag);
+        var d = this && this[SLOT];
+        var ownerId = (d && d.gen === gen && d.t === 9) ? d.id : -1;
+        var r = N.write(gen, 'create:element', tag, ownerId);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute 'createElement' on 'Document'.", r);
+        }
+        var lt = tag.toLowerCase();
+        var el = wrapNew(r, 1, elementProtos[lt] || HTMLElement.prototype, lt, lt.toUpperCase());
         if (HOOKS.scripts) HOOKS.scripts.created(el);
         return el;
     };
     Document.prototype.createTextNode = function (data) {
-        return ownedBy(create('text', String(data), 'createTextNode'), this);
+        var d = this && this[SLOT];
+        var ownerId = (d && d.gen === gen && d.t === 9) ? d.id : -1;
+        var r = N.write(gen, 'create:text', typeof data === 'string' ? data : String(data), ownerId);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute 'createTextNode' on 'Document'.", r);
+        }
+        return wrapNew(r, 3, Text.prototype);
     };
     Document.prototype.createComment = function (data) {
-        return ownedBy(create('comment', String(data), 'createComment'), this);
+        var d = this && this[SLOT];
+        var ownerId = (d && d.gen === gen && d.t === 9) ? d.id : -1;
+        var r = N.write(gen, 'create:comment', typeof data === 'string' ? data : String(data), ownerId);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute 'createComment' on 'Document'.", r);
+        }
+        return wrapNew(r, 8, Comment.prototype);
     };
     // DOM §4.5 importNode: a copy for this document. Nodes here all share
     // the one Rust Document, so importing is cloning.
@@ -5836,7 +5889,13 @@ const WRAPPERS_JS: &str = r#"
         return ownedBy(node.cloneNode(!!deep), this);
     };
     Document.prototype.createDocumentFragment = function () {
-        return ownedBy(create('fragment', '', 'createDocumentFragment'), this);
+        var d = this && this[SLOT];
+        var ownerId = (d && d.gen === gen && d.t === 9) ? d.id : -1;
+        var r = N.write(gen, 'create:fragment', '', ownerId);
+        if (typeof r === 'string') {
+            throw new DOMException("Failed to execute 'createDocumentFragment' on 'Document'.", r);
+        }
+        return wrapNew(r, 11, DocumentFragment.prototype);
     };
     // DOM Range (DOM §5) and createContextualFragment (DOM Parsing). A new
     // range is collapsed at the start of its document. createContextualFragment
