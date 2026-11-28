@@ -28,6 +28,27 @@ pub fn regexp_compiles() -> u64 {
     REGEXP_COMPILES.load(Ordering::Relaxed)
 }
 
+// HIWAVE PATCH (work count): units of JavaScript work this thread has run, one per function call
+// (ordinary and native) and one per loop back-edge, the two places `check_interrupt` runs. Always
+// counted: one thread-local increment next to the interrupt check. The same script on the same
+// input counts the same units however fast the machine runs it, so a capture can charge its script
+// budget in units instead of wall-clock time (CAPTURE-SCRIPT-BUDGET).
+thread_local! {
+    static WORK_UNITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+pub(crate) fn count_work_unit() {
+    WORK_UNITS.with(|units| units.set(units.get().wrapping_add(1)));
+}
+
+/// Units of JavaScript work run on this thread so far (wrapping): a caller takes the difference of
+/// two readings.
+#[must_use]
+pub fn work_units() -> u64 {
+    WORK_UNITS.with(std::cell::Cell::get)
+}
+
 /// Whether the counters are on in this process.
 pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();

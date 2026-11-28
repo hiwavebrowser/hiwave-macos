@@ -200,6 +200,20 @@ pub fn vm_stats_report() -> String {
     String::new()
 }
 
+/// Units of JavaScript work this thread has run (HIWAVE PATCH (work count): one per function call
+/// and one per loop back-edge), wrapping. The same script on the same input counts the same units on
+/// any machine, so a capture's script budget can be charged in them (CAPTURE-SCRIPT-BUDGET).
+#[cfg(feature = "boa")]
+pub fn work_units() -> u64 {
+    boa_engine::vm_stats::work_units()
+}
+
+/// Without the Boa engine no script runs.
+#[cfg(not(feature = "boa"))]
+pub fn work_units() -> u64 {
+    0
+}
+
 /// HIWAVE PATCH (vm-stats): how many times the opcode named `name` ran on this thread, with
 /// `RUSTKIT_VM_STATS=1`; `None` when the counters are off or `name` is no opcode. Diagnostic only.
 #[cfg(feature = "boa")]

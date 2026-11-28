@@ -2182,6 +2182,22 @@ pub struct EngineConfig {
     /// `readyState` `complete` until that script has run and fired `load`
     /// or `error`.
     pub script_budget_ms: u64,
+    /// CAPTURE-SCRIPT-BUDGET: charge the load's `script_budget_ms` in units of JavaScript work
+    /// (`rustkit_js::work_units`: one per function call and one per loop back-edge), each counted as
+    /// this many nanoseconds, instead of in wall-clock time. Whether a later script runs then depends
+    /// on the work the earlier ones did, not on how fast the machine did it (walmart's offline replay,
+    /// 2026-11-26: 3.7 s of script idle, 5.3 to 11 s with the memo off or every core busy, the 5 s
+    /// budget in between, and its header scripts ran only in the first). `None`, the default and the
+    /// app's: wall-clock time. Ignored with `interrupt_scripts_at_budget`, whose watchdog stops a
+    /// script on real time. A live turn's budget stays wall-clock time.
+    pub script_budget_unit_ns: Option<u64>,
+    /// With `script_budget_unit_ns`: the real time the load's scripts may still take, so a page whose
+    /// time goes to work the units do not count (layout, native built-ins) still ends its load. The
+    /// load's timers count too: on github's live page (2026-11-27) they ran 10 s of mostly native
+    /// work, where the 5 s wall-clock budget had stopped them, and lyft's capture then passed the
+    /// board's 30 s timeout. 10 s, twice the default budget: above walmart's script time with every
+    /// core busy and the layout memo on (6.2 s), below a capture's timeout.
+    pub script_budget_wall_backstop_ms: u64,
     /// How far the page's virtual timer clock runs after `load`.
     pub timer_horizon_ms: u64,
     /// Iterations any single loop in a page script may run before Boa
@@ -2300,6 +2316,8 @@ impl Default for EngineConfig {
             grid_frame_stamps: false,
             virtual_load_frames: false,
             script_budget_ms: 5_000,
+            script_budget_unit_ns: None,
+            script_budget_wall_backstop_ms: 10_000,
             timer_horizon_ms: 5_000,
             script_loop_iteration_limit: 1_000_000_000,
             device_pixel_ratio: 1.0,
@@ -3082,6 +3100,12 @@ struct ScriptJs {
     overrun: std::cell::RefCell<Option<std::time::Duration>>,
     /// Monotonic start of the open execution; 0 when none is open.
     exec_started_us: std::cell::Cell<u64>,
+    /// CAPTURE-SCRIPT-BUDGET: nanoseconds one unit of JavaScript work is charged as; 0 charges
+    /// wall-clock time (`EngineConfig::script_budget_unit_ns`).
+    unit_ns: std::cell::Cell<u64>,
+    /// With `unit_ns`: real time the executions have taken, and the backstop it may reach.
+    wall_spent_us: std::cell::Cell<u64>,
+    wall_limit_us: std::cell::Cell<u64>,
 }
 
 thread_local! {
@@ -3095,6 +3119,9 @@ thread_local! {
         stopped_us: std::cell::Cell::new(0),
         overrun: std::cell::RefCell::new(None),
         exec_started_us: std::cell::Cell::new(0),
+        unit_ns: std::cell::Cell::new(0),
+        wall_spent_us: std::cell::Cell::new(0),
+        wall_limit_us: std::cell::Cell::new(0),
     }};
 }
 
@@ -3117,9 +3144,32 @@ fn install_script_js(limit: std::time::Duration, stop: Option<std::time::Duratio
         js.stopped.set(false);
         js.stopped_us.set(0);
         *js.overrun.borrow_mut() = None;
+        js.unit_ns.set(0);
+        js.wall_spent_us.set(0);
+        js.wall_limit_us.set(0);
     });
     script_net::clear_parked_deliveries();
     ScriptJsInstall
+}
+
+/// Units of JavaScript work run on the calling thread so far (wrapping; take the difference of two
+/// readings): the unit `EngineConfig::script_budget_unit_ns` charges (CAPTURE-SCRIPT-BUDGET).
+pub fn js_work_units() -> u64 {
+    rustkit_js::work_units()
+}
+
+/// CAPTURE-SCRIPT-BUDGET: the load budget just installed is charged in units of JavaScript work, as
+/// `config` asks (`EngineConfig::script_budget_unit_ns`); without it, or with the watchdog on, it
+/// stays wall-clock time.
+fn charge_load_script_js_in_work(config: &EngineConfig) {
+    let Some(unit_ns) = config.script_budget_unit_ns.filter(|ns| *ns > 0) else { return };
+    if config.interrupt_scripts_at_budget {
+        return;
+    }
+    SCRIPT_JS.with(|js| {
+        js.unit_ns.set(unit_ns);
+        js.wall_limit_us.set(config.script_budget_wall_backstop_ms.saturating_mul(1000).max(1));
+    });
 }
 
 impl Drop for ScriptJsInstall {
@@ -3127,6 +3177,7 @@ impl Drop for ScriptJsInstall {
         SCRIPT_JS.with(|js| {
             js.limit_us.set(0);
             js.stop_us.set(0);
+            js.unit_ns.set(0);
         });
     }
 }
@@ -3135,7 +3186,9 @@ impl Drop for ScriptJsInstall {
 fn script_js_exhausted() -> bool {
     SCRIPT_JS.with(|js| {
         let limit = js.limit_us.get();
-        limit > 0 && js.spent_us.get() >= limit
+        limit > 0
+            && (js.spent_us.get() >= limit
+                || (js.unit_ns.get() > 0 && js.wall_spent_us.get() >= js.wall_limit_us.get()))
     })
 }
 
@@ -3172,6 +3225,7 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
         js.exec_started_us.set(rustkit_js::mono_us());
     });
     let started = std::time::Instant::now();
+    let units_before = rustkit_js::work_units();
     // A spent budget stops JavaScript; it never takes the watchdog away.
     // A lifecycle step (`DOMContentLoaded`, `load`, the load's timers) and
     // a module supplied late still run once the budget is gone, and a
@@ -3214,7 +3268,17 @@ fn with_script_js<R>(bindings: &DomBindings, body: impl FnOnce() -> R) -> (R, bo
             js.spent_us.set(js.limit_us.get());
             js.stopped_us.set(elapsed_us);
         } else {
-            let spent = js.spent_us.get().saturating_add(elapsed_us);
+            // In units of work when the load asks for it (CAPTURE-SCRIPT-BUDGET), with the real
+            // time kept for the backstop; otherwise in real time.
+            let unit_ns = js.unit_ns.get();
+            let charged = if unit_ns > 0 {
+                let units = rustkit_js::work_units().wrapping_sub(units_before);
+                js.wall_spent_us.set(js.wall_spent_us.get().saturating_add(elapsed_us));
+                units.saturating_mul(unit_ns) / 1000
+            } else {
+                elapsed_us
+            };
+            let spent = js.spent_us.get().saturating_add(charged);
             js.spent_us.set(spent.min(js.limit_us.get()));
         }
     });
@@ -7746,6 +7810,7 @@ impl Engine {
                 None,
                 self.config.interrupt_scripts_at_budget,
             );
+            charge_load_script_js_in_work(&self.config);
             self.advance_load_tail(id).await;
         }
         // The turn that fired `load` ran the load's timer horizon.
@@ -9613,6 +9678,7 @@ impl Engine {
         // callback and microtask drain arms the watchdog on its own; the
         // fetches between them do not.
         let _js = install_script_js(budget, None, self.config.interrupt_scripts_at_budget);
+        charge_load_script_js_in_work(&self.config);
         // Out of the view, except while a safe point lends the engine out
         // between two scripts (LAT15): then the view holds them again, so
         // the window's input reaches the page's listeners.
@@ -11793,6 +11859,7 @@ impl Engine {
         bindings.set_armed_max_job_iterations(armed_microtask_job_cap(&self.config));
         let budget = std::time::Duration::from_millis(self.config.script_budget_ms);
         let _js = install_script_js(budget, None, self.config.interrupt_scripts_at_budget);
+        charge_load_script_js_in_work(&self.config);
 
         // Counted as `fetch_page_scripts` counts them, so `inline#n` names
         // the same element on either path.
@@ -46031,6 +46098,33 @@ row.forEach(function () { row.forEach(function () { spun++; document.getElementB
         let log = engine.script_log(view).unwrap();
         assert_eq!(log[0].outcome, ScriptOutcome::Ran, "{log:#?}");
         assert_eq!(engine.execute_script(view, "spun").unwrap(), "Number(22500.0)");
+    }
+
+    // CAPTURE-SCRIPT-BUDGET: charged in units of work, the budget is spent by what the scripts did
+    // (a call per callback here), not by how long they took; and the real-time backstop still
+    // ends a load whose time went to work the units do not count.
+    #[test]
+    fn a_budget_charged_in_units_of_work_is_spent_by_the_work_and_backed_by_real_time() {
+        let page = "<html><head><script>var spun = 0; var row = new Array(150).fill(0);
+row.forEach(function () { row.forEach(function () { spun++; document.getElementById('p'); }); });</script>
+<script>var after = true;</script></head><body><p>alive</p></body></html>";
+        let port = serve(vec![("/", "text/html", page.to_string())]);
+        let run = |unit_ns: u64, budget_ms: u64, backstop_ms: u64| {
+            let config = EngineConfig {
+                script_budget_ms: budget_ms,
+                script_budget_unit_ns: Some(unit_ns),
+                script_budget_wall_backstop_ms: backstop_ms,
+                ..EngineConfig::default()
+            };
+            let (engine, view, _) = load_timed(config, port);
+            engine.script_log(view).unwrap().iter().map(|r| r.outcome.clone()).collect::<Vec<_>>()
+        };
+        // About 45,000 units (two per inner callback) at 1 ns: 45 us, inside 1 ms however slow the run.
+        assert_eq!(run(1, 1, 60_000), vec![ScriptOutcome::Ran, ScriptOutcome::Ran]);
+        // At 1 ms a unit the first script alone is far past 1 s of budget.
+        assert_eq!(run(1_000_000, 1_000, 60_000), vec![ScriptOutcome::Ran, ScriptOutcome::OverBudget]);
+        // A backstop of 1 ms of real time is spent by the first script, whatever its units.
+        assert_eq!(run(1, 60_000, 1), vec![ScriptOutcome::Ran, ScriptOutcome::OverBudget]);
     }
 
     #[test]

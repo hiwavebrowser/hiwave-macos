@@ -109,6 +109,12 @@ struct Args {
     #[arg(long)]
     script_budget_ms: Option<u64>,
 
+    /// Charge the load's script budget in wall-clock time, as before CAPTURE-SCRIPT-BUDGET, instead
+    /// of in units of JavaScript work. With it, whether a later script runs depends on the machine's
+    /// speed and load. A capture taken with it is not comparable with the board and must be labelled.
+    #[arg(long)]
+    script_budget_wall: bool,
+
     /// The live turn's allowance, in ms (`EngineConfig::live_turn_budget_ms`, 5000 by default): the turn's
     /// whole allowance of script time, so a raised value paces frames differently even when no single
     /// callback is long. A running callback is stopped at 30 s (`LIVE_SCRIPT_STOP_MS`), or at this
@@ -493,6 +499,10 @@ struct ScriptStats {
     over_budget: u32,
     bytes: u64,
     elapsed_ms: u64,
+    /// Units of JavaScript work the load ran (one per function call and per loop back-edge), the
+    /// unit the script budget is charged in (CAPTURE-SCRIPT-BUDGET).
+    #[serde(default)]
+    work_units: u64,
 }
 
 /// What the live loop did after the load (`--live-ms`).
@@ -593,6 +603,15 @@ impl LivePacing {
 /// A/B test settled by `setTimeout`, an entrance reveal) has run by the time ours is taken. The same span on
 /// every run: the page clock in a stepped capture is virtual.
 const STEPPED_SETTLE_MS: u64 = 5_000;
+
+/// What one unit of JavaScript work (a function call or a loop back-edge, `js_work_units`) is charged
+/// as against the load's script budget (CAPTURE-SCRIPT-BUDGET): 0.5 us, so the 5 s budget is 10M
+/// units. Measured on Windows (2026-11-27, release build): the real-site board's top 20 ran their
+/// scripts at 0.24 to 3.5 us of script time a unit, median 0.60 (sites whose time goes to layout
+/// and native work, not counted, are dearer); walmart's offline replay at 0.89. The Mac is faster a
+/// unit, so the budget is set a little below the Windows median: on a median site it allows about
+/// what 5 s of real time did. The units of one page agree within 0.05% at any speed.
+const SCRIPT_WORK_UNIT_NS: u64 = 500;
 
 /// The most real time a stepped settle may take: the reference's own wait (5 s of real time). A settle
 /// whose turns are slow (a page that relays itself out on every step, at up to a second a turn) stops
@@ -1167,9 +1186,11 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             );
         }
         let load_began = Instant::now();
+        let units_before = rustkit_engine::js_work_units();
         if let Err(e) = rt.block_on(engine.load_url(view_id, url)) {
             return result.failed("error", format!("Failed to load URL: {:?}", e));
         }
+        let load_units = rustkit_engine::js_work_units().wrapping_sub(units_before);
         // The engine shows a server's error page as the page, which is what
         // the app's user should see. A capture is of the site, not of its
         // error page: it fails as it did when the engine refused the
@@ -1231,7 +1252,7 @@ fn capture(args: &Args, sink: Option<&CollectingSink>, inspector: &mut Option<Ar
             }
         }
         if let Some(log) = engine.script_log(view_id) {
-            result.script_stats = Some(script_stats(log));
+            result.script_stats = Some(ScriptStats { work_units: load_units, ..script_stats(log) });
             if let Some(ref path) = args.dump_scripts {
                 if let Err(e) = fs::write(path, script_log_json(log).to_string()) {
                     error!("Failed to write script log: {:?}", e);
@@ -2001,6 +2022,7 @@ fn script_stats(log: &[ScriptRecord]) -> ScriptStats {
         over_budget: 0,
         bytes: 0,
         elapsed_ms: 0,
+        work_units: 0,
     };
     for record in log {
         match record.outcome {
@@ -2443,6 +2465,12 @@ fn capture_config(args: &Args, replay_proxy: Option<Url>) -> EngineConfig {
     }
     if let Some(budget) = args.script_budget_ms {
         config.script_budget_ms = budget;
+    }
+    // The load's script budget in units of JavaScript work, not real time (CAPTURE-SCRIPT-BUDGET),
+    // unless asked for real time: a capture's later scripts then run or not by what the earlier ones
+    // did, whatever the machine's speed or load.
+    if !args.script_budget_wall {
+        config.script_budget_unit_ns = Some(SCRIPT_WORK_UNIT_NS);
     }
     if let Some(budget) = args.live_turn_budget_ms {
         config.live_turn_budget_ms = budget;
@@ -2971,6 +2999,15 @@ mod tests {
             config.timer_horizon_ms,
             EngineConfig::for_parity_testing().timer_horizon_ms
         );
+    }
+
+    // CAPTURE-SCRIPT-BUDGET: a capture charges the load's script budget in units of JavaScript work;
+    // `--script-budget-wall` takes the real-time budget back. The app's config stays on real time.
+    #[test]
+    fn a_capture_charges_its_script_budget_in_units_of_work_unless_asked_for_real_time() {
+        assert_eq!(capture_config(&parsed(&[]), None).script_budget_unit_ns, Some(SCRIPT_WORK_UNIT_NS));
+        assert_eq!(capture_config(&parsed(&["--script-budget-wall"]), None).script_budget_unit_ns, None);
+        assert_eq!(EngineConfig::default().script_budget_unit_ns, None);
     }
 
     fn write_file(dir: &Path, rel: &str, content: &str) {
@@ -3796,6 +3833,63 @@ Connection: close
             stats.wall_ms <= SETTLE_REAL_BUDGET.as_millis() as u64,
             "a turn started that ended past the budget: {stats:?}"
         );
+    }
+
+    /// CAPTURE-SCRIPT-BUDGET: whether a page's later scripts run must not depend on how fast the
+    /// machine is. Walmart (2026-11-26, offline HAR): its scripts took 3.7 s on an idle machine, so
+    /// its header scripts ran, and 5.3 to 11 s with the memo off or every core busy, so they were
+    /// over the 5 s budget and its frame changed. Here both pages run the same script, 40 style
+    /// writes each followed by a layout read, then a second script. On `/heavy` each layout is of
+    /// 1,500 paragraphs, so the first script takes far longer in real time while running the same
+    /// JavaScript, as a slower or busier machine takes longer for the same page. The second script
+    /// runs on both.
+    #[test]
+    fn whether_a_later_script_runs_does_not_depend_on_how_long_the_earlier_one_took() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = reader.read_line(&mut line);
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                            break;
+                        }
+                    }
+                    let paragraphs = if line.contains("/heavy") { 1_500 } else { 1 };
+                    let body = format!(
+                        "<html><body>{}<script>var w = 0; for (var i = 0; i < 40; i++) {{ document.body.style.width = (600 + i % 2) + 'px'; w += document.body.offsetWidth; }}</script><script>document.title = 'second script ran';</script></body></html>",
+                        "<p>some words in a paragraph</p>".repeat(paragraphs)
+                    );
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        let mut took = Vec::new();
+        for page in ["light", "heavy"] {
+            let url = format!("http://127.0.0.1:{port}/{page}");
+            let args =
+                Args::try_parse_from(["parity-capture", "--url", url.as_str(), "--script-budget-ms", "300"]).unwrap();
+            let result = run_capture(&args);
+            assert_eq!(result.status, "ok", "{page}: {:?}", result.error);
+            let stats = result.script_stats.as_ref().expect("a URL capture reports its scripts");
+            took.push((page, stats.elapsed_ms));
+            assert_eq!(
+                (stats.ran, stats.over_budget),
+                (2, 0),
+                "{page}: the second script's fate depended on the first one's real time ({took:?})"
+            );
+        }
     }
 
     /// A settle cut short must not freeze a page part-way through its own reveal (batch 75's A/B:
