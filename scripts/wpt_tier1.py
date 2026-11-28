@@ -187,6 +187,10 @@ ROOT_ABS_ATTR_RE = re.compile(
     r"((?<![\w-])(?:href|src)\s*=\s*)(?:([\"'])(/(?!/)[^\"']*)\2|(/(?!/)[^\s\"'>]+))", re.IGNORECASE
 )
 ROOT_ABS_URL_RE = re.compile(r"(url\(\s*[\"']?)(/(?!/)[^\"')]*)([\"']?\s*\))", re.IGNORECASE)
+# `@import "x.css" [media];` or `@import url(x.css) [media];` (WPT-AHEM-LOCAL).
+IMPORT_RE = re.compile(
+    r"@import\s+(?:url\(\s*([\"']?)([^\"')]+)\1\s*\)|([\"'])([^\"']+)\3)\s*([^;]*);", re.IGNORECASE
+)
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 STYLE_ELEMENT_RE = re.compile(r"<style\b.*?</style\s*>", re.IGNORECASE | re.DOTALL)
 SHEET_LINK_RE = re.compile(r"""<link\b(?:[^>"']|"[^"]*"|'[^']*')*>""", re.IGNORECASE)
@@ -281,6 +285,31 @@ def stage_html(src: Path) -> Path:
     return _staged_once(src, _stage_html)
 
 
+def _inline_imports(text: str, base_dir: Path, seen=()) -> str:
+    """Replace each local `@import` with the imported sheet's own staged text.
+
+    The capture loads a page with `--html-file`, which never fetches a
+    subresource: parity-capture inlines `<link rel=stylesheet>` itself, but an
+    `@import` was left as written and its sheet never loaded. letter-spacing-200
+    and its reference import /fonts/ahem.css that way, so both rendered without
+    Ahem. A sheet's rules take the @import's place (an @import comes before any
+    other rule, so the order holds); a media list wraps them in `@media`.
+    """
+    def inline(m):
+        url = (m.group(2) or m.group(4)).strip()
+        if not _is_local(url):
+            return m.group(0)
+        target = _local_target(url, base_dir, WPT_ROOT)
+        if target.suffix.lower() != ".css" or not target.is_file() or target in seen:
+            return m.group(0)
+        css = _stage_css_locked(target).read_text(errors="replace")
+        css = _inline_imports(css, target.parent, seen + (target,))
+        media = m.group(5).strip()
+        return f"@media {media} {{\n{css}\n}}" if media else css
+
+    return IMPORT_RE.sub(inline, text)
+
+
 def _stage_css(src: Path) -> Path:
     """Copy a CSS file beside itself with root-absolute url(...) values resolved."""
     staged = src.with_name(src.stem + STAGED_SUFFIX + src.suffix)
@@ -288,6 +317,7 @@ def _stage_css(src: Path) -> Path:
         lambda m: m.group(1) + str(WPT_ROOT / m.group(2).lstrip("/")) + m.group(3),
         src.read_text(errors="replace"),
     )
+
     staged.write_text(css)
     return staged
 
@@ -307,6 +337,7 @@ def _stage_html(src: Path) -> Path:
     html = ROOT_ABS_URL_RE.sub(
         lambda m: m.group(1) + str(WPT_ROOT / m.group(2).lstrip("/")) + m.group(3), html
     )
+    html = _inline_imports(html, src.parent)
     staged = src.with_name(src.stem + STAGED_SUFFIX + src.suffix)
     staged.write_text(html)
     return staged
