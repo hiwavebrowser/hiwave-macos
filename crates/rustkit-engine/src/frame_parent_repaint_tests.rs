@@ -28,7 +28,7 @@ fn a_parent_is_repainted_not_relaid_out_when_only_its_frame_changed() {
     let view = engine.create_headless_view(Bounds { x: 0, y: 0, width: 400, height: 300 }).expect("view");
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(engine.load_url(view, Url::parse(&format!("http://127.0.0.1:{}/", server.port)).unwrap())).unwrap();
-    let turn = |engine: &mut Engine| {
+    let mut turn = |engine: &mut Engine| {
         std::thread::sleep(Duration::from_millis(20));
         rt.block_on(engine.pump_live(view, 20));
     };
