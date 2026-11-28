@@ -50103,8 +50103,9 @@ pub(crate) fn splices_for_test() -> (usize, String) {
     (SPLICES.with(std::cell::Cell::get), LAST_SPLICE_MISS.with(|m| m.borrow().clone()))
 }
 
-/// Children this thread's restyle builds have skipped and recorded so far (tests).
-#[cfg(test)]
+/// Children this thread's restyle builds have skipped and recorded so far (tests). Its only
+/// reader is `box_splice_style_tests`, a headless module.
+#[cfg(all(test, feature = "headless"))]
 pub(crate) fn skipped_siblings_for_test() -> usize {
     SKIPPED_SIBLINGS.with(std::cell::Cell::get)
 }
