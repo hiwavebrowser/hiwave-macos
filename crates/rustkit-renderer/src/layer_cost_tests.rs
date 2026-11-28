@@ -136,24 +136,50 @@ fn fifty_opacity_layers_are_submitted_once() {
 }
 
 /// LAT13: 50 opacity layers in a 400x300 view took 15.3 ms a frame in a
-/// debug build (11.2 ms release) with four submits and four passes each;
-/// now about 0.4 ms more than none in a debug build. The bound is loose on
-/// purpose (a debug build on a loaded machine): it catches a return to a
-/// pass per layer, not a small slowdown.
+/// debug build (11.2 ms release) with four submits and four passes each.
+/// The test catches a return to a pass per layer, not a small slowdown, so
+/// it times that path too, in the same run on the same adapter, and bounds
+/// the ratio between them.
+///
+/// HOSTED-LAYER-BUDGET: the bound was absolute (50 layers within 4 ms of
+/// none), and GitHub's hosted macOS runner (debug, shared GPU) took 8.83 ms
+/// against 3.96 ms. A ratio to the frame with none does not hold either: on
+/// lavapipe (debug) the current path is 3.1-3.7x none while a pass per
+/// layer is 79-94x, and on the hosted runner none was large enough that a
+/// pass per layer might be only a few times it. The current path against
+/// the pass-per-layer path is what the test is about, and it stays far
+/// apart: lavapipe (debug) 0.72 vs 18.2 ms, 25x; Apple M (release, the
+/// numbers above) 1.6 vs 11.2 ms, 7x.
 #[test]
-fn fifty_opacity_layers_fit_a_frame_budget() {
+fn fifty_opacity_layers_cost_far_less_than_a_pass_per_layer() {
     let Some(gpu) = gpu() else {
-        eprintln!("SKIP fifty_opacity_layers_fit_a_frame_budget: no GPU adapter");
+        eprintln!("SKIP fifty_opacity_layers_cost_far_less_than_a_pass_per_layer: no GPU adapter");
         return;
     };
-    let (ms, _) = frame_ms(&gpu, &opacity_page(50), 21);
+    let list = opacity_page(50);
+    let (ms, _) = frame_ms(&gpu, &list, 21);
+    let pass_per_layer = way_frame_ms(&gpu, &list, Way::PassPerLayer, 21);
     let (base, _) = frame_ms(&gpu, &opacity_page(0), 21);
-    println!("50 layers {ms:.3} ms/frame, none {base:.3} ms/frame");
-    assert!(ms < base + BUDGET_MS, "50 opacity layers took {ms:.3} ms/frame (none: {base:.3} ms)");
+    println!("50 layers {ms:.3} ms/frame, a pass per layer {pass_per_layer:.3} ms/frame, none {base:.3} ms/frame");
+    assert!(
+        ms * PASS_PER_LAYER_RATIO < pass_per_layer,
+        "50 opacity layers took {ms:.3} ms/frame, not {PASS_PER_LAYER_RATIO}x under a pass per layer \
+         ({pass_per_layer:.3} ms; none {base:.3} ms)"
+    );
 }
 
-/// What 50 layers may add to a frame with none, in a debug build.
-const BUDGET_MS: f64 = 4.0;
+/// How many times faster than a pass per layer 50 layers must be drawn.
+const PASS_PER_LAYER_RATIO: f64 = 3.0;
+
+/// [`frame_ms`] for a renderer drawing `way`.
+fn way_frame_ms(gpu: &Gpu, list: &[DisplayCommand], way: Way, frames: usize) -> f64 {
+    let mut r = case_renderer(gpu, (VIEW_W, VIEW_H), way, false, (0.0, 0.0));
+    let (_texture, view) = screenshot::create_offscreen_target(&gpu.device, VIEW_W, VIEW_H, FORMAT);
+    for _ in 0..5 {
+        time_frame(gpu, &mut r, &view, list);
+    }
+    median((0..frames).map(|_| time_frame(gpu, &mut r, &view, list)).collect())
+}
 
 
 fn text(s: &str, x: f32, y: f32, color: Color) -> DisplayCommand {
@@ -594,3 +620,4 @@ fn idle_layer_slots_are_dropped_and_come_back_alike() {
     assert_eq!(r.layer_slots[0].len(), LAYER_SLOTS_PER_DEPTH, "made again when needed");
     assert_eq!(differing_bytes(&first, &back), 0, "the same frame after the slots came back");
 }
+
