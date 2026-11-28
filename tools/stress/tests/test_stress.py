@@ -20,10 +20,14 @@ sys.path.insert(0, str(HERE))
 import run  # noqa: E402
 
 
-def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0, budget=None):
+def record(tmp, suite, label, score, n, status="ok", partial=False, load=2.0, budget=None, low_fps=None, complexity=None):
     r = {"schema": 1, "suite": suite, "engine": "hiwave", "label": label, "status": status, "score": score,
          "partial": partial, "binary_sha1": label * 5, "suite_sha": "0" * 40, "wall_s": 60.0,
          "load_avg_before": [load, 2.0, 2.0], "sub_scores": {}, "live_turn_budget_ms": budget}
+    if low_fps is not None:
+        # reporter.js's MotionMark frames: the ramp's complexity steps, lowest first.
+        r["frames"] = {"Multiply": {"steps": [{"from": 1, "to": 5, "fps": low_fps}, {"from": 5, "to": 40, "fps": low_fps - 5}]}}
+        r["complexity"] = complexity
     (tmp / ("%s_%s_%d.json" % (suite, label, n))).write_text(json.dumps(r))
 
 
@@ -986,3 +990,42 @@ def test_frame_spares_read_the_engines_last_running_total(tmp_path):
     none.write_text("no spares here\n")
     assert run.log_spares(none) == {"built": 0, "ms": 0.0}
     assert run.log_spares(tmp_path / "missing.log") is None
+
+
+# FRAME-FLOOR-HEADLESS: MotionMark's ramp score is the knee of a frame-time-vs-complexity fit around the
+# 60 fps target. When the ramp's lowest-complexity samples (reporter.js's first complexity bin) are already
+# below the target, the fit has no at-target segment, and the score lands at either end (1 or ~220 on the
+# same binary). Such a run is not a score.
+def test_a_motionmark_ramp_below_target_fps_is_not_a_score(tmp_path):
+    for i, s in enumerate([1.0, 223.0, 210.0]):
+        record(tmp_path, "motionmark", "base", s, i, low_fps=45.7)
+    for i, s in enumerate([220.0, 221.0, 222.0]):
+        record(tmp_path, "motionmark", "cand", s, i, low_fps=45.0)
+    code, rows = compare(tmp_path)
+    r = rows["motionmark"]
+    assert code == 1 and r["verdict"].startswith("NOT AT TARGET FPS"), rows
+    assert r["base"]["not_at_target"] == 3 and "median" not in r["base"], rows
+
+
+def test_a_motionmark_ramp_at_target_fps_still_compares(tmp_path):
+    for i, s in enumerate([220.0, 221.0, 222.0]):
+        record(tmp_path, "motionmark", "base", s, i, low_fps=59.5)
+        record(tmp_path, "motionmark", "cand", s, i + 10, low_fps=60.0)
+    code, rows = compare(tmp_path)
+    assert code == 0 and rows["motionmark"]["verdict"] == "within noise", rows
+
+
+def test_a_fixed_complexity_motionmark_run_is_not_flagged(tmp_path):
+    for i, s in enumerate([30.0, 30.5, 31.0]):
+        record(tmp_path, "motionmark", "base", s, i, low_fps=30.0, complexity=100)
+        record(tmp_path, "motionmark", "cand", s, i + 10, low_fps=30.0, complexity=100)
+    code, rows = compare(tmp_path)
+    assert code == 0 and rows["motionmark"]["verdict"] == "within noise", rows
+
+
+def test_the_table_says_not_at_target_fps_instead_of_a_score(tmp_path):
+    for i, s in enumerate([1.0, 223.0, 150.0]):
+        record(tmp_path, "motionmark", "base", s, i, low_fps=19.0)
+    p = subprocess.run([sys.executable, str(HERE / "report.py"), str(tmp_path)], capture_output=True, text=True)
+    line = [l for l in p.stdout.splitlines() if l.startswith("motionmark")][0]
+    assert "not at target fps" in line and "223" not in line, p.stdout
