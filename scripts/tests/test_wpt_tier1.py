@@ -178,6 +178,34 @@ class Unquoted(unittest.TestCase):
             self.assertIn(str(wpt_tier1.WPT_ROOT / "fonts/absent.css"), staged)
             self.assertIn(str(wpt_tier1.WPT_ROOT / "x.png"), staged)
 
+    def test_an_imported_sheet_is_inlined_into_the_staged_page(self):
+        # WPT-AHEM-LOCAL: the capture (`--html-file`) never fetches a subresource, and
+        # parity-capture inlines only <link rel=stylesheet>. letter-spacing-200 and its reference
+        # `@import "/fonts/ahem.css"`, so Ahem never loaded and both rendered in a fallback font.
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            (root / "fonts").mkdir()
+            (root / "css/support").mkdir(parents=True)
+            (root / "fonts/ahem.css").write_text("@font-face { font-family: Ahem; src: url(/fonts/Ahem.ttf) }")
+            (root / "css/support/inner.css").write_text("p { color: green }")
+            (root / "css/support/sheet.css").write_text("@import 'inner.css';\nq { color: blue }")
+            page = root / "css/t.html"
+            page.write_text(
+                "<style>\n  @import \"/fonts/ahem.css\";\n  @import url(support/sheet.css) print;\n"
+                "  @import \"https://example.test/x.css\";\n  div { font: 20px Ahem }\n</style>"
+            )
+            with mock.patch.object(wpt_tier1, "WPT_ROOT", root):
+                html = wpt_tier1.stage_html(page).read_text()
+            # The font sheet's rule takes the import's place, with its url() resolved.
+            self.assertNotIn("/fonts/ahem.css", html)
+            self.assertIn("@font-face { font-family: Ahem; src: url(%s) }" % (root / "fonts/Ahem.ttf"), html)
+            # A relative import with a media list, and the sheet's own import, inlined in order.
+            self.assertIn("@media print {\n", html)
+            self.assertLess(html.index("p { color: green }"), html.index("q { color: blue }"))
+            # A remote import is left alone, and the page's own rules follow the inlined ones.
+            self.assertIn('@import "https://example.test/x.css";', html)
+            self.assertLess(html.index("color: blue"), html.index("div { font: 20px Ahem }"))
+
     def test_unquoted_fonts_href_declares_a_web_font(self):
         self.assertTrue(wpt_tier1.webfont_dependent("<link rel=stylesheet href=/fonts/ahem.css>", ""))
         self.assertTrue(wpt_tier1.webfont_dependent("<meta name=flags content=ahem>", ""))
