@@ -950,6 +950,8 @@ mod leaving_input_tests;
 #[cfg(all(test, feature = "headless"))]
 mod letter_spacing_break_tests;
 #[cfg(all(test, feature = "headless"))]
+mod letter_spacing_edges_tests;
+#[cfg(all(test, feature = "headless"))]
 mod live_timer_slice_tests;
 #[cfg(all(test, feature = "headless"))]
 mod clock_chain_live_tests;
